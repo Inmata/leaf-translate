@@ -19,7 +19,7 @@ namespace Leaf
         private long historyEpoch = 1;
         private readonly HashSet<string> tombstones = new HashSet<string>(StringComparer.Ordinal);
         private readonly List<FailedWrite> failedWrites = new List<FailedWrite>();
-        private readonly List<long> failedSettingsIds = new List<long>();
+        private readonly List<FailedSettings> failedSettings = new List<FailedSettings>();
         public Settings Settings { get { lock (sync) return settings; } }
         public string Warning { get; private set; }
         public bool RecoveryBlocked { get; private set; }
@@ -39,6 +39,12 @@ namespace Leaf
             public string Id;
             public long Epoch;
             public long QueueId;
+        }
+
+        private sealed class FailedSettings
+        {
+            public long QueueId;
+            public string Scope;
         }
 
         public LocalStore(string directory) : this(directory, new PhysicalStoreFiles()) { }
@@ -119,16 +125,23 @@ namespace Leaf
                         if (batch.ExternalRollbackPending) ExternalRollbackPending = true;
                     }
                 } catch (Exception) {
-                    lock (sync) failedSettingsIds.Add(queueId);
+                    lock (sync) failedSettings.Add(new FailedSettings { QueueId = queueId, Scope = update.Scope });
                     throw;
                 }
-                // A successful settings commit fully supersedes every earlier settings
-                // failure; history failures keep their own operation identity and are not touched.
-                lock (sync) {
-                    foreach (long id in failedSettingsIds) queue.AcknowledgeFailure(id);
-                    failedSettingsIds.Clear();
-                }
+                // Only a commit in the same patch scope/target supersedes the matching failure;
+                // an unrelated success leaves the lost user configuration unresolved.
+                AcknowledgeSettingsFailures(update.Scope);
             });
+        }
+
+        private void AcknowledgeSettingsFailures(string scope)
+        {
+            List<long> resolved;
+            lock (sync) {
+                resolved = failedSettings.Where(item => item.Scope == scope).Select(item => item.QueueId).ToList();
+                failedSettings.RemoveAll(item => item.Scope == scope);
+            }
+            foreach (long id in resolved) queue.AcknowledgeFailure(id);
         }
 
         private void AcknowledgeHistoryFailures(List<FailedWrite> items)

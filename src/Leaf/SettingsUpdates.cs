@@ -9,7 +9,10 @@ namespace Leaf
     public sealed class SettingsUpdate
     {
         private readonly Func<Settings, Settings> apply;
-        private SettingsUpdate(Func<Settings, Settings> update) { apply = update; }
+        // Identifies the patch scope and target so only a real retry of the same change can
+        // acknowledge that change's failure; an unrelated successful save must not hide it.
+        public string Scope { get; private set; }
+        private SettingsUpdate(string scope, Func<Settings, Settings> update) { Scope = scope; apply = update; }
 
         public Settings Build(Settings latest)
         {
@@ -21,7 +24,7 @@ namespace Leaf
         public static SettingsUpdate Preferences(Settings value)
         {
             var captured = Json.Copy(value);
-            return new SettingsUpdate(s => {
+            return new SettingsUpdate("preferences", s => {
                 var p = Json.Copy(captured);
                 s.TargetLanguage = p.TargetLanguage;
                 s.Scene = p.Scene; s.SceneDetail = p.SceneDetail; s.SceneDetails = p.SceneDetails;
@@ -37,7 +40,10 @@ namespace Leaf
         public static SettingsUpdate Provider(ProviderProfile value)
         {
             var captured = Json.Copy(value);
-            return new SettingsUpdate(s => {
+            string scope;
+            try { scope = "provider:" + captured.Id + ":" + LlmClient.Endpoint(captured.BaseUrl).AbsoluteUri; }
+            catch { scope = "provider:" + captured.Id; }
+            return new SettingsUpdate(scope, s => {
                 var p = Json.Copy(captured); LlmClient.ValidateProfile(p);
                 int index = s.Providers.FindIndex(x => x.Id == p.Id);
                 if (index < 0) s.Providers.Add(p); else s.Providers[index] = p;
@@ -47,7 +53,7 @@ namespace Leaf
 
         public static SettingsUpdate Model(string id, string model)
         {
-            return new SettingsUpdate(s => {
+            return new SettingsUpdate("model:" + id, s => {
                 var p = s.Providers.First(x => x.Id == id);
                 p.Model = model; s.ProviderId = id;
                 if (LlmClient.IsGlm53(p) && p.ThinkingMode == "disabled")
@@ -60,7 +66,7 @@ namespace Leaf
         public static SettingsUpdate Placement(WindowPlacement value)
         {
             var captured = Json.Copy(value);
-            return new SettingsUpdate(s => { s.Placement = Json.Copy(captured); return s; });
+            return new SettingsUpdate("placement", s => { s.Placement = Json.Copy(captured); return s; });
         }
 
         // Compatibility entry for imperative tests and the synchronous wrapper. UI flows
@@ -68,7 +74,7 @@ namespace Leaf
         public static SettingsUpdate Full(Settings value)
         {
             var captured = Json.Copy(value);
-            return new SettingsUpdate(s => Json.Copy(captured));
+            return new SettingsUpdate("settings", s => Json.Copy(captured));
         }
     }
 }

@@ -31,6 +31,7 @@ public static class StorageRegressionTests
         await CredentialAndPatchScenarios(folder);
         await QueueScenarios();
         await QueueResolutionScenarios(folder);
+        await SettingsFailureScopeScenarios(folder);
         await StructureScenarios(folder);
         await ByteLimitRegression(folder);
         await HistoryScenarios(folder);
@@ -542,6 +543,55 @@ public static class StorageRegressionTests
         try { await deleteClearStore.FlushAsync(); } catch (UserError) { deleteClearFlushed = false; }
         Check(deleteClearFlushed, "A later successful clear confirms a failed delete instead of replaying it");
         Check(new LocalStore(deleteClear).History("").Count == 0, "The cleared record cannot be resurrected by a retry");
+    }
+
+    // A successful settings commit acknowledges only failures in the same patch scope and
+    // target; an unrelated save must not hide a provider/model/key change that was lost.
+    private static async Task SettingsFailureScopeScenarios(string folder)
+    {
+        string directory = NewDirectory(folder, "settings-scope");
+        var files = new FaultingFiles();
+        var store = new LocalStore(directory, files);
+        await store.SaveSettingsAsync(SettingsUpdate.Full(
+            FixtureSettings("fixture", "https://old-api.invalid/v1", "fixture-model")));
+        await store.FlushAsync();
+
+        var newProvider = new ProviderProfile { Id = "fixture", Name = "Fixture",
+            BaseUrl = "https://new-api.invalid/v1", Model = "fixture-model" };
+        files.MatchingCalls = 0; files.FailOperation = "Replace"; files.FailAt = 1;
+        bool providerFailed = false;
+        try { await store.SaveSettingsAsync(SettingsUpdate.Provider(newProvider)); }
+        catch (UserError) { providerFailed = true; }
+        Check(providerFailed, "A provider commit fault is reported before any retry");
+
+        files.MatchingCalls = 0; files.FailAt = -1;
+        await store.SaveSettingsAsync(SettingsUpdate.Placement(
+            new WindowPlacement { X = 5, Y = 6, Width = 456, Height = 620, Screen = "scope" }));
+        bool providerPending = false;
+        try { await store.FlushAsync(); } catch (UserError) { providerPending = true; }
+        Check(providerPending, "An unrelated successful placement cannot acknowledge the failed provider commit");
+
+        files.MatchingCalls = 0;
+        await store.SaveSettingsAsync(SettingsUpdate.Provider(newProvider));
+        bool providerResolved = true;
+        try { await store.FlushAsync(); } catch (UserError) { providerResolved = false; }
+        Check(providerResolved, "A same-target provider retry acknowledges that provider failure");
+
+        files.MatchingCalls = 0; files.FailOperation = "Replace"; files.FailAt = 1;
+        bool modelFailed = false;
+        try { await store.SaveSettingsAsync(SettingsUpdate.Model("fixture", "scope-model")); }
+        catch (UserError) { modelFailed = true; }
+        Check(modelFailed, "A model commit fault is reported before any retry");
+        files.MatchingCalls = 0; files.FailAt = -1;
+        var preferences = Json.Copy(store.Settings); preferences.TargetLanguage = "日本語";
+        await store.SaveSettingsAsync(SettingsUpdate.Preferences(preferences));
+        bool modelPending = false;
+        try { await store.FlushAsync(); } catch (UserError) { modelPending = true; }
+        Check(modelPending, "An unrelated successful preferences commit cannot acknowledge the failed model commit");
+        await store.SaveSettingsAsync(SettingsUpdate.Model("fixture", "scope-model"));
+        bool modelResolved = true;
+        try { await store.FlushAsync(); } catch (UserError) { modelResolved = false; }
+        Check(modelResolved, "A same-provider model retry acknowledges that model failure");
     }
 
     private static async Task CredentialAndPatchScenarios(string folder)
