@@ -4,6 +4,7 @@ $script:PublicSourceRoots = @('.github', '.gitignore', 'AGENTS.md', 'README.md',
 # material, a transaction marker or a build product and must never be published.
 $script:PrivateDirectoryNames = @('.git', '.hg', '.svn', '.vs', 'work', 'bin', 'obj', 'dist', 'logs', 'node_modules', 'TestResults')
 $script:PrivateFileNamePatterns = @(
+    '^\.(git|hg|svn)$',
     '^(settings|history)\.json([.-].*)?$',
     '^store-transaction\.json([.-].*)?$',
     '^\.env($|\.)',

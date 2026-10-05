@@ -106,6 +106,14 @@ function Write-Utf8Text {
     [IO.File]::WriteAllText($Path, $Content, $encoding)
 }
 
+function Read-ConsoleText {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return '' }
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    $utf8 = New-Object System.Text.UTF8Encoding($false, $true)
+    try { return $utf8.GetString($bytes) } catch { return [Text.Encoding]::Default.GetString($bytes) }
+}
+
 function Write-Utf8Json {
     param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)]$Object)
     Write-Utf8Text -Path $Path -Content ($Object | ConvertTo-Json -Depth 8)

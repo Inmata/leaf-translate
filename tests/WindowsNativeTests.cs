@@ -51,6 +51,7 @@ public static class WindowsNativeTests
         settings.ProviderId = settings.Providers[0].Id;
         store.SaveSettings(settings);
         string sampleKey = "Leaf fake credential fixture 中文";
+        var credentialScopes = settings.Providers.Select(p => p.Id).ToList();
         try {
             using (var transport = new FixtureTransport())
             using (var shell = new AppShell(store, true, new LlmClient(transport))) {
@@ -187,9 +188,10 @@ public static class WindowsNativeTests
                 shell.HidePopup();
             }
         } finally {
-            foreach (var provider in settings.Providers) Credentials.Delete(provider.Id);
-            foreach (var provider in settings.Providers) {
-                Console.WriteLine("NATIVE-EVIDENCE cleanup provider=" + provider.Id + " credential_present=" + (Credentials.Read(provider.Id) == "" ? "false" : "true"));
+            foreach (var scope in credentialScopes) Console.WriteLine("NATIVE-EVIDENCE touched provider=" + scope);
+            foreach (var scope in credentialScopes) Credentials.Delete(scope);
+            foreach (var scope in credentialScopes) {
+                Console.WriteLine("NATIVE-EVIDENCE cleanup provider=" + scope + " credential_present=" + (Credentials.Read(scope) == "" ? "false" : "true"));
             }
         }
     }

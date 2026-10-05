@@ -43,22 +43,56 @@ try {
 Write-Utf8Text -Path (Join-Path $evidenceRoot 'native.log') -Content (($output | ForEach-Object { $_ }) -join "`r`n")
 Write-Utf8Text -Path (Join-Path $evidenceRoot 'native.exitcode') -Content ([string]$nativeExit)
 
+# Only machine-generated GUID fixture scopes may satisfy cleanup verification; a real
+# provider name or an arbitrary string can never be accepted as fake evidence.
+$fixtureProviderPattern = '^regression-[0-9a-fA-F]{32}(-|/|$)'
+$touched = New-Object System.Collections.ArrayList
 $cleanup = New-Object System.Collections.ArrayList
 foreach ($line in $output) {
-    $match = [regex]::Match($line, '^NATIVE-EVIDENCE cleanup provider=(\S+) credential_present=(true|false)\s*$')
-    if ($match.Success) {
+    $touchedMatch = [regex]::Match($line, '^NATIVE-EVIDENCE touched provider=(\S+)\s*$')
+    if ($touchedMatch.Success) { [void]$touched.Add($touchedMatch.Groups[1].Value); continue }
+    $cleanupMatch = [regex]::Match($line, '^NATIVE-EVIDENCE cleanup provider=(\S+) credential_present=(true|false)\s*$')
+    if ($cleanupMatch.Success) {
         [void]$cleanup.Add([pscustomobject]@{
-            provider = $match.Groups[1].Value
-            credential_present = ($match.Groups[2].Value -eq 'true')
+            provider = $cleanupMatch.Groups[1].Value
+            credential_present = ($cleanupMatch.Groups[2].Value -eq 'true')
         })
     }
 }
-$cleanupVerified = ($cleanup.Count -gt 0) -and (@($cleanup | Where-Object { $_.credential_present }).Count -eq 0)
+
+$invalidProviders = New-Object System.Collections.ArrayList
+foreach ($provider in @($touched) + @($cleanup | ForEach-Object { $_.provider })) {
+    if ($provider -notmatch $fixtureProviderPattern -and -not $invalidProviders.Contains($provider)) {
+        [void]$invalidProviders.Add($provider)
+    }
+}
+$touchedSet = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+$duplicateTouched = $false
+foreach ($provider in $touched) { if (-not $touchedSet.Add($provider)) { $duplicateTouched = $true } }
+$cleanupSet = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)
+$duplicateCleanup = $false
+foreach ($entry in $cleanup) { if (-not $cleanupSet.Add($entry.provider)) { $duplicateCleanup = $true } }
+$missingCleanup = @($touchedSet | Where-Object { -not $cleanupSet.Contains($_) } | Sort-Object)
+$undeclaredCleanup = @($cleanupSet | Where-Object { -not $touchedSet.Contains($_) } | Sort-Object)
+$presentCredentials = @($cleanup | Where-Object { $_.credential_present } | ForEach-Object { $_.provider } | Sort-Object)
+
+$problems = New-Object System.Collections.ArrayList
+if ($touched.Count -eq 0) { [void]$problems.Add('no GUID fixture credential scopes were declared') }
+if ($invalidProviders.Count -gt 0) { [void]$problems.Add('non-GUID fixture providers: ' + (($invalidProviders | Sort-Object) -join ', ')) }
+if ($duplicateTouched -or $duplicateCleanup) { [void]$problems.Add('duplicate credential scope entries') }
+if ($missingCleanup.Count -gt 0) { [void]$problems.Add('declared scopes without cleanup evidence: ' + ($missingCleanup -join ', ')) }
+if ($undeclaredCleanup.Count -gt 0) { [void]$problems.Add('cleanup evidence for undeclared scopes: ' + ($undeclaredCleanup -join ', ')) }
+if ($presentCredentials.Count -gt 0) { [void]$problems.Add('credentials still present after cleanup: ' + ($presentCredentials -join ', ')) }
+$cleanupVerified = ($problems.Count -eq 0)
 $wrapperExit = $nativeExit
 $evidenceProblem = $null
-if ($nativeExit -eq 0 -and -not $cleanupVerified) {
-    $wrapperExit = 3
-    $evidenceProblem = 'Native checks passed but no GUID fake-credential cleanup evidence was recorded.'
+if (-not $cleanupVerified) {
+    $evidenceProblem = if ($nativeExit -eq 0) {
+        'Native checks passed but credential cleanup was not verified: ' + ($problems -join '; ') + '.'
+    } else {
+        'Native checks failed and credential cleanup was not verified: ' + ($problems -join '; ') + '.'
+    }
+    if ($nativeExit -eq 0) { $wrapperExit = 3 }
 }
 
 $record = [pscustomobject]@{
@@ -73,8 +107,10 @@ $record = [pscustomobject]@{
     ended_at = (Get-Date).ToUniversalTime().ToString('o')
     native_exit_code = $nativeExit
     wrapper_exit_code = $wrapperExit
+    touched_scopes = @($touched)
     credential_cleanup = @($cleanup)
     credential_cleanup_verified = $cleanupVerified
+    invalid_providers = @($invalidProviders)
     launch_error = $launchError
     evidence_problem = $evidenceProblem
     log = 'native.log'
