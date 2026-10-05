@@ -188,6 +188,9 @@ public static class WindowsNativeTests
             }
         } finally {
             foreach (var provider in settings.Providers) Credentials.Delete(provider.Id);
+            foreach (var provider in settings.Providers) {
+                Console.WriteLine("NATIVE-EVIDENCE cleanup provider=" + provider.Id + " credential_present=" + (Credentials.Read(provider.Id) == "" ? "false" : "true"));
+            }
         }
     }
     private sealed class FixtureTransport : HttpMessageHandler

@@ -7,12 +7,32 @@ function Add-DocIssue {
     [void]$issues.Add($Message)
 }
 
+function Add-LinkCheck {
+    param([string]$Target, [string]$Directory, [string]$Relative, [int]$LineNumber, [string]$Kind)
+    $value = $Target.Trim()
+    if ([string]::IsNullOrWhiteSpace($value)) { return }
+    if ($value -match '^[a-zA-Z][a-zA-Z0-9+.-]*:') { return }
+    if ($value.StartsWith('#')) { return }
+    $pathPart = $value.Split('#')[0]
+    if ([string]::IsNullOrWhiteSpace($pathPart)) { return }
+    if ($pathPart.Contains('%')) {
+        try { $pathPart = [Uri]::UnescapeDataString($pathPart) } catch { }
+    }
+    $pathPart = $pathPart.Replace('/', '\')
+    if (-not (Test-Path -LiteralPath (Join-Path $Directory $pathPart))) {
+        Add-DocIssue ($Relative + ':' + $LineNumber + ': missing ' + $Kind + ' ' + $Target)
+    }
+}
+
 $documents = New-Object System.Collections.ArrayList
 foreach ($name in @('README.md', 'README.en.md', 'CONTRIBUTING.md')) {
     [void]$documents.Add((Join-Path $projectRoot $name))
 }
-foreach ($file in Get-ChildItem -LiteralPath (Join-Path $projectRoot 'docs') -Filter '*.md' -File) {
-    [void]$documents.Add($file.FullName)
+$docsRoot = Join-Path $projectRoot 'docs'
+if (Test-Path -LiteralPath $docsRoot) {
+    foreach ($file in (Get-ChildItem -LiteralPath $docsRoot -Recurse -File -Filter '*.md' | Sort-Object FullName)) {
+        [void]$documents.Add($file.FullName)
+    }
 }
 
 foreach ($document in $documents) {
@@ -20,30 +40,24 @@ foreach ($document in $documents) {
     if (-not (Test-Path -LiteralPath $document)) { Add-DocIssue ($relative + ': document is missing'); continue }
     $text = [IO.File]::ReadAllText($document)
     $directory = Split-Path -Parent $document
-
-    foreach ($match in [regex]::Matches($text, '!?\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)')) {
-        $target = $match.Groups[1].Value.Trim('<', '>')
-        if ($target -match '^[a-zA-Z][a-zA-Z0-9+.-]*:' -or $target.StartsWith('#')) { continue }
-        $pathPart = $target.Split('#')[0]
-        if ([string]::IsNullOrWhiteSpace($pathPart)) { continue }
-        if (-not (Test-Path -LiteralPath (Join-Path $directory $pathPart))) {
-            Add-DocIssue ($relative + ': missing link target ' + $target)
-        }
-    }
-
-    foreach ($match in [regex]::Matches($text, '(?:href|src)="([^"]+)"')) {
-        $target = $match.Groups[1].Value
-        if ($target -match '^[a-zA-Z][a-zA-Z0-9+.-]*:' -or $target.StartsWith('#')) { continue }
-        $pathPart = $target.Split('#')[0]
-        if ([string]::IsNullOrWhiteSpace($pathPart)) { continue }
-        $decoded = [Net.WebUtility]::HtmlDecode($pathPart)
-        if (-not (Test-Path -LiteralPath (Join-Path $directory $decoded))) {
-            Add-DocIssue ($relative + ': missing resource ' + $target)
-        }
-    }
-
     $items = New-Object 'System.Collections.Generic.Dictionary[string,int]' ([StringComparer]::Ordinal)
+    $inFence = $false
+    $lineNumber = 0
     foreach ($line in ($text -split "`r?`n")) {
+        $lineNumber++
+        if ($line -match '^\s*(?:```|~~~)') { $inFence = -not $inFence; continue }
+        if ($inFence) { continue }
+
+        foreach ($match in [regex]::Matches($line, '!?\[[^\]]*\]\(<([^>]+)>\)')) {
+            Add-LinkCheck -Target $match.Groups[1].Value -Directory $directory -Relative $relative -LineNumber $lineNumber -Kind 'link target'
+        }
+        foreach ($match in [regex]::Matches($line, '!?\[[^\]]*\]\(([^)\s<>]+)(?:\s+"[^"]*")?\)')) {
+            Add-LinkCheck -Target $match.Groups[1].Value -Directory $directory -Relative $relative -LineNumber $lineNumber -Kind 'link target'
+        }
+        foreach ($match in [regex]::Matches($line, '(?:href|src)="([^"]+)"')) {
+            Add-LinkCheck -Target ([Net.WebUtility]::HtmlDecode($match.Groups[1].Value)) -Directory $directory -Relative $relative -LineNumber $lineNumber -Kind 'resource'
+        }
+
         $itemMatch = [regex]::Match($line, '^[ \t]*(?:[-*+]|\d+\.)[ \t]+(\S.*?)[ \t]*$')
         if (-not $itemMatch.Success) { continue }
         $key = $itemMatch.Groups[1].Value
@@ -92,11 +106,20 @@ if (-not (Test-Path -LiteralPath $workflowPath)) {
     $workflow = [IO.File]::ReadAllText($workflowPath)
     if ($workflow -notmatch '(?m)^\s*contents:\s*read\s*$') { Add-DocIssue 'windows.yml: permissions must stay contents: read' }
     if ($workflow -notmatch 'always\(\)') { Add-DocIssue 'windows.yml: the evidence upload must run always()' }
-    foreach ($path in @('work/ui-smoke/*.png', 'work/ui-smoke/result.json', 'work/verification-results/*')) {
+    foreach ($path in @('work/ui-smoke/*.png', 'work/ui-smoke/result.json', 'work/verification-results/*', 'work/native-evidence/*')) {
         if (-not $workflow.Contains($path)) { Add-DocIssue ('windows.yml: upload path is missing ' + $path) }
     }
     if ($workflow -notmatch 'native_checks' -or $workflow -notmatch 'default:\s*false') {
         Add-DocIssue 'windows.yml: native checks must be opt-in and default to false'
+    }
+    if ($workflow -notmatch 'scripts/native-checks\.ps1') {
+        Add-DocIssue 'windows.yml: native checks must run through scripts/native-checks.ps1 to capture evidence'
+    }
+    if ($workflow -match 'Leaf\.Tests\.exe\s+--native') {
+        Add-DocIssue 'windows.yml: do not invoke Leaf.Tests.exe --native directly; the wrapper must save the evidence'
+    }
+    if ($workflow -notmatch 'native-checks\.ps1[\s\S]{0,400}?exit \$LASTEXITCODE') {
+        Add-DocIssue 'windows.yml: the native step must preserve the native exit code'
     }
     if ($workflow -match '(?<![\w-])publish\.ps1(?!\s+-CheckOnly)') { Add-DocIssue 'windows.yml: must not invoke the publishing path' }
     if ($workflow -match 'WithRelease') { Add-DocIssue 'windows.yml: must not create releases' }

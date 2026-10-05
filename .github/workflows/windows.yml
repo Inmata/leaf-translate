@@ -40,7 +40,7 @@ jobs:
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.native_checks }}
         shell: powershell
         run: |
-          .\work\verification\Leaf.Tests.exe --native
+          ./scripts/native-checks.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Upload verification evidence
         if: ${{ always() }}
@@ -51,6 +51,7 @@ jobs:
             work/ui-smoke/*.png
             work/ui-smoke/result.json
             work/verification-results/*
+            work/native-evidence/*
           if-no-files-found: warn
       - uses: actions/upload-artifact@v4
         if: ${{ always() }}
