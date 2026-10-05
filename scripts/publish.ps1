@@ -1,5 +1,6 @@
-param([switch]$CheckOnly, [switch]$WithRelease)
+param([switch]$CheckOnly, [switch]$WithRelease, [string]$Version = '0.2.0')
 $ErrorActionPreference = 'Stop'
+if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid version.' }
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $repository = 'Inmata/leaf-translate'
 $allowedRoots = @('.github', '.gitignore', 'AGENTS.md', 'README.md', 'README.en.md', 'CONTRIBUTING.md', 'docs', 'scripts', 'src', 'tests')
@@ -16,7 +17,7 @@ foreach ($file in $publicFiles) {
     if ($file.Name -match '^(settings|history)\.json$|^\.env($|\.)' -or $file.Extension -match '^\.(pfx|key|log)$') {
         throw ('Private/local file found in public source: ' + $file.Name)
     }
-    if ($file.Extension -ne '.png' -and [IO.File]::ReadAllText($file.FullName) -match '(sk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|BEGIN [A-Z ]*PRIVATE KEY)') {
+    if ($file.Extension -notin @('.png', '.ico') -and [IO.File]::ReadAllText($file.FullName) -match '(sk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|BEGIN [A-Z ]*PRIVATE KEY)') {
         throw ('Possible credential found: ' + $file.Name)
     }
 }
@@ -67,7 +68,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Staging failed.' }
 if ($LASTEXITCODE -ne 0) { throw 'Source whitespace check failed.' }
 & git -C $publishRoot diff --cached --quiet
 if ($LASTEXITCODE -eq 1) {
-    & git -C $publishRoot commit -m 'Build Leaf v0.1.0 Windows translator'
+    & git -C $publishRoot commit -m ('Build Leaf v' + $Version + ' Windows translator')
     if ($LASTEXITCODE -ne 0) { throw 'Commit failed.' }
 } elseif ($LASTEXITCODE -ne 0) { throw 'Could not inspect staged changes.' }
 & git -C $publishRoot -c credential.helper= -c ('credential.https://github.com.helper=' + $helper) push origin main
@@ -79,7 +80,8 @@ if ($LASTEXITCODE -ne 0 -or $localSha -ne $remoteSha) { throw 'The remote commit
 Write-Output ('Published and verified: https://github.com/' + $repository + '/commit/' + $remoteSha)
 
 if ($WithRelease) {
-    $archive = Join-Path $projectRoot 'dist\Leaf-v0.1.0-windows.zip'
+    $tag = 'v' + $Version
+    $archive = Join-Path $projectRoot ('dist\Leaf-' + $tag + '-windows.zip')
     $checksumFile = $archive + '.sha256'
     if (-not (Test-Path -LiteralPath $archive) -or -not (Test-Path -LiteralPath $checksumFile)) { throw 'Run scripts/package.ps1 before publishing a release.' }
     $expectedChecksum = (Get-Content -LiteralPath $checksumFile -Raw).Trim().Split(' ')[0]
@@ -87,10 +89,10 @@ if ($WithRelease) {
     $releasesJson = & $ghPath release list --repo $repository --limit 100 --json tagName
     if ($LASTEXITCODE -ne 0) { throw 'Source is published, but the release list could not be read.' }
     $existingReleases = ($releasesJson -join "`n") | ConvertFrom-Json
-    if (@($existingReleases | Where-Object { $_.tagName -eq 'v0.1.0' }).Count -gt 0) { Write-Output 'Release v0.1.0 already exists; existing assets were kept.' }
+    if (@($existingReleases | Where-Object { $_.tagName -eq $tag }).Count -gt 0) { Write-Output ('Release ' + $tag + ' already exists; existing assets were kept.') }
     else {
-        & $ghPath release create v0.1.0 $archive $checksumFile --repo $repository --target $remoteSha --title 'Leaf v0.1.0' --notes-file (Join-Path $projectRoot 'docs\RELEASE-v0.1.0.md')
+        & $ghPath release create $tag $archive $checksumFile --repo $repository --target $remoteSha --title ('Leaf ' + $tag) --notes-file (Join-Path $projectRoot ('docs\RELEASE-' + $tag + '.md'))
         if ($LASTEXITCODE -ne 0) { throw 'Source is published, but release creation failed.' }
-        Write-Output ('Release: https://github.com/' + $repository + '/releases/tag/v0.1.0')
+        Write-Output ('Release: https://github.com/' + $repository + '/releases/tag/' + $tag)
     }
 }

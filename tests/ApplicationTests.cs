@@ -40,7 +40,7 @@ public static class ApplicationTests
     private static async Task Scenarios(string folder)
     {
         var immediate = new ImmediateHandler();
-        using (var shell = new AppShell(new LocalStore(Path.Combine(folder, "fast")), false, new LlmClient(immediate))) {
+        using (var shell = new AppShell(ConfiguredStore(Path.Combine(folder, "fast")), false, new LlmClient(immediate))) {
             await shell.TranslateAsync("A fast sentence", "剪贴板", false);
             await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
             Check(shell.Current.Completed && shell.Current.Translation == "完整译文", "Queued partial output cannot overwrite a finished translation");
@@ -48,7 +48,7 @@ public static class ApplicationTests
         }
 
         var handler = new ControlledHandler();
-        var store = new LocalStore(Path.Combine(folder, "requests"));
+        var store = ConfiguredStore(Path.Combine(folder, "requests"));
         using (var shell = new AppShell(store, false, new LlmClient(handler))) {
             var first = shell.TranslateAsync("Old sentence", "剪贴板", false);
             await shell.TranslateAsync("Old sentence", "剪贴板", false);
@@ -95,6 +95,48 @@ public static class ApplicationTests
             shell.OpenRecord(TranslationRecord.Create("Another source", "选中文字", store.Settings));
             handler.ReplyJson(6, new { meaning = "过期词卡", sections = new object[0] }); await cardRequest;
             Check(shell.Current.Source == "Another source" && shell.Current.Cards.Count == 0, "Switching conversation cannot attach an old word card to the new source");
+        }
+        var providerStore = ConfiguredStore(Path.Combine(folder, "provider"));
+        using (var shell = new AppShell(providerStore, false)) {
+            var settings = new SettingsWindow(shell);
+            Ui.Get<ComboBox>(settings.Window, "ProviderCombo").SelectedIndex = 2;
+            Ui.Get<ComboBox>(settings.Window, "ModelInput").Text = "user-chosen-model";
+            Ui.Get<PasswordBox>(settings.Window, "ApiKeyInput").Password = "fake-key-fixture";
+            Ui.Get<Button>(settings.Window, "SaveSettingsButton").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            var reloaded = new LocalStore(Path.Combine(folder, "provider"));
+            Check(reloaded.Settings.ProviderId == "deepseek" && reloaded.Settings.Provider.Model == "user-chosen-model", "Saving a provider selection makes it the active provider after restart");
+            settings = new SettingsWindow(shell);
+            Check(((ProviderProfile)Ui.Get<ComboBox>(settings.Window, "ProviderCombo").SelectedItem).Id == "deepseek", "Reopening settings selects the saved provider instead of looking for another provider's key");
+            settings.Window.Close();
+        }
+        using (var catalogHandler = new CatalogHandler())
+        using (var shell = new AppShell(ConfiguredStore(Path.Combine(folder, "catalog")), false, new LlmClient(catalogHandler))) {
+            var settings = new SettingsWindow(shell);
+            Ui.Get<ComboBox>(settings.Window, "ProviderCombo").SelectedIndex = 2;
+            Ui.Get<PasswordBox>(settings.Window, "ApiKeyInput").Password = "fake-key-fixture";
+            Ui.Get<Button>(settings.Window, "FetchModels").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            for (int i = 0; i < 100 && !Ui.Get<Button>(settings.Window, "FetchModels").IsEnabled; i++) await Task.Delay(5);
+            var input = Ui.Get<ComboBox>(settings.Window, "ModelInput");
+            Check(input.Items.Count == 2 && input.Text == "", "Model discovery fills choices and leaves the user's model selection explicit");
+            input.SelectedIndex = 1;
+            Check(input.Text == "deepseek-v4-pro", "Selecting a fetched model supplies the exact model ID");
+            input.Text = "custom-model";
+            Ui.Get<Button>(settings.Window, "SaveSettingsButton").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Check(shell.Store.Settings.Provider.Model == "custom-model", "Manual model IDs remain supported after fetching a catalog");
+        }
+    }
+    private static LocalStore ConfiguredStore(string directory)
+    {
+        var store = new LocalStore(directory); var settings = Json.Copy(store.Settings);
+        settings.Provider.Model = "fixture-model"; store.SaveSettings(settings); return store;
+    }
+    private sealed class CatalogHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellation)
+        {
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) {
+                Content = new StringContent("{\"data\":[{\"id\":\"deepseek-flash\"},{\"id\":\"deepseek-v4-pro\"}]}", System.Text.Encoding.UTF8, "application/json")
+            });
         }
     }
     private static HttpResponseMessage StreamReply(params string[] chunks)

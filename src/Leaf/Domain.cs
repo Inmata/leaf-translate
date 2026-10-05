@@ -37,6 +37,14 @@ namespace Leaf
         public double X { get; set; }
         public double Y { get; set; }
     }
+    public sealed class WindowPlacement
+    {
+        public double X { get; set; }
+        public double Y { get; set; }
+        public double Width { get; set; }
+        public double Height { get; set; }
+        public string Screen { get; set; }
+    }
     public sealed class LearningPreset
     {
         public string Name { get; set; }
@@ -65,21 +73,20 @@ namespace Leaf
         public bool HistoryEnabled { get; set; }
         public int HistoryLimit { get; set; }
         public bool AutoStart { get; set; }
-        public string Monitor { get; set; }
-        public Dictionary<string, PointSetting> Positions { get; set; }
+        public WindowPlacement Placement { get; set; }
         public ProviderProfile Provider { get { return Providers.FirstOrDefault(p => p.Id == ProviderId) ?? Providers[0]; } }
 
         public static Settings Defaults()
         {
             return new Settings {
-                Version = 1, ProviderId = "zhipu", TargetLanguage = "中文", ClipboardMode = true,
+                Version = 2, ProviderId = "zhipu", TargetLanguage = "中文", ClipboardMode = true,
                 Shortcut = "Ctrl+Alt+T", Scene = "通用", SceneDetail = "", GameTextType = "自动判断",
-                Style = "自然准确", HistoryEnabled = true, HistoryLimit = 200, Monitor = "",
-                Positions = new Dictionary<string, PointSetting>(), Presets = new List<LearningPreset>(),
+                Style = "自然准确", HistoryEnabled = true, HistoryLimit = 200,
+                Presets = new List<LearningPreset>(),
                 Providers = new List<ProviderProfile> {
-                    new ProviderProfile { Id = "zhipu", Name = "智谱", BaseUrl = "https://open.bigmodel.cn/api/paas/v4", Model = "glm-4.7-flash" },
-                    new ProviderProfile { Id = "qwen", Name = "千问", BaseUrl = "https://dashscope.aliyuncs.com/compatible-mode/v1", Model = "qwen-flash" },
-                    new ProviderProfile { Id = "deepseek", Name = "DeepSeek", BaseUrl = "https://api.deepseek.com", Model = "deepseek-chat" }
+                    new ProviderProfile { Id = "zhipu", Name = "智谱", BaseUrl = "https://open.bigmodel.cn/api/paas/v4", Model = "" },
+                    new ProviderProfile { Id = "qwen", Name = "千问", BaseUrl = "https://dashscope.aliyuncs.com/compatible-mode/v1", Model = "" },
+                    new ProviderProfile { Id = "deepseek", Name = "DeepSeek", BaseUrl = "https://api.deepseek.com", Model = "" }
                 },
                 Learning = new List<LearningOption> {
                     new LearningOption { Id = "lemma", Name = "原形与词形", Instruction = "解释原形、词性、当前形式与原形的关系。", Enabled = true },
@@ -96,7 +103,12 @@ namespace Leaf
             if (Providers == null || Providers.Count == 0) Providers = defaults.Providers;
             if (Learning == null) Learning = defaults.Learning;
             if (Presets == null) Presets = new List<LearningPreset>();
-            if (Positions == null) Positions = new Dictionary<string, PointSetting>();
+            if (Version < 2) {
+                var oldDefault = Providers.FirstOrDefault(p => p.Id == "deepseek" && p.Model == "deepseek-chat" &&
+                    (p.BaseUrl ?? "").TrimEnd('/') == "https://api.deepseek.com");
+                if (oldDefault != null) oldDefault.Model = "deepseek-flash";
+            }
+            Version = 2;
             if (string.IsNullOrWhiteSpace(TargetLanguage)) TargetLanguage = "中文";
             if (string.IsNullOrWhiteSpace(Scene)) Scene = "通用";
             if (string.IsNullOrWhiteSpace(Style)) Style = "自然准确";

@@ -11,7 +11,6 @@ using System.Windows.Input;
 using System.Windows.Markup;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
-using Forms = System.Windows.Forms;
 
 namespace Leaf
 {
@@ -26,6 +25,8 @@ namespace Leaf
         {
             using (var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream("Leaf.Views." + name + ".xaml")) {
                 var window = (Window)XamlReader.Load(stream);
+                using (var icon = Assembly.GetExecutingAssembly().GetManifestResourceStream("Leaf.Assets.Leaf.ico"))
+                    window.Icon = BitmapFrame.Create(icon, BitmapCreateOptions.PreservePixelFormat, BitmapCacheOption.OnLoad);
                 double limit = SystemParameters.WorkArea.Height - 70;
                 window.Height = Math.Max(window.MinHeight, Math.Min(window.Height, limit));
                 return window;
@@ -48,13 +49,6 @@ namespace Leaf
         }
     }
 
-    public sealed class MonitorOption
-    {
-        public string Id { get; set; }
-        public string Name { get; set; }
-        public override string ToString() { return Name; }
-    }
-
     public sealed class SettingsWindow
     {
         private readonly AppShell shell;
@@ -65,6 +59,9 @@ namespace Leaf
         private readonly Dictionary<string, string> pendingKeys = new Dictionary<string, string>();
         private readonly HashSet<string> deletedKeys = new HashSet<string>();
         private CancellationTokenSource testCancellation;
+        private CancellationTokenSource modelCancellation;
+        private readonly RequestGate providerGeneration = new RequestGate();
+        private bool closed;
         public Window Window { get; private set; }
 
         public SettingsWindow(AppShell owner)
@@ -80,13 +77,8 @@ namespace Leaf
             };
             Ui.Get<ComboBox>(Window, "GameTypeCombo").ItemsSource = new[] { "自动判断", "角色对话", "物品与技能", "任务与剧情" };
             Ui.Get<ComboBox>(Window, "StyleCombo").ItemsSource = new[] { "自然准确", "尽量直译", "简洁口语" };
-            Ui.Get<TextBox>(Window, "EndpointInput").TextChanged += (s, e) => KeyHint();
-            var monitors = new List<MonitorOption> { new MonitorOption { Id = "", Name = "跟随鼠标所在屏幕" } };
-            monitors.AddRange(Forms.Screen.AllScreens.Select((screen, index) => new MonitorOption {
-                Id = screen.DeviceName, Name = "固定在屏幕 " + (index + 1) + (screen.Primary ? "（主屏）" : "（副屏）")
-            }));
-            Ui.Get<ComboBox>(Window, "MonitorCombo").ItemsSource = monitors;
-            Ui.Get<ComboBox>(Window, "MonitorCombo").SelectedItem = monitors.FirstOrDefault(m => m.Id == draft.Monitor) ?? monitors[0];
+            Ui.Get<TextBox>(Window, "EndpointInput").TextChanged += (s, e) => { InvalidateRequests(); KeyHint(); };
+            Ui.Get<PasswordBox>(Window, "ApiKeyInput").PasswordChanged += (s, e) => KeyHint();
             Ui.Get<ComboBox>(Window, "ProviderCombo").SelectedItem = draft.Provider;
             PopulatePreferences();
             Ui.Get<CheckBox>(Window, "ClipboardModeCheck").IsChecked = draft.ClipboardMode;
@@ -108,18 +100,26 @@ namespace Leaf
                 Ui.Get<PasswordBox>(Window, "ApiKeyInput").Clear(); KeyHint(); Status("保存设置后删除密钥。", false);
             });
             Ui.Click(Window, "TestConnection", async () => await TestConnection());
+            Ui.Click(Window, "FetchModels", async () => await FetchModels());
             Ui.Click(Window, "SaveSettingsButton", Save);
             Window.Closed += (s, e) => {
+                closed = true; providerGeneration.Next();
                 if (testCancellation != null) testCancellation.Cancel();
+                if (modelCancellation != null) modelCancellation.Cancel();
                 Ui.Get<PasswordBox>(Window, "ApiKeyInput").Clear(); pendingKeys.Clear();
             };
         }
         private void ProviderChanged(object sender, SelectionChangedEventArgs args)
         {
+            // The editable model ComboBox also bubbles SelectionChanged.
+            if (args.OriginalSource != Ui.Get<ComboBox>(Window, "ProviderCombo")) return;
+            InvalidateRequests();
             if (active != null) CaptureProfile();
             active = Ui.Get<ComboBox>(Window, "ProviderCombo").SelectedItem as ProviderProfile;
             if (active == null) return;
-            Ui.Get<TextBox>(Window, "ModelInput").Text = active.Model;
+            draft.ProviderId = active.Id;
+            Ui.Get<ComboBox>(Window, "ModelInput").ItemsSource = null;
+            Ui.Get<ComboBox>(Window, "ModelInput").Text = active.Model;
             Ui.Get<TextBox>(Window, "EndpointInput").Text = active.BaseUrl;
             string pending;
             Ui.Get<PasswordBox>(Window, "ApiKeyInput").Password = pendingKeys.TryGetValue(active.Id, out pending) ? pending : "";
@@ -128,7 +128,7 @@ namespace Leaf
         private void CaptureProfile()
         {
             if (active == null) return;
-            active.Model = Ui.Get<TextBox>(Window, "ModelInput").Text.Trim();
+            active.Model = Ui.Get<ComboBox>(Window, "ModelInput").Text.Trim();
             active.BaseUrl = Ui.Get<TextBox>(Window, "EndpointInput").Text.Trim();
             string key = Ui.Get<PasswordBox>(Window, "ApiKeyInput").Password.Trim();
             if (key.Length > 0) { pendingKeys[active.Id] = key; deletedKeys.Remove(active.Id); }
@@ -138,7 +138,8 @@ namespace Leaf
             if (active == null) return;
             string url = Ui.Get<TextBox>(Window, "EndpointInput").Text.TrimEnd('/');
             var previous = original.Providers.FirstOrDefault(p => p.Id == active.Id);
-            string hint = previous == null || url != previous.BaseUrl.TrimEnd('/') ?
+            string hint = Ui.Get<PasswordBox>(Window, "ApiKeyInput").Password.Length > 0 ? "密钥已填写，保存设置后生效。" :
+                previous == null || url != previous.BaseUrl.TrimEnd('/') ?
                 "接口地址已变化，请重新填写密钥。" :
                 deletedKeys.Contains(active.Id) ? "保存后删除已存密钥。" :
                 shell.NativeEnabled && Credentials.Read(active.Id).Length > 0 ? "已保存密钥；留空保持不变。" : "保存在 Windows 凭据管理器。";
@@ -231,24 +232,70 @@ namespace Leaf
             var label = Ui.Get<TextBlock>(Window, "SettingsStatus"); label.Text = text;
             label.Foreground = error ? new SolidColorBrush(Color.FromRgb(147, 94, 67)) : Ui.Brush("Muted");
         }
+        private void InvalidateRequests()
+        {
+            providerGeneration.Next();
+            if (testCancellation != null) testCancellation.Cancel();
+            if (modelCancellation != null) modelCancellation.Cancel();
+            Ui.Get<Button>(Window, "TestConnection").IsEnabled = true;
+            Ui.Get<Button>(Window, "FetchModels").IsEnabled = true;
+        }
+        private string ActiveKey()
+        {
+            string key; pendingKeys.TryGetValue(active.Id, out key);
+            var previous = original.Providers.FirstOrDefault(p => p.Id == active.Id);
+            if (string.IsNullOrEmpty(key) && !deletedKeys.Contains(active.Id) && previous != null &&
+                previous.BaseUrl.TrimEnd('/') == active.BaseUrl.TrimEnd('/') && shell.NativeEnabled) key = Credentials.Read(active.Id);
+            return key;
+        }
+        private async Task FetchModels()
+        {
+            CaptureProfile(); InvalidateRequests();
+            long version = providerGeneration.Next();
+            var profile = Json.Copy(active);
+            var cancellation = new CancellationTokenSource(); modelCancellation = cancellation;
+            Ui.Get<Button>(Window, "FetchModels").IsEnabled = false;
+            try {
+                Status("正在获取服务商模型列表…", false);
+                var models = await shell.Client.ListModelsAsync(profile, ActiveKey(), cancellation.Token);
+                if (closed || !providerGeneration.IsCurrent(version)) return;
+                var input = Ui.Get<ComboBox>(Window, "ModelInput");
+                string typed = input.Text;
+                input.ItemsSource = models; input.Text = typed;
+                Status(typed.Length > 0 && !models.Contains(typed) ?
+                    "当前模型未出现在列表，请重新选择或核对 ID。" : "模型列表已更新，请选择一个模型，再测试连接。", false);
+                input.IsDropDownOpen = true;
+            } catch (OperationCanceledException) { }
+            catch (Exception error) {
+                if (!closed && providerGeneration.IsCurrent(version)) Status(error is UserError ? error.Message : "获取失败，可直接填写模型 ID。", true);
+            } finally {
+                if (modelCancellation == cancellation) modelCancellation = null;
+                if (!closed && providerGeneration.IsCurrent(version)) Ui.Get<Button>(Window, "FetchModels").IsEnabled = true;
+                cancellation.Dispose();
+            }
+        }
         private async Task TestConnection()
         {
-            CaptureProfile();
+            CaptureProfile(); InvalidateRequests();
+            long version = providerGeneration.Next();
+            var profile = Json.Copy(active);
             var button = Ui.Get<Button>(Window, "TestConnection"); button.IsEnabled = false;
-            testCancellation = new CancellationTokenSource();
+            var cancellation = new CancellationTokenSource(); testCancellation = cancellation;
             try {
-                string key; pendingKeys.TryGetValue(active.Id, out key);
-                var previous = original.Providers.FirstOrDefault(p => p.Id == active.Id);
-                if (string.IsNullOrEmpty(key) && !deletedKeys.Contains(active.Id) && previous != null &&
-                    previous.BaseUrl.TrimEnd('/') == active.BaseUrl.TrimEnd('/') && shell.NativeEnabled) key = Credentials.Read(active.Id);
+                string key = ActiveKey();
                 Status("正在发送短请求…", false);
-                string result = await shell.Client.CompleteAsync(Json.Copy(active), key, new List<ChatTurn> {
+                string result = await shell.Client.CompleteAsync(profile, key, new List<ChatTurn> {
                     new ChatTurn { Role = "user", Content = "只回答 OK。" }
-                }, false, false, null, testCancellation.Token);
-                Status("连接成功，可以开始翻译。", false);
+                }, false, false, null, cancellation.Token);
+                if (!closed && providerGeneration.IsCurrent(version)) Status("连接成功。保存设置后生效。", false);
             } catch (OperationCanceledException) { }
-            catch (Exception error) { Status(error is UserError ? error.Message : "测试失败，请检查网络和配置。", true); }
-            finally { button.IsEnabled = true; testCancellation.Dispose(); testCancellation = null; }
+            catch (Exception error) {
+                if (!closed && providerGeneration.IsCurrent(version)) Status(error is UserError ? error.Message : "测试失败，请检查网络和配置。", true);
+            } finally {
+                if (testCancellation == cancellation) testCancellation = null;
+                if (!closed && providerGeneration.IsCurrent(version)) button.IsEnabled = true;
+                cancellation.Dispose();
+            }
         }
         private void Save()
         {
@@ -257,7 +304,7 @@ namespace Leaf
                 if (string.IsNullOrWhiteSpace(draft.TargetLanguage)) throw new UserError("target", "请填写目标语言。");
                 foreach (var profile in draft.Providers) {
                     LlmClient.Endpoint(profile.BaseUrl);
-                    if (string.IsNullOrWhiteSpace(profile.Model)) throw new UserError("model", "请填写模型名称。");
+                    if (profile.Id == draft.ProviderId && string.IsNullOrWhiteSpace(profile.Model)) throw new UserError("model", "请选择或填写当前服务的模型 ID。");
                     var previous = original.Providers.FirstOrDefault(p => p.Id == profile.Id);
                     if (previous != null && previous.BaseUrl.TrimEnd('/') != profile.BaseUrl.TrimEnd('/') && !pendingKeys.ContainsKey(profile.Id))
                         throw new UserError("key", "修改接口地址后，请为该服务重新填写密钥。");
@@ -270,8 +317,7 @@ namespace Leaf
                     throw new UserError("history", "历史条数应为 20 到 1000。");
                 draft.HistoryLimit = limit;
                 draft.AutoStart = Ui.Get<CheckBox>(Window, "AutoStartCheck").IsChecked == true;
-                draft.Monitor = ((MonitorOption)Ui.Get<ComboBox>(Window, "MonitorCombo").SelectedItem).Id;
-                draft.Positions = Json.Copy(shell.Store.Settings.Positions);
+                draft.Placement = Json.Copy(shell.Store.Settings.Placement);
                 shell.ApplySettings(draft, pendingKeys, deletedKeys); Window.Close();
             } catch (Exception error) { Status(error is UserError ? error.Message : "保存失败，请检查配置后重试。", true); }
         }

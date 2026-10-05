@@ -29,8 +29,11 @@ namespace Leaf
                     default: throw new UserError("shortcut", "无法识别快捷键，请使用例如 Ctrl+Alt+T 的形式。");
                 }
             }
+            string keyName = parts.Last();
+            if (keyName.Equals("spacebar", StringComparison.OrdinalIgnoreCase) || keyName == "空格" || keyName == "空格键") keyName = "Space";
+            if (keyName.Length == 1 && char.IsDigit(keyName[0])) keyName = "D" + keyName;
             Key key;
-            if ((modifiers & 11) == 0 || !Enum.TryParse<Key>(parts.Last(), true, out key) || key == Key.None)
+            if ((modifiers & 11) == 0 || !Enum.TryParse<Key>(keyName, true, out key) || !Enum.IsDefined(typeof(Key), key) || key == Key.None)
                 throw new UserError("shortcut", "快捷键需包含 Ctrl、Alt 或 Win 与一个有效按键。");
             int virtualKey = KeyInterop.VirtualKeyFromKey(key);
             if (virtualKey == 0 || virtualKey == 16 || virtualKey == 17 || virtualKey == 18 || virtualKey == 91 || virtualKey == 92)
@@ -133,11 +136,10 @@ namespace Leaf
         {
             return new Input { Type = 1, Data = new InputUnion { Keyboard = new KeyboardInput { Key = key, Flags = up ? 2u : 0u } } };
         }
-        public static Forms.Screen CurrentScreen(Settings settings)
+        public static Forms.Screen SavedScreen(Settings settings)
         {
-            var configured = Forms.Screen.AllScreens.FirstOrDefault(s => s.DeviceName == settings.Monitor);
-            if (configured != null) return configured;
-            Point point; GetCursorPos(out point); return Forms.Screen.FromPoint(new System.Drawing.Point(point.X, point.Y));
+            var saved = settings.Placement;
+            return Forms.Screen.AllScreens.FirstOrDefault(s => saved != null && s.DeviceName == saved.Screen) ?? Forms.Screen.PrimaryScreen;
         }
         public static double Scale(Forms.Screen screen)
         {
@@ -150,21 +152,24 @@ namespace Leaf
         }
         public static void Position(Window window, Settings settings)
         {
-            var screen = CurrentScreen(settings); var area = screen.WorkingArea;
-            double scale = Scale(screen); Point mouse; GetCursorPos(out mouse);
-            int width = (int)(window.Width * scale), height = (int)(window.Height * scale);
-            window.MaxHeight = Math.Max(300, area.Height / scale - 24);
-            window.MaxWidth = Math.Max(340, area.Width / scale - 24);
-            PointSetting saved;
-            int x = mouse.X + 22, y = mouse.Y + 22;
-            if (settings.Positions.TryGetValue(screen.DeviceName, out saved)) { x = (int)saved.X; y = (int)saved.Y; }
-            else {
-                if (x + width > area.Right) x = mouse.X - width - 22;
-                if (y + height > area.Bottom) y = mouse.Y - height - 22;
-            }
-            x = Math.Max(area.Left + 12, Math.Min(x, area.Right - width - 12));
-            y = Math.Max(area.Top + 12, Math.Min(y, area.Bottom - height - 12));
-            SetWindowPos(new WindowInteropHelper(window).Handle, new IntPtr(-1), x, y, 0, 0, 0x0011);
+            var screen = SavedScreen(settings); var area = screen.WorkingArea;
+            double scale = Scale(screen);
+            var placement = PopupLayout.Fit(settings.Placement, area.Left, area.Top, area.Width, area.Height, scale, screen.DeviceName);
+            window.MinWidth = Math.Min(360, Math.Max(1, (area.Width - 24) / scale));
+            window.MinHeight = Math.Min(380, Math.Max(1, (area.Height - 24) / scale));
+            window.MaxWidth = Math.Max(window.MinWidth, (area.Width - 24) / scale);
+            window.MaxHeight = Math.Max(window.MinHeight, (area.Height - 24) / scale);
+            window.Width = placement.Width; window.Height = placement.Height;
+            SetWindowPos(new WindowInteropHelper(window).EnsureHandle(), new IntPtr(-1), (int)placement.X, (int)placement.Y,
+                (int)Math.Round(placement.Width * scale), (int)Math.Round(placement.Height * scale), 0x0010);
+        }
+        public static WindowPlacement CapturePlacement(Window window)
+        {
+            Rect rect;
+            if (!GetWindowRect(new WindowInteropHelper(window).Handle, out rect) || rect.Right <= rect.Left || rect.Bottom <= rect.Top) return null;
+            var screen = Forms.Screen.FromRectangle(new System.Drawing.Rectangle(rect.Left, rect.Top, rect.Right - rect.Left, rect.Bottom - rect.Top));
+            return new WindowPlacement { X = rect.Left, Y = rect.Top, Width = window.ActualWidth,
+                Height = window.ActualHeight, Screen = screen.DeviceName };
         }
         public static void AutoStart(bool enabled)
         {
@@ -174,6 +179,77 @@ namespace Leaf
                     else key.DeleteValue("LeafTranslate", false);
                 }
             } catch { throw new UserError("startup", "无法更新开机启动设置，请检查系统权限。"); }
+        }
+    }
+    public static class PopupLayout
+    {
+        private static bool Finite(double value) { return !double.IsNaN(value) && !double.IsInfinity(value); }
+        public static WindowPlacement Fit(WindowPlacement saved, double left, double top, double areaWidth, double areaHeight, double scale, string screen)
+        {
+            if (!Finite(scale) || scale <= 0) scale = 1;
+            double width = saved != null && Finite(saved.Width) && saved.Width > 0 ? saved.Width : 456;
+            double height = saved != null && Finite(saved.Height) && saved.Height > 0 ? saved.Height : 620;
+            width = Math.Min(Math.Max(360, width), Math.Max(1, (areaWidth - 24) / scale));
+            height = Math.Min(Math.Max(380, height), Math.Max(1, (areaHeight - 24) / scale));
+            bool restore = saved != null && saved.Screen == screen && Finite(saved.X) && Finite(saved.Y);
+            double x = restore ? saved.X : left + areaWidth - width * scale - 32;
+            double y = restore ? saved.Y : top + (areaHeight - height * scale) / 2;
+            x = Math.Max(left + 12, Math.Min(x, left + areaWidth - width * scale - 12));
+            y = Math.Max(top + 12, Math.Min(y, top + areaHeight - height * scale - 12));
+            return new WindowPlacement { X = x, Y = y, Width = width, Height = height, Screen = screen };
+        }
+    }
+    public sealed class GlobalShortcut : IDisposable
+    {
+        private readonly IntPtr window;
+        private readonly int id;
+        private IntPtr hook;
+        private Native.HookProc callback;
+        private bool registered, spaceDown;
+        [StructLayout(LayoutKind.Sequential)] private struct KeyEvent
+        {
+            public uint Key, Scan, Flags, Time;
+            public IntPtr Extra;
+        }
+        [DllImport("user32.dll")] private static extern short GetAsyncKeyState(int key);
+        public GlobalShortcut(IntPtr target, int identifier, HotkeySpec spec)
+        {
+            window = target; id = identifier;
+            // Alt+Space is also a Windows system-menu shortcut. Capture this narrow
+            // combination so it works without opening the foreground window's menu.
+            if ((spec.Modifiers & 15) == 1 && spec.VirtualKey == 32) {
+                callback = KeyboardHook;
+                hook = Native.SetWindowsHookEx(13, callback, Native.GetModuleHandle(null), 0);
+                if (hook == IntPtr.Zero) throw new UserError("shortcut", "无法启用 Alt+Space，请检查系统权限或改用其他快捷键。");
+            } else {
+                registered = Native.RegisterHotKey(window, id, spec.Modifiers, spec.VirtualKey);
+                if (!registered) throw new UserError("shortcut", "快捷键已被其他软件占用，请换一个组合。");
+            }
+        }
+        private IntPtr KeyboardHook(int code, IntPtr message, IntPtr data)
+        {
+            if (code >= 0) {
+                var key = (KeyEvent)Marshal.PtrToStructure(data, typeof(KeyEvent));
+                int kind = message.ToInt32();
+                if (key.Key == 32) {
+                    bool down = kind == 0x0100 || kind == 0x0104;
+                    bool up = kind == 0x0101 || kind == 0x0105;
+                    bool alt = (key.Flags & 0x20) != 0;
+                    bool extraModifier = new[] { 16, 17, 91, 92 }.Any(k => (GetAsyncKeyState(k) & 0x8000) != 0);
+                    if (down && (spaceDown || (alt && !extraModifier))) {
+                        if (!spaceDown) { spaceDown = true; Native.PostMessage(window, 0x0312, new IntPtr(id), IntPtr.Zero); }
+                        return new IntPtr(1);
+                    }
+                    if (up && spaceDown) { spaceDown = false; return new IntPtr(1); }
+                }
+            }
+            return Native.CallNextHookEx(hook, code, message, data);
+        }
+        public void Dispose()
+        {
+            if (registered) { Native.UnregisterHotKey(window, id); registered = false; }
+            if (hook != IntPtr.Zero) { Native.UnhookWindowsHookEx(hook); hook = IntPtr.Zero; }
+            spaceDown = false;
         }
     }
     public sealed class OutsideClick : IDisposable

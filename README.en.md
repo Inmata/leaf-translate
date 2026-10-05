@@ -17,7 +17,7 @@ Bring your own **Zhipu, Qwen, or DeepSeek API key**. The model detects the sourc
 - **Continue the conversation.** Ask about the passage or a selected word in the same window, with the original text and translation still visible.
 - **Choose how you learn.** Select a reading context and learning options. Add a custom option when needed, and save frequent combinations as presets.
 - **Return to local history.** Search originals or translations, reopen a record with its cards and conversation, and keep asking. The default limit is 200 records; saving can be disabled.
-- **Fit your desktop.** Opening the popup keeps focus in your current app. Pin, move, resize, choose a monitor, or change the global shortcut.
+- **Fit your desktop.** Opening the popup keeps focus in your current app. Pin, move, or resize it; the last position and size are remembered. The global shortcut supports `Alt+Space`.
 
 ## Download and setup
 
@@ -41,13 +41,15 @@ Leaf is portable and runs in the system tray. Starting with Windows is optional 
 
 ### 1. Connect a translation provider
 
-In **Settings (设置)**, choose a provider and enter your **API key (API 密钥)**. Default model names and endpoints are provided; you can edit them if needed.
+In **Settings (设置)**, choose a provider, enter your **API key (API 密钥)**, and click **Fetch models (获取模型)**. Choose a model from the provider's response. New settings do not assume a fixed model name or automatically select a paid model.
 
-| Provider | Default model | Official documentation |
-| --- | --- | --- |
-| Zhipu (智谱) | `glm-4.7-flash` | [Zhipu documentation](https://docs.bigmodel.cn/) |
-| Qwen (千问) | `qwen-flash` | [Alibaba Cloud Model Studio](https://www.alibabacloud.com/help/en/model-studio/) |
-| DeepSeek | `deepseek-chat` | [DeepSeek API documentation](https://api-docs.deepseek.com/) |
+| Provider | Official documentation |
+| --- | --- |
+| Zhipu (智谱) | [Zhipu documentation](https://docs.bigmodel.cn/) |
+| Qwen (千问) | [Alibaba Cloud Model Studio](https://www.alibabacloud.com/help/en/model-studio/) |
+| DeepSeek | [DeepSeek API documentation](https://api-docs.deepseek.com/) |
+
+The model field also accepts a manually entered ID. Some services do not expose a model catalog; use their documentation in that case. Default endpoints are provided and can be edited. A listed model may still need activation or quota in your account, so test the connection.
 
 Click **Test connection (测试连接)**, then **Save settings (保存设置)** after it succeeds. Testing sends one short request and may count toward API usage. Model availability, quotas, and pricing depend on your provider account.
 
@@ -75,7 +77,7 @@ Click **Ask (追问)** to reveal the input. Questions concern the selected word 
 
 ## Screenshots
 
-These views are rendered from the v0.1.0 windows. Text, conversations, and history are demonstration content; no live API was called. The app UI is currently Chinese. Click an image to view it at full size.
+These views are rendered from the v0.2.0 windows. Text, model choices, conversations, and history are demonstration content; no live API was called. The app UI is currently Chinese. Click an image to view it at full size.
 
 <table>
   <tr>
@@ -105,8 +107,8 @@ These views are rendered from the v0.1.0 windows. Text, conversations, and histo
   <tr>
     <td valign="top">
       <strong>Desktop preferences</strong><br>
-      Set clipboard behavior, the shortcut, monitor, startup, and history retention.<br><br>
-      <a href="docs/images/behavior.png"><img src="docs/images/behavior.png" alt="Clipboard, shortcut, monitor, startup, and history preferences" width="380"></a>
+      Set clipboard behavior, the shortcut, startup, and history retention.<br><br>
+      <a href="docs/images/behavior.png"><img src="docs/images/behavior.png" alt="Clipboard, shortcut, startup, and history preferences" width="380"></a>
     </td>
     <td valign="top">
       <strong>Local history</strong><br>
@@ -150,13 +152,17 @@ The new option becomes selectable alongside the built-in options. **Preference p
 | Click the hide button | Hide the popup while keeping Leaf in the tray |
 | Tray menu → Exit (退出) | Close the application |
 
+The first popup appears on the right of the primary display. Move and resize it once to choose where it belongs; subsequent shortcuts and application restarts restore that position and size. Retry keeps a visible window in place. Drag it to another monitor directly; if that display is removed, Leaf keeps the window inside the available work area.
+
+The visible popup has a taskbar entry; hiding it keeps the tray icon. You can set `Alt+Space` in settings. While Leaf runs, that combination translates instead of opening the Windows system menu. If another shortcut utility uses the same combination, change it in one of the apps.
+
 Opening the popup keeps focus in your current application. Click the popup to interact. Settings and **History (历史记录)** are available from the tray menu; check the taskbar's hidden-icons area if you cannot find Leaf.
 
 ## Data and privacy
 
 **API keys are stored in Windows Credential Manager.** Settings and history live in `%LOCALAPPDATA%\LeafTranslate`; keys are not written to history files.
 
-Translation, word lookup, follow-up questions, and connection testing send requests to your configured API endpoint. Translation includes the source text and context; word lookup and questions also include relevant translations, learning preferences, or recent conversation. Leaf has no project-operated relay server.
+Translation, word lookup, follow-up questions, and connection testing send requests to your configured API endpoint. Translation includes the source text and context; word lookup and questions also include relevant translations, learning preferences, or recent conversation. Fetching models queries that service's catalog without sending reading content. Leaf has no project-operated relay server.
 
 History stays on your computer. Opening it makes no API request. The default limit is 200 records; you can change retention or disable saving. **Disabling saving clears existing history.** Deleting records or clearing history also removes the associated cache.
 
@@ -172,7 +178,7 @@ Check that Leaf is running in the tray. If the shortcut is already in use, choos
 
 ### Why does my API request fail after entering a key?
 
-Check the provider, model, endpoint, and account quota. Leaf displays errors for network failures, timeouts, invalid keys, rate limits, and malformed responses. Save settings after a successful connection test. A stored key is not filled back into the input; leaving it blank keeps the saved key. Changing the endpoint requires entering the key again.
+Check the provider, model, endpoint, and account quota. Leaf displays errors for network failures, timeouts, invalid keys, rate limits, and malformed responses. Save settings after a successful connection test. A blank key field with **Key saved (已保存密钥)** below it is normal: stored keys are not filled back into the input, and leaving it blank keeps the saved key. Changing the endpoint requires entering the key again.
 
 ### Can I use another language or compatible service?
 

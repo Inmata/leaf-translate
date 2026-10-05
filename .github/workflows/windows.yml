@@ -23,8 +23,8 @@ jobs:
         run: ./scripts/package.ps1
       - uses: actions/upload-artifact@v4
         with:
-          name: Leaf-v0.1.0-windows
+          name: Leaf-windows
           path: |
-            dist/Leaf-v0.1.0-windows.zip
-            dist/Leaf-v0.1.0-windows.zip.sha256
+            dist/Leaf-v*-windows.zip
+            dist/Leaf-v*-windows.zip.sha256
           if-no-files-found: error

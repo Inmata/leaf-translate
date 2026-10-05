@@ -11,7 +11,13 @@
         <Grid Margin="0,0,0,15">
           <Grid.ColumnDefinitions><ColumnDefinition Width="145"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
           <StackPanel Margin="0,0,14,0"><TextBlock Text="服务商" Style="{StaticResource Caption}"/><ComboBox x:Name="ProviderCombo" DisplayMemberPath="Name"/></StackPanel>
-          <StackPanel Grid.Column="1"><TextBlock Text="模型" Style="{StaticResource Caption}"/><TextBox x:Name="ModelInput" MaxLength="100"/></StackPanel>
+          <StackPanel Grid.Column="1"><TextBlock Text="模型" Style="{StaticResource Caption}"/>
+            <ComboBox x:Name="ModelInput" IsEditable="True" IsTextSearchEnabled="False" MaxDropDownHeight="260"/>
+          </StackPanel>
+        </Grid>
+        <Grid Margin="0,-8,0,15">
+          <TextBlock Text="获取列表后选择，也可直接填写模型 ID。" Foreground="{StaticResource Muted}" FontSize="11" VerticalAlignment="Center"/>
+          <Button x:Name="FetchModels" Content="获取模型" Style="{StaticResource GhostButton}" HorizontalAlignment="Right" Margin="0,0,-8,0"/>
         </Grid>
         <TextBlock Text="API 密钥" Style="{StaticResource Caption}"/>
         <PasswordBox x:Name="ApiKeyInput" MaxLength="1000"/>
@@ -72,8 +78,6 @@
         <TextBlock Text="开启后先复制，再按快捷键；关闭后尝试读取选区。" Foreground="{StaticResource Muted}" FontSize="11" Margin="25,-5,0,17"/>
         <TextBlock Text="全局快捷键" Style="{StaticResource Caption}"/>
         <TextBox x:Name="ShortcutInput" MaxLength="50" Margin="0,0,0,16"/>
-        <TextBlock Text="浮窗显示位置" Style="{StaticResource Caption}"/>
-        <ComboBox x:Name="MonitorCombo" DisplayMemberPath="Name" Margin="0,0,0,17"/>
         <CheckBox x:Name="AutoStartCheck" Content="开机启动"/>
         <CheckBox x:Name="HistoryCheck" Content="保存本地历史"/>
         <TextBlock Text="关闭保存会清空已有历史。回看不调用 API。" Foreground="{StaticResource Muted}" FontSize="11" Margin="25,-5,0,17"/>

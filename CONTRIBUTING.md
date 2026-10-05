@@ -24,7 +24,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package.ps1
 
 Tests cover transport and response handling, real loopback HTTP, Unicode text, context-aware caching, history, cancellation, conversation switching, and WPF views. The UI smoke renderer writes its images and report to `work/ui-smoke`. These fixtures do not establish live provider or desktop compatibility.
 
-Packaging creates a portable ZIP and SHA256 file in `dist`, verifies its three entries, and checks the packaged executable against the build. The Windows GitHub Actions workflow also builds, verifies, and packages the app.
+Packaging creates a portable ZIP and SHA256 file in `dist`, verifies its four entries (executable, runtime config, and both user guides), and checks the packaged executable against the build. The Windows GitHub Actions workflow also builds, verifies, and packages the app.
+
+For local Windows integration checks, run `.\bin\Leaf.Tests.exe --native` after building tests. This uses isolated fake credentials and a simulated transport, briefly displays a test popup, and verifies credential persistence, Alt+Space handling, focus, retry, and remembered geometry. It deletes its test credentials and never injects physical desktop input. These checks do not establish compatibility with every desktop or a real provider account.
+
+If a running app locks `bin\Leaf.exe`, use `-OutputDirectory bin/verification` with the build or test script. Packaging always builds into its own directory, and checks that the requested ZIP version matches the executable.
 
 ## Repository layout
 

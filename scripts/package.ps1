@@ -1,34 +1,38 @@
-param([string]$Version = '0.1.0')
+param([string]$Version = '0.2.0')
 $ErrorActionPreference = 'Stop'
 if ($Version -notmatch '^\d+\.\d+\.\d+([-.][A-Za-z0-9]+)*$') { throw 'Invalid version.' }
 $projectRoot = Split-Path -Parent $PSScriptRoot
-& (Join-Path $PSScriptRoot 'build.ps1')
+$packageBuildDirectory = 'bin\package-v' + $Version
+& (Join-Path $PSScriptRoot 'build.ps1') -OutputDirectory $packageBuildDirectory
+$packageBuildRoot = Join-Path $projectRoot $packageBuildDirectory
+if ([Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $packageBuildRoot 'Leaf.exe')).FileVersion -ne ($Version + '.0')) { throw 'Package version does not match the executable.' }
 $distributionRoot = Join-Path $projectRoot 'dist'
 New-Item -ItemType Directory -Force -Path $distributionRoot | Out-Null
 $stagingRoot = Join-Path $distributionRoot ('stage-' + [guid]::NewGuid().ToString('N'))
 $bundleRoot = Join-Path $stagingRoot ('Leaf-v' + $Version)
 New-Item -ItemType Directory -Force -Path $bundleRoot | Out-Null
 try {
-    Copy-Item -LiteralPath (Join-Path $projectRoot 'bin\Leaf.exe') -Destination $bundleRoot
-    Copy-Item -LiteralPath (Join-Path $projectRoot 'bin\Leaf.exe.config') -Destination $bundleRoot
+    Copy-Item -LiteralPath (Join-Path $packageBuildRoot 'Leaf.exe') -Destination $bundleRoot
+    Copy-Item -LiteralPath (Join-Path $packageBuildRoot 'Leaf.exe.config') -Destination $bundleRoot
     Copy-Item -LiteralPath (Join-Path $projectRoot 'docs\USAGE.md') -Destination (Join-Path $bundleRoot 'USAGE.md')
+    Copy-Item -LiteralPath (Join-Path $projectRoot 'docs\USAGE.en.md') -Destination (Join-Path $bundleRoot 'USAGE.en.md')
     $archive = Join-Path $distributionRoot ('Leaf-v' + $Version + '-windows.zip')
     Compress-Archive -LiteralPath $bundleRoot -DestinationPath $archive -Force
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $zip = [IO.Compression.ZipFile]::OpenRead($archive)
     try {
-        $expectedNames = @('Leaf.exe', 'Leaf.exe.config', 'USAGE.md')
+        $expectedNames = @('Leaf.exe', 'Leaf.exe.config', 'USAGE.md', 'USAGE.en.md')
         $actualNames = @($zip.Entries | ForEach-Object { $_.FullName.Replace('\', '/') })
         foreach ($name in $expectedNames) {
             if ($actualNames -notcontains ('Leaf-v' + $Version + '/' + $name)) { throw ('Missing package entry: ' + $name) }
         }
-        if ($zip.Entries.Count -ne 3) { throw 'Unexpected package contents.' }
+        if ($zip.Entries.Count -ne 4) { throw 'Unexpected package contents.' }
         $exeEntry = $zip.Entries | Where-Object { $_.FullName.Replace('\', '/') -eq ('Leaf-v' + $Version + '/Leaf.exe') }
         $inputStream = $exeEntry.Open()
         $hasher = [Security.Cryptography.SHA256]::Create()
         try {
             $packagedHash = [BitConverter]::ToString($hasher.ComputeHash($inputStream)).Replace('-', '')
-            if ($packagedHash -ne (Get-FileHash -LiteralPath (Join-Path $projectRoot 'bin\Leaf.exe') -Algorithm SHA256).Hash) { throw 'Packaged executable differs from the build.' }
+            if ($packagedHash -ne (Get-FileHash -LiteralPath (Join-Path $packageBuildRoot 'Leaf.exe') -Algorithm SHA256).Hash) { throw 'Packaged executable differs from the build.' }
         } finally { $inputStream.Dispose(); $hasher.Dispose() }
     } finally { $zip.Dispose() }
     $checksum = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()

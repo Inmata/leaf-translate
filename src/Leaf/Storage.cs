@@ -36,6 +36,13 @@ namespace Leaf
                 Trim(); Write("history.json", records);
             }
         }
+        public void SavePlacement(WindowPlacement placement)
+        {
+            lock (sync) {
+                var next = Json.Copy(Settings); next.Placement = placement;
+                Write("settings.json", next); Settings = next;
+            }
+        }
         public TranslationRecord Find(string key) { lock (sync) return records.FirstOrDefault(r => r.CacheKey == key); }
         public List<TranslationRecord> History(string query)
         {
@@ -69,11 +76,28 @@ namespace Leaf
             if (!File.Exists(path)) return null;
             try {
                 if (new FileInfo(path).Length > 33554432) throw new InvalidDataException();
-                return Json.Read<T>(File.ReadAllText(path, Encoding.UTF8));
+                string payload = File.ReadAllText(path, Encoding.UTF8);
+                var result = Json.Read<T>(payload);
+                var settings = result as Settings;
+                if (settings != null && settings.Placement == null) {
+                    var legacy = Json.Read<LegacyPlacement>(payload);
+                    if (legacy.Positions != null && legacy.Positions.Count > 0) {
+                        var position = legacy.Positions.FirstOrDefault(p => p.Key == legacy.Monitor);
+                        if (position.Value == null) position = legacy.Positions.First();
+                        settings.Placement = new WindowPlacement { X = position.Value.X, Y = position.Value.Y,
+                            Width = 456, Height = 620, Screen = position.Key };
+                    }
+                }
+                return result;
             } catch {
                 try { File.Move(path, path + ".corrupt-" + DateTime.UtcNow.ToString("yyyyMMddHHmmss")); } catch { }
                 Warning = "一份本地数据无法读取，已尽量保留备份。请检查设置。"; return null;
             }
+        }
+        private sealed class LegacyPlacement
+        {
+            public string Monitor { get; set; }
+            public Dictionary<string, PointSetting> Positions { get; set; }
         }
         private void Write(string name, object value)
         {
@@ -108,7 +132,10 @@ namespace Leaf
         public static string Read(string provider)
         {
             IntPtr pointer;
-            if (!CredRead(Target(provider), Generic, 0, out pointer)) return "";
+            if (!CredRead(Target(provider), Generic, 0, out pointer)) {
+                if (Marshal.GetLastWin32Error() == 1168) return "";
+                throw new UserError("credentials", "无法读取 Windows 中的已存密钥，请检查系统权限或重新保存密钥。");
+            }
             try {
                 var credential = (Credential)Marshal.PtrToStructure(pointer, typeof(Credential));
                 if (credential.CredentialBlobSize == 0) return "";
@@ -132,6 +159,8 @@ namespace Leaf
                 for (int i = 0; i < bytes.Length; i++) Marshal.WriteByte(pointer, i, 0);
                 Marshal.FreeHGlobal(pointer); Array.Clear(bytes, 0, bytes.Length);
             }
+            if (Read(provider) != key.Trim())
+                throw new UserError("credentials", "密钥写入后未能重新读取，请重新保存。");
         }
         public static void Delete(string provider)
         {

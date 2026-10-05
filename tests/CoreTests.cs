@@ -30,10 +30,11 @@ public static class CoreTests
         throw new Exception("FAILED: " + label);
     }
     [STAThread]
-    public static int Main()
+    public static int Main(string[] args)
     {
         string folder = Path.Combine(Path.GetTempPath(), "leaf-tests-" + Guid.NewGuid().ToString("N"));
         try {
+            if (args.Contains("--native")) return WindowsNativeTests.Run(folder);
             Domain(); Storage(folder); Transport().GetAwaiter().GetResult();
             assertions += ApplicationTests.Run(Path.Combine(folder, "app"));
             Console.WriteLine("SUCCESS: " + assertions + " assertions"); return 0;
@@ -78,6 +79,9 @@ public static class CoreTests
         Throws(() => WordCard.Parse("{\"lemma\":\"x\"}", "x", "x"), "format", "Missing meaning is rejected");
         Throws(() => WordCard.Parse("not JSON", "x", "x"), "format", "Malformed word card is rejected");
         Check((HotkeySpec.Parse("Ctrl+Alt+T").Modifiers & 3) == 3, "Global hotkey modifiers parse correctly");
+        Check(HotkeySpec.Parse(" alt + space ").VirtualKey == 32 && (HotkeySpec.Parse("alt+space").Modifiers & 15) == 1, "Alt+Space accepts spaces and case differences");
+        Check(HotkeySpec.Parse("Alt+空格").VirtualKey == 32, "The Chinese space-key name is accepted");
+        Check(HotkeySpec.Parse("Ctrl+1").VirtualKey == 49, "Digit shortcuts use the digit key rather than numeric enum values");
         Throws(() => HotkeySpec.Parse("Shift+A"), "shortcut", "Typing-only shortcuts are rejected");
         Throws(() => HotkeySpec.Parse("Ctrl+NoSuchKey"), "shortcut", "Invalid shortcut key is rejected");
         var gate = new RequestGate(); long old = gate.Next(), latest = gate.Next();
@@ -86,6 +90,24 @@ public static class CoreTests
         Throws(() => LlmClient.Endpoint("https://user:password@example.com/v1"), "endpoint", "Endpoint-embedded credentials are rejected");
         Check(LlmClient.Endpoint("https://api.deepseek.com/").AbsoluteUri == "https://api.deepseek.com/chat/completions", "Completion path is appended exactly once");
         Check(LlmClient.Endpoint("https://api.deepseek.com/chat/completions").AbsoluteUri == "https://api.deepseek.com/chat/completions", "Full completion URL remains usable");
+        Check(settings.Providers.All(p => p.Model == ""), "New settings do not assume any fixed provider model");
+        var migrated = Json.Copy(settings); migrated.Version = 1; migrated.Providers[2].Model = "deepseek-chat"; migrated.Normalize();
+        Check(migrated.Providers[2].Model == "deepseek-flash", "The old official DeepSeek default is migrated once");
+        migrated.Version = 1; migrated.Providers[2].Model = "private-model"; migrated.Normalize();
+        Check(migrated.Providers[2].Model == "private-model", "Custom model choices survive migration");
+        var placement = new WindowPlacement { X = -1800, Y = 180, Width = 520, Height = 680, Screen = "left" };
+        var fit = PopupLayout.Fit(placement, -1920, 0, 1920, 1040, 1, "left");
+        Check(fit.X == -1800 && fit.Y == 180 && fit.Width == 520 && fit.Height == 680, "Saved geometry is restored on a monitor with negative coordinates");
+        fit = PopupLayout.Fit(placement, 0, 0, 1920, 1040, 1.5, "primary");
+        Check(fit.X > 0 && fit.X + fit.Width * 1.5 <= 1908 && fit.Y + fit.Height * 1.5 <= 1028, "An unplugged monitor falls back inside the available work area");
+        fit = PopupLayout.Fit(new WindowPlacement { X = 5000, Y = -900, Width = 1200, Height = 2000, Screen = "primary" }, 0, 0, 1280, 720, 1.5, "primary");
+        Check(fit.X >= 12 && fit.Y >= 12 && fit.X + fit.Width * 1.5 <= 1268 && fit.Y + fit.Height * 1.5 <= 708, "Oversized or off-screen saved windows stay accessible after DPI or resolution changes");
+        fit = PopupLayout.Fit(new WindowPlacement { X = 300, Y = 100, Width = 480, Height = 500, Screen = "primary" }, 0, 0, 2560, 1400, 2, "primary");
+        Check(fit.Width == 480 && fit.Height == 500, "Saved window size uses device-independent units across DPI settings");
+        Check(LlmClient.ModelsEndpoint(Settings.Defaults().Providers[2], 1).AbsoluteUri == "https://api.deepseek.com/models", "DeepSeek discovery uses its official models endpoint");
+        var qwenModels = LlmClient.ModelsEndpoint(Settings.Defaults().Providers[1], 2);
+        Check(qwenModels.Host == "dashscope.aliyuncs.com" && qwenModels.AbsolutePath == "/api/v1/models" && qwenModels.Query.Contains("page_no=2"), "Bailian discovery uses its own paginated text-model catalog on the configured host");
+        Check(LlmClient.ModelsEndpoint(new ProviderProfile { Id = "qwen", BaseUrl = "https://relay.example/v1/chat/completions" }, 1).AbsoluteUri == "https://relay.example/v1/models", "Custom endpoints keep credentials on the configured host");
         var record = TranslationRecord.Create("Original sentence", "剪贴板", settings);
         record.Translation = "译文";
         for (int i = 0; i < 20; i++) {
@@ -118,6 +140,17 @@ public static class CoreTests
         Check(store.History("").Count == 0 && new LocalStore(folder).History("").Count == 0, "Disabling history clears existing and prevents new records");
         string payload = File.ReadAllText(Path.Combine(folder, "settings.json"));
         Check(!payload.Contains("api_key") && !payload.Contains("test-key"), "Settings contain no API key field");
+        var geometry = new WindowPlacement { X = 420, Y = 170, Width = 540, Height = 720, Screen = "test-display" };
+        store.SavePlacement(geometry);
+        Check(new LocalStore(folder).Settings.Placement.Width == 540 && new LocalStore(folder).Settings.Placement.Y == 170, "Popup position and resized dimensions survive a store restart");
+        string legacyFolder = Path.Combine(folder, "legacy"); Directory.CreateDirectory(legacyFolder);
+        File.WriteAllText(Path.Combine(legacyFolder, "settings.json"), Json.Write(new {
+            Version = 1, Monitor = "old-display", Positions = new Dictionary<string, PointSetting> {
+                { "old-display", new PointSetting { X = -900, Y = 200 } }
+            }
+        }));
+        var legacyStore = new LocalStore(legacyFolder);
+        Check(legacyStore.Settings.Placement.Screen == "old-display" && legacyStore.Settings.Placement.X == -900, "Previous per-monitor positions migrate to one remembered popup position");
         File.WriteAllText(Path.Combine(folder, "settings.json"), "{broken");
         var repaired = new LocalStore(folder);
         Check(repaired.Warning != null && Directory.GetFiles(folder, "settings.json.corrupt-*").Length == 1, "Corrupt settings are backed up before defaults");
@@ -125,12 +158,14 @@ public static class CoreTests
     private static async Task Transport()
     {
         var messages = new List<ChatTurn> { new ChatTurn { Role = "user", Content = "Hello" } };
-        string zhipu = LlmClient.RequestBody(Settings.Defaults().Providers[0], messages, true, 1600, false);
-        string qwen = LlmClient.RequestBody(Settings.Defaults().Providers[1], messages, true, 1600, false);
-        string deepseek = LlmClient.RequestBody(Settings.Defaults().Providers[2], messages, true, 1600, false);
+        var profiles = Settings.Defaults().Providers;
+        profiles[0].Model = "glm-fixture"; profiles[1].Model = "qwen-fixture"; profiles[2].Model = "deepseek-flash";
+        string zhipu = LlmClient.RequestBody(profiles[0], messages, true, 1600, false);
+        string qwen = LlmClient.RequestBody(profiles[1], messages, true, 1600, false);
+        string deepseek = LlmClient.RequestBody(profiles[2], messages, true, 1600, false);
         Check(zhipu.Contains("\"thinking\"") && zhipu.Contains("disabled"), "Zhipu request disables reasoning");
         Check(qwen.Contains("\"enable_thinking\":false"), "Qwen request disables reasoning");
-        Check(!deepseek.Contains("thinking"), "DeepSeek chat uses plain compatible parameters");
+        Check(deepseek.Contains("\"thinking\"") && deepseek.Contains("disabled"), "Current DeepSeek translation requests disable unnecessary reasoning");
 
         string sse = ": keepalive\n\ndata: {\"choices\":[{\"delta\":{\"reasoning_content\":\"ignored\"}}]}\n\n" +
             "data: {\"choices\":[{\"delta\":{\"content\":\"你好\"}}]}\n\n" +
@@ -139,7 +174,7 @@ public static class CoreTests
         string latest = "";
         using (var handler = new FixtureHandler(sse, "text/event-stream", 200))
         using (var client = new LlmClient(handler)) {
-            string text = await client.CompleteAsync(Settings.Defaults().Provider, "test-only", messages, true, false, value => latest = value, CancellationToken.None);
+            string text = await client.CompleteAsync(profiles[0], "test-only", messages, true, false, value => latest = value, CancellationToken.None);
             Check(text == "你好😀" && latest == text, "SSE tolerates fragmented UTF-8 and ignores reasoning tokens");
             Check(handler.Body.Contains("\"stream\":true") && handler.Body.Contains("Hello"), "Transport sends the serialized chat request");
             Check(handler.Authorization == "Bearer", "Transport supplies bearer authentication without logging the key");
@@ -151,7 +186,7 @@ public static class CoreTests
         await ThrowsAsync(() => LlmClient.ReadSseAsync(new StringReader("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\n"), null, CancellationToken.None), "length", "Truncated model output is rejected");
         using (var handler = new FixtureHandler("{\"choices\":[{\"message\":{\"content\":\"A reply\"},\"finish_reason\":\"stop\"}]}", "application/json", 200))
         using (var client = new LlmClient(handler)) {
-            Check(await client.CompleteAsync(Settings.Defaults().Provider, "test-only", messages, true, false, null, CancellationToken.None) == "A reply", "Non-streaming compatible replies are accepted");
+            Check(await client.CompleteAsync(profiles[0], "test-only", messages, true, false, null, CancellationToken.None) == "A reply", "Non-streaming compatible replies are accepted");
         }
         Check(LlmClient.Classify(401, "").Code == "key", "Invalid credentials get a dedicated error");
         Check(LlmClient.Classify(429, "insufficient_quota").Code == "quota", "Quota exhaustion is distinguished from rate limiting");
@@ -159,17 +194,33 @@ public static class CoreTests
         Check(LlmClient.Classify(503, "").Code == "server", "Provider failures get a dedicated error");
         using (var handler = new FixtureHandler("{}", "application/json", 401))
         using (var client = new LlmClient(handler))
-            await ThrowsAsync(() => client.CompleteAsync(Settings.Defaults().Provider, "test-only", messages, false, false, null, CancellationToken.None), "key", "HTTP failures use visible user errors");
+            await ThrowsAsync(() => client.CompleteAsync(profiles[0], "test-only", messages, false, false, null, CancellationToken.None), "key", "HTTP failures use visible user errors");
         using (var handler = new WaitingHandler())
         using (var client = new LlmClient(handler))
         using (var cancellation = new CancellationTokenSource()) {
             cancellation.CancelAfter(30);
             bool cancelled = false;
-            try { await client.CompleteAsync(Settings.Defaults().Provider, "test-only", messages, true, false, null, cancellation.Token); }
+            try { await client.CompleteAsync(profiles[0], "test-only", messages, true, false, null, cancellation.Token); }
             catch (OperationCanceledException) { cancelled = true; }
             Check(cancelled, "Explicit cancellation reaches the HTTP request");
         }
         await Loopback(messages);
+        using (var handler = new FixtureHandler("{\"data\":[{\"id\":\"deepseek-flash\"},{\"id\":\"deepseek-v4-pro\"},{\"id\":\"deepseek-flash\"}]}", "application/json", 200))
+        using (var client = new LlmClient(handler)) {
+            var models = await client.ListModelsAsync(profiles[2], "test-only", CancellationToken.None);
+            Check(models.SequenceEqual(new[] { "deepseek-flash", "deepseek-v4-pro" }) && handler.Authorization == "Bearer", "The fetched model list is authenticated and deduplicated without fixed presets");
+        }
+        using (var handler = new FixtureHandler("{}", "application/json", 404))
+        using (var client = new LlmClient(handler))
+            await ThrowsAsync(() => client.ListModelsAsync(profiles[0], "test-only", CancellationToken.None), "models", "Unsupported discovery offers manual model entry");
+        using (var handler = new FixtureHandler("not-json", "application/json", 200))
+        using (var client = new LlmClient(handler))
+            await ThrowsAsync(() => client.ListModelsAsync(profiles[2], "test-only", CancellationToken.None), "format", "Malformed model catalogs fail clearly");
+        using (var handler = new PagedModelsHandler())
+        using (var client = new LlmClient(handler)) {
+            var models = await client.ListModelsAsync(profiles[1], "test-only", CancellationToken.None);
+            Check(models.Count == 101 && handler.Pages.SequenceEqual(new[] { 1, 2 }), "Bailian catalog pagination includes models beyond the first page");
+        }
     }
     private static async Task Loopback(List<ChatTurn> messages)
     {
@@ -211,9 +262,20 @@ public static class CoreTests
         public FixtureHandler(string payload, string type, int code) { response = payload; media = type; status = code; }
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellation)
         {
-            Body = await request.Content.ReadAsStringAsync(); Authorization = request.Headers.Authorization.Scheme;
+            Body = request.Content == null ? "" : await request.Content.ReadAsStringAsync(); Authorization = request.Headers.Authorization.Scheme;
             var message = new HttpResponseMessage((HttpStatusCode)status) { Content = new StreamContent(new FragmentedStream(Encoding.UTF8.GetBytes(response))) };
             message.Content.Headers.ContentType = new MediaTypeHeaderValue(media); return message;
+        }
+    }
+    private sealed class PagedModelsHandler : HttpMessageHandler
+    {
+        public List<int> Pages = new List<int>();
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellation)
+        {
+            int page = request.RequestUri.Query.Contains("page_no=2") ? 2 : 1; Pages.Add(page);
+            var models = Enumerable.Range(page == 1 ? 0 : 100, page == 1 ? 100 : 1).Select(i => new { model = "model-" + i }).ToArray();
+            string payload = Json.Write(new { output = new { total = 101, models = models } });
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(payload, Encoding.UTF8, "application/json") });
         }
     }
     private sealed class FragmentedStream : MemoryStream

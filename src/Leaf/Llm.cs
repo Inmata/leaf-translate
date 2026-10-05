@@ -91,6 +91,74 @@ namespace Leaf
             if (!address.EndsWith("/chat/completions", StringComparison.OrdinalIgnoreCase)) address += "/chat/completions";
             return new Uri(address);
         }
+        public static Uri ModelsEndpoint(ProviderProfile provider, int page)
+        {
+            string suffix = "/chat/completions";
+            var completion = Endpoint(provider.BaseUrl);
+            string address = completion.AbsoluteUri.Substring(0, completion.AbsoluteUri.Length - suffix.Length);
+            bool bailian = provider.Id == "qwen" &&
+                (completion.Host == "dashscope.aliyuncs.com" || completion.Host == "dashscope-intl.aliyuncs.com" ||
+                 completion.Host == "dashscope-us.aliyuncs.com" || completion.Host.EndsWith(".dashscope.aliyuncs.com", StringComparison.OrdinalIgnoreCase) ||
+                 completion.Host.EndsWith(".maas.aliyuncs.com", StringComparison.OrdinalIgnoreCase)) &&
+                completion.AbsolutePath.Equals("/compatible-mode/v1/chat/completions", StringComparison.OrdinalIgnoreCase);
+            if (bailian)
+                return new Uri(completion.GetLeftPart(UriPartial.Authority) + "/api/v1/models?capabilities=TG&page_size=100&page_no=" + page);
+            return new Uri(address + "/models");
+        }
+        public async Task<List<string>> ListModelsAsync(ProviderProfile provider, string key, CancellationToken cancellation)
+        {
+            if (string.IsNullOrWhiteSpace(key)) throw new UserError("key", "请先填写 API 密钥，再获取模型列表。");
+            using (var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation)) {
+                deadline.CancelAfter(TimeSpan.FromSeconds(15));
+                var models = new HashSet<string>(StringComparer.Ordinal);
+                try {
+                    for (int page = 1; page <= 10; page++) {
+                        using (var request = new HttpRequestMessage(HttpMethod.Get, ModelsEndpoint(provider, page))) {
+                            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
+                            using (var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token).ConfigureAwait(false)) {
+                                string payload = await ReadBoundedAsync(response.Content, deadline.Token).ConfigureAwait(false);
+                                if ((int)response.StatusCode == 404 || (int)response.StatusCode == 405)
+                                    throw new UserError("models", "此接口未提供模型列表，请直接填写服务商文档中的模型 ID。");
+                                if (!response.IsSuccessStatusCode) throw Classify((int)response.StatusCode, payload);
+                                Dictionary<string, object> root;
+                                try { root = Json.Read(payload) as Dictionary<string, object>; }
+                                catch { throw new UserError("format", "模型列表格式异常，请直接填写模型 ID。"); }
+                                if (root == null) throw new UserError("format", "模型列表格式异常，请直接填写模型 ID。");
+                                object entries, outputValue;
+                                var output = root.TryGetValue("output", out outputValue) ? outputValue as Dictionary<string, object> : null;
+                                bool found = output != null ? output.TryGetValue("models", out entries) : root.TryGetValue("data", out entries);
+                                var items = found ? entries as object[] : null;
+                                if (items == null) throw new UserError("format", "服务返回的模型列表无法识别，请直接填写模型 ID。");
+                                foreach (var item in items) {
+                                    var model = item as Dictionary<string, object>; object identifier;
+                                    if (model == null || (!model.TryGetValue("id", out identifier) && !model.TryGetValue("model", out identifier))) continue;
+                                    string id = identifier as string;
+                                    if (!string.IsNullOrWhiteSpace(id) && id.Length <= 100 && !id.Any(char.IsControl)) models.Add(id.Trim());
+                                }
+                                int total = 0; object count;
+                                if (output != null && output.TryGetValue("total", out count)) int.TryParse(Convert.ToString(count), out total);
+                                if (output == null || items.Length == 0 || (total > 0 ? page * 100 >= total : items.Length < 100)) break;
+                                if (page == 10) throw new UserError("models", "模型列表超过 1000 项，请直接填写所需模型 ID。");
+                            }
+                        }
+                    }
+                    if (models.Count == 0) throw new UserError("models", "没有取得模型 ID，可直接填写服务商文档中的名称。");
+                    return models.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList();
+                } catch (OperationCanceledException) {
+                    if (cancellation.IsCancellationRequested) throw;
+                    throw new UserError("timeout", "获取模型超过 15 秒，可重试或直接填写模型 ID。");
+                } catch (HttpRequestException) {
+                    throw new UserError("network", "无法获取模型，请检查网络，或直接填写模型 ID。");
+                } catch (IOException) {
+                    if (cancellation.IsCancellationRequested) throw new OperationCanceledException(cancellation);
+                    throw new UserError(deadline.IsCancellationRequested ? "timeout" : "network", "获取模型时连接中断，可重试或直接填写模型 ID。");
+                } catch (ObjectDisposedException) {
+                    if (cancellation.IsCancellationRequested) throw new OperationCanceledException(cancellation);
+                    if (deadline.IsCancellationRequested) throw new UserError("timeout", "获取模型超时，可直接填写模型 ID。");
+                    throw;
+                }
+            }
+        }
 
         public static string RequestBody(ProviderProfile provider, IList<ChatTurn> messages, bool stream, int maxTokens, bool json)
         {
@@ -98,9 +166,11 @@ namespace Leaf
                 { "model", provider.Model }, { "messages", messages.Select(m => new { role = m.Role, content = m.Content }).ToArray() },
                 { "stream", stream }, { "max_tokens", maxTokens }, { "temperature", 0.3 }
             };
-            if (provider.Id == "zhipu" && provider.Model.StartsWith("glm-4.", StringComparison.OrdinalIgnoreCase))
+            if (provider.Id == "zhipu" && provider.Model.StartsWith("glm-", StringComparison.OrdinalIgnoreCase))
                 body["thinking"] = new { type = "disabled" };
             if (provider.Id == "qwen") body["enable_thinking"] = false;
+            if (provider.Id == "deepseek" && (provider.Model == "deepseek-flash" || provider.Model.StartsWith("deepseek-v4-", StringComparison.OrdinalIgnoreCase)))
+                body["thinking"] = new { type = "disabled" };
             // Prompt-enforced JSON is accepted by all three providers without requiring identical schema features.
             return Json.Write(body);
         }

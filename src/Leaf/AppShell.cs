@@ -27,6 +27,9 @@ namespace Leaf
         public bool Pinned { get { return pinned; } }
         private IntPtr handle;
         private string registeredShortcut;
+        private GlobalShortcut shortcutRegistration;
+        private DispatcherTimer placementTimer;
+        private bool restoringPlacement, placementInitialized;
         private OutsideClick outsideClick;
         private Forms.NotifyIcon tray;
         private Forms.ToolStripMenuItem clipboardMenu;
@@ -55,7 +58,7 @@ namespace Leaf
             try { RegisterShortcut(Store.Settings.Shortcut); }
             catch (UserError error) { ShowError(error.Message, OpenSettings); }
             if (demo) { PopulateDemo(); ShowPopup(); }
-            else if (!background && Credentials.Read(Store.Settings.ProviderId).Length == 0) OpenSettings();
+            else if (!background && (Credentials.Read(Store.Settings.ProviderId).Length == 0 || string.IsNullOrWhiteSpace(Store.Settings.Provider.Model))) OpenSettings();
             else if (!background) ShowPopup();
             if (!string.IsNullOrEmpty(Store.Warning)) {
                 tray.ShowBalloonTip(5000, "叶译", Store.Warning, Forms.ToolTipIcon.Warning);
@@ -89,20 +92,8 @@ namespace Leaf
         }
         private static Icon TrayIcon()
         {
-            using (var bitmap = new Bitmap(32, 32))
-            using (var graphics = Graphics.FromImage(bitmap)) {
-                graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-                graphics.Clear(Color.Transparent);
-                using (var brush = new SolidBrush(Color.FromArgb(82, 119, 97))) graphics.FillEllipse(brush, 2, 2, 28, 28);
-                using (var pen = new Pen(Color.FromArgb(247, 250, 241), 1.9f)) {
-                    graphics.DrawBezier(pen, 11, 24, 6, 13, 15, 6, 24, 9);
-                    graphics.DrawBezier(pen, 24, 9, 23, 18, 19, 23, 11, 24);
-                    graphics.DrawLine(pen, 10, 25, 22, 11);
-                }
-                IntPtr pointer = bitmap.GetHicon();
-                try { using (var borrowed = Icon.FromHandle(pointer)) return (Icon)borrowed.Clone(); }
-                finally { Native.DestroyIcon(pointer); }
-            }
+            using (var stream = typeof(AppShell).Assembly.GetManifestResourceStream("Leaf.Assets.Leaf.ico"))
+            using (var icon = new Icon(stream, 32, 32)) return (Icon)icon.Clone();
         }
         private void RegisterShortcut(string shortcut)
         {
@@ -110,14 +101,15 @@ namespace Leaf
             if (!NativeEnabled) return;
             if (registeredShortcut == shortcut) return;
             string previous = registeredShortcut;
-            if (previous != null) Native.UnregisterHotKey(handle, HotkeyId);
-            if (!Native.RegisterHotKey(handle, HotkeyId, specification.Modifiers, specification.VirtualKey)) {
+            if (handle == IntPtr.Zero) handle = new WindowInteropHelper(Popup).EnsureHandle();
+            if (shortcutRegistration != null) { shortcutRegistration.Dispose(); shortcutRegistration = null; }
+            try { shortcutRegistration = new GlobalShortcut(handle, HotkeyId, specification); }
+            catch {
                 registeredShortcut = null;
                 if (previous != null) {
-                    var old = HotkeySpec.Parse(previous);
-                    if (Native.RegisterHotKey(handle, HotkeyId, old.Modifiers, old.VirtualKey)) registeredShortcut = previous;
+                    try { shortcutRegistration = new GlobalShortcut(handle, HotkeyId, HotkeySpec.Parse(previous)); registeredShortcut = previous; } catch { }
                 }
-                throw new UserError("shortcut", "快捷键已被其他软件占用。请在设置中换一个组合。");
+                throw;
             }
             registeredShortcut = shortcut;
         }
@@ -142,12 +134,36 @@ namespace Leaf
         {
             if (exiting) return;
             if (NativeEnabled) {
-                Popup.ShowActivated = false; Popup.Show(); Native.Position(Popup, Store.Settings);
+                if (Popup.IsVisible) return;
+                restoringPlacement = true;
+                try {
+                    Popup.ShowActivated = false; Native.Position(Popup, Store.Settings); Popup.Show(); placementInitialized = true;
+                } finally { restoringPlacement = false; }
+                RememberPlacement();
                 if (outsideClick != null) outsideClick.Enable();
             }
         }
+        private void QueuePlacementSave()
+        {
+            if (!NativeEnabled || restoringPlacement || !placementInitialized || !Popup.IsVisible) return;
+            if (placementTimer == null) {
+                placementTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(350) };
+                placementTimer.Tick += (s, e) => { placementTimer.Stop(); RememberPlacement(); };
+            }
+            placementTimer.Stop(); placementTimer.Start();
+        }
+        private void RememberPlacement()
+        {
+            if (placementTimer != null) placementTimer.Stop();
+            if (!NativeEnabled || restoringPlacement || !placementInitialized) return;
+            var placement = Native.CapturePlacement(Popup);
+            if (placement == null || placement.Width <= 0 || placement.Height <= 0 || Json.Write(placement) == Json.Write(Store.Settings.Placement)) return;
+            try { Store.SavePlacement(placement); }
+            catch (UserError error) { ShowError(error.Message, null); }
+        }
         public void HidePopup()
         {
+            RememberPlacement();
             if (Current != null) {
                 Current.Draft = Ui.Get<TextBox>(Popup, "QuestionInput").Text; SaveCurrent();
             }
@@ -233,6 +249,7 @@ namespace Leaf
         public void Dispose()
         {
             if (disposed) return;
+            RememberPlacement();
             disposed = true;
             if (Current != null && !demo) {
                 Current.Draft = Ui.Get<TextBox>(Popup, "QuestionInput").Text;
@@ -240,7 +257,7 @@ namespace Leaf
             }
             CancelRequests();
             if (outsideClick != null) outsideClick.Dispose();
-            if (registeredShortcut != null) { Native.UnregisterHotKey(handle, HotkeyId); registeredShortcut = null; }
+            if (shortcutRegistration != null) { shortcutRegistration.Dispose(); shortcutRegistration = null; registeredShortcut = null; }
             if (tray != null) {
                 tray.Visible = false; var icon = tray.Icon; tray.Dispose(); tray = null;
                 if (icon != null) icon.Dispose();

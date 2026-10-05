@@ -1,6 +1,6 @@
 # Leaf user guide
 
-[中文](USAGE.md) · [Project overview](../README.en.md) · [Download](https://github.com/Inmata/leaf-translate/releases/latest)
+[中文](USAGE.md) · [Project overview](https://github.com/Inmata/leaf-translate/blob/main/README.en.md) · [Download](https://github.com/Inmata/leaf-translate/releases/latest)
 
 The current application UI is Chinese. This guide gives the Chinese label alongside the English description where needed.
 
@@ -12,7 +12,9 @@ Settings opens on first launch. It can also be opened through **Settings (设置
 
 ## Configure an API
 
-Select Zhipu (智谱), Qwen (千问), or DeepSeek and enter a model name and key. Default models and endpoints are already provided. A stored key is not displayed in the input; leaving the field empty continues using it.
+Select Zhipu (智谱), Qwen (千问), or DeepSeek, enter your key, and click **Fetch models (获取模型)** to choose a model. You can also type an ID from the provider's documentation. New settings leave the model empty; default endpoints are provided. If a service does not expose a model catalog, manual entry still works.
+
+A catalog entry does not establish account access or quota; test the connection after selecting it. A stored key is not displayed in the input. When **Key saved (已保存密钥)** appears below it, leaving the field empty continues using that key. Fetching a catalog authenticates with the configured service without sending your text or conversation.
 
 Expand **Endpoint (接口地址)** to change the URL or request deletion of a saved key. Changing the URL requires entering the key again. HTTPS endpoints are accepted; localhost HTTP is available for development.
 
@@ -52,7 +54,9 @@ Expand **Add a learning preference (添加自己的学习偏好)** to provide a 
 
 The popup does not activate when opened. Click it to interact. Clicking outside hides an unpinned window; pinning keeps it visible. The hide button remains available when pinned.
 
-Move or resize the window and choose a monitor in settings. A selected secondary monitor can keep Leaf away from your primary workspace. Capture and monitor behavior can vary with the application and desktop environment.
+The first popup appears on the right of the primary display. Moving and resizing automatically saves the last position and size for subsequent shortcuts and restarts. Retry keeps a visible popup in place. Drag to a secondary monitor directly; if it is removed or the work area shrinks, Leaf brings the popup into an available area.
+
+A visible popup has a taskbar icon; hiding it keeps Leaf in the tray. The shortcut also supports **Alt+Space**. While configured, Leaf uses that combination for translation instead of the Windows system menu. Holding it triggers once; exiting releases it. If another shortcut utility uses it, change the combination in one of the applications.
 
 Hiding the popup keeps the current conversation and draft. Use **Exit (退出)** in the tray menu to stop Leaf. Starting with Windows is disabled by default. If you enable it, keep the app in a stable folder; after moving it, turn startup off and on again.
 
@@ -78,6 +82,6 @@ Translation sends source text and context to the configured endpoint. Word looku
 | Model is unavailable | Use a model supported by your provider account |
 | Key input is empty after saving | Stored keys are hidden; leaving the input blank keeps the saved key |
 | Another launch does not open a second instance | Leaf runs as one instance and attempts to reveal the existing popup |
-| Windows reports an unsigned app | v0.1.0 is unsigned; inspect the published source and build instructions if needed |
+| Windows reports an unsigned app | The app is unsigned; inspect the published source and build instructions if needed |
 
 This version does not include OCR, screenshot translation, or exclusive-fullscreen support, and has no macOS/Linux build. LLM explanations may be incorrect. For help, [report an issue](https://github.com/Inmata/leaf-translate/issues) with the app version, Windows version, capture mode, and reproduction steps; omit credentials.

@@ -18,6 +18,8 @@ namespace Leaf
         private void InitializePopup()
         {
             Popup.Closing += (s, e) => { if (!exiting) { e.Cancel = true; HidePopup(); } };
+            Popup.LocationChanged += (s, e) => QueuePlacementSave();
+            Popup.SizeChanged += (s, e) => QueuePlacementSave();
             Ui.Click(Popup, "HideButton", HidePopup);
             Ui.Click(Popup, "PinButton", () => {
                 pinned = !pinned;
@@ -28,13 +30,7 @@ namespace Leaf
             Ui.Get<Grid>(Popup, "DragBar").MouseLeftButtonDown += (s, e) => {
                 if (e.OriginalSource is Button || !NativeEnabled) return;
                 try {
-                    Popup.DragMove(); Native.Rect rect;
-                    if (Native.GetWindowRect(handle, out rect)) {
-                        var screen = System.Windows.Forms.Screen.FromPoint(new System.Drawing.Point(rect.Left, rect.Top));
-                        var settings = Json.Copy(Store.Settings);
-                        settings.Positions[screen.DeviceName] = new PointSetting { X = rect.Left, Y = rect.Top };
-                        Store.SaveSettings(settings);
-                    }
+                    Popup.DragMove(); RememberPlacement();
                 } catch (UserError error) { ShowError(error.Message, null); }
                 catch (InvalidOperationException) { }
             };

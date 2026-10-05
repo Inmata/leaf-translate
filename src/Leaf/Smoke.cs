@@ -29,6 +29,7 @@ namespace Leaf
                     Check(Ui.Get<Border>(shell.Popup, "WordPanel").Visibility == Visibility.Visible, "Word card is visible for the selected occurrence", checks);
                     Check(shell.Popup.FindName("SceneCombo") == null, "Popup contains no scene picker", checks);
                     Check(!shell.Popup.ShowActivated, "Popup does not activate on Show", checks);
+                    Check(shell.Popup.ShowInTaskbar && shell.Popup.Icon != null, "Popup has a branded taskbar entry", checks);
                     Ui.Render(shell.Popup, Path.Combine(folder, "popup.png"));
                     Ui.Get<Button>(shell.Popup, "AskButton").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
                     Check(Ui.Get<Border>(shell.Popup, "InputPanel").Visibility == Visibility.Visible, "Ask reveals the input", checks);
@@ -37,6 +38,10 @@ namespace Leaf
                     Ui.Render(shell.Popup, Path.Combine(folder, "popup-question.png"));
 
                     var settings = new SettingsWindow(shell);
+                    Check(settings.Window.FindName("MonitorCombo") == null, "Popup-position selection is removed from settings", checks);
+                    var model = Ui.Get<ComboBox>(settings.Window, "ModelInput");
+                    Check(model.IsEditable, "Model selection accepts a manual ID", checks);
+                    model.Text = "example-model";
                     var scene = Ui.Get<ComboBox>(settings.Window, "SceneCombo");
                     scene.SelectedItem = "游戏";
                     Check(Ui.Get<StackPanel>(settings.Window, "GameTypePanel").Visibility == Visibility.Visible, "Game fields appear only in the game scene", checks);
