@@ -15,6 +15,22 @@ namespace Leaf
     public sealed class HotkeySpec
     {
         public uint Modifiers; public uint VirtualKey;
+        public static bool IsModifier(Key key)
+        {
+            return key == Key.LeftCtrl || key == Key.RightCtrl || key == Key.LeftAlt || key == Key.RightAlt ||
+                key == Key.LeftShift || key == Key.RightShift || key == Key.LWin || key == Key.RWin;
+        }
+        public static string Record(Key key, ModifierKeys modifiers)
+        {
+            if (IsModifier(key) || key == Key.System || key == Key.ImeProcessed || key == Key.DeadCharProcessed)
+                throw new UserError("shortcut", "继续按下字母、数字或功能键。");
+            string combination = ((modifiers & ModifierKeys.Control) != 0 ? "Ctrl+" : "") +
+                ((modifiers & ModifierKeys.Alt) != 0 ? "Alt+" : "") +
+                ((modifiers & ModifierKeys.Shift) != 0 ? "Shift+" : "") +
+                ((modifiers & ModifierKeys.Windows) != 0 ? "Win+" : "");
+            string name = key >= Key.D0 && key <= Key.D9 ? ((int)key - (int)Key.D0).ToString() : key.ToString();
+            combination += name; Parse(combination); return combination;
+        }
         public static HotkeySpec Parse(string text)
         {
             var parts = (text ?? "").Split('+').Select(x => x.Trim()).ToArray();

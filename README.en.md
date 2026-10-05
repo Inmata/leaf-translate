@@ -1,18 +1,30 @@
-# Leaf · 叶译
+<p align="center">
+  <img src="docs/images/banner.svg" alt="Leaf — Translate. Understand. Keep reading." width="100%">
+</p>
 
-[简体中文](README.md) | **English**
+<p align="center">
+  <a href="https://github.com/Inmata/leaf-translate/releases/latest"><strong>Download for Windows</strong></a> ·
+  <a href="#quick-start">Quick start</a> · <a href="#screenshots">Screenshots</a> ·
+  <a href="https://github.com/Inmata/leaf-translate/issues">Feedback</a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/Inmata/leaf-translate/releases/latest"><img src="https://img.shields.io/github/v/release/Inmata/leaf-translate?style=flat-square&amp;color=54785e" alt="Latest release"></a>
+  <a href="https://github.com/Inmata/leaf-translate/actions/workflows/windows.yml"><img src="https://github.com/Inmata/leaf-translate/actions/workflows/windows.yml/badge.svg?branch=main" alt="Windows build status"></a>
+  <img src="https://img.shields.io/badge/Windows-10%20%2F%2011-54785e?style=flat-square" alt="Windows 10 and 11">
+</p>
+
+<p align="center"><a href="README.md">简体中文</a> · <strong>English</strong></p>
 
 **A shortcut from unfamiliar text to understanding.**
 
 Leaf is a Windows desktop translator. Copy or select text, press a shortcut, and read the translation in a small floating window. Click a word for a contextual explanation, then ask follow-up questions without leaving the original passage.
 
-Bring your own **Zhipu, Qwen, or DeepSeek API key**. The model detects the source language, while you choose the target language and learning preferences. Use it with books, websites, technical documents, or text copied from a game.
-
-[Download for Windows](https://github.com/Inmata/leaf-translate/releases/latest) · [Quick start](#quick-start) · [Screenshots](#screenshots) · [Report an issue](https://github.com/Inmata/leaf-translate/issues)
+Bring your own **OpenAI, Zhipu, Qwen, DeepSeek, or another compatible API**. The model detects the source language, while you choose the target language and learning preferences. Use it with books, websites, technical documents, or text copied from a game.
 
 ## Features
 
-- **Translate with a shortcut.** Copy text and press `Ctrl+Alt+T`, or switch to reading the current selection directly.
+- **Translate with a shortcut.** Select text and press `Ctrl+Alt+T`, or enable clipboard mode to copy first.
 - **Learn words in context.** Click a word for its meaning, part of speech, and base form. Expand synonyms, word formation, collocations, or examples according to your preferences.
 - **Continue the conversation.** Ask about the passage or a selected word in the same window, with the original text and translation still visible.
 - **Choose how you learn.** Select a reading context and learning options. Add a custom option when needed, and save frequent combinations as presets.
@@ -41,29 +53,36 @@ Leaf is portable and runs in the system tray. Starting with Windows is optional 
 
 ### 1. Connect a translation provider
 
-In **Settings (设置)**, choose a provider, enter your **API key (API 密钥)**, and click **Fetch models (获取模型)**. Choose a model from the provider's response. New settings do not assume a fixed model name or automatically select a paid model.
+Start with **API Key**, then choose an **API service (API 服务)**. Official presets supply the endpoint; choose **Custom compatible service (自定义兼容服务)** for another provider and enter its URL. Once the endpoint is known, Leaf automatically fetches models with loading, success, or failure feedback. Select a text-chat model or use **Refresh models (刷新模型)** to retry. Saving remembers the endpoint for future key changes.
+
+Keys do not reliably identify their service, so Leaf never probes multiple providers with the same key. Model ownership is shown when supplied by the catalog; otherwise it is not guessed. Leaf does not automatically choose a paid model.
 
 | Provider | Official documentation |
 | --- | --- |
+| OpenAI | [OpenAI API documentation](https://developers.openai.com/api/docs/) |
 | Zhipu (智谱) | [Zhipu documentation](https://docs.bigmodel.cn/) |
 | Qwen (千问) | [Alibaba Cloud Model Studio](https://www.alibabacloud.com/help/en/model-studio/) |
 | DeepSeek | [DeepSeek API documentation](https://api-docs.deepseek.com/) |
+| Other compatible services | Use the provider's HTTPS endpoint; OpenAI Chat Completions compatibility is required |
 
 The model field also accepts a manually entered ID. Some services do not expose a model catalog; use their documentation in that case. Default endpoints are provided and can be edited. A listed model may still need activation or quota in your account, so test the connection.
 
 Click **Test connection (测试连接)**, then **Save settings (保存设置)** after it succeeds. Testing sends one short request and may count toward API usage. Model availability, quotas, and pricing depend on your provider account.
 
+**Advanced options (高级选项)** are collapsed by default. Keep thinking mode on **Auto (自动适配)** for normal use. GLM-5.3 / Flash require thinking and default to light effort, with higher effort available. Leave the output token cap blank for automatic limits. It includes thinking and visible output; a small cap can truncate a response, and actual usage is billed by the provider.
+
+OpenAI and custom endpoints use the model's default reasoning settings without Zhipu or Qwen-specific parameters. Catalogs can include image and audio models; choose a text-chat model. Leaf currently uses Chat Completions, so services offering only Responses or other native protocols are outside this version's compatibility.
+
 To explore the interface before supplying a key, open PowerShell in the extracted folder and run `.\Leaf.exe --demo`. The demonstration is labeled and makes no API calls.
 
 ### 2. Translate some text
 
-**Clipboard mode is enabled by default:**
+**New settings default to selection mode:**
 
 1. Select text in a browser, reader, or another application.
-2. Copy it with `Ctrl+C`.
-3. Press **`Ctrl+Alt+T`** and wait for the translation.
+2. Press **`Ctrl+Alt+T`** and wait for the translation.
 
-For selection-only use, turn off **Clipboard mode (剪贴板模式)** in the tray menu, or uncheck **Read clipboard with shortcut (快捷键读取剪贴板)** in settings. Some applications do not expose selected text; copying manually is the more reliable option there.
+If you prefer copying first, enable **Clipboard mode (剪贴板模式)** in the tray or **Read clipboard with shortcut (快捷键读取剪贴板)** in settings. Copy with `Ctrl+C`, then press the translation shortcut. Some applications do not expose selected text; copying manually is more reliable there. Upgrades preserve your saved capture mode.
 
 Clipboard text is read when you invoke the shortcut. Copying something by itself does not trigger translation.
 
@@ -77,7 +96,7 @@ Click **Ask (追问)** to reveal the input. Questions concern the selected word 
 
 ## Screenshots
 
-These views are rendered from the v0.2.0 windows. Text, model choices, conversations, and history are demonstration content; no live API was called. The app UI is currently Chinese. Click an image to view it at full size.
+These views are rendered from the v0.3.0 windows. Text, model choices, conversations, and history are demonstration content; no live API was called. The app UI is currently Chinese. Click an image to view it at full size.
 
 <table>
   <tr>
@@ -114,6 +133,18 @@ These views are rendered from the v0.2.0 windows. Text, model choices, conversat
       <strong>Local history</strong><br>
       Search source text or translations, reopen a record, and resume learning.<br><br>
       <a href="docs/images/history.png"><img src="docs/images/history.png" alt="Searchable local translation history with reopen and delete controls" width="380"></a>
+    </td>
+  </tr>
+  <tr>
+    <td valign="top">
+      <strong>Advanced model options</strong><br>
+      Automatic defaults, with thinking effort and output limits available when needed.<br><br>
+      <a href="docs/images/advanced.png"><img src="docs/images/advanced.png" alt="GLM-5.3 Flash automatic thinking, light effort, and output cap" width="380"></a>
+    </td>
+    <td valign="top">
+      <strong>A compact popup</strong><br>
+      Smaller text and spacing, full-size buttons, and scrollable longer content.<br><br>
+      <a href="docs/images/compact.png"><img src="docs/images/compact.png" alt="A smaller Leaf popup showing source text, translation, and a word card" width="300"></a>
     </td>
   </tr>
 </table>
@@ -154,6 +185,8 @@ The new option becomes selectable alongside the built-in options. **Preference p
 
 The first popup appears on the right of the primary display. Move and resize it once to choose where it belongs; subsequent shortcuts and application restarts restore that position and size. Retry keeps a visible window in place. Drag it to another monitor directly; if that display is removed, Leaf keeps the window inside the available work area.
 
+Smaller windows use slightly smaller body text, line spacing, and padding, with readable minimum sizes. Buttons keep their size; long content remains scrollable. Click the shortcut field and press a combination to record it. `Esc` cancels; save settings to apply.
+
 The visible popup has a taskbar entry; hiding it keeps the tray icon. You can set `Alt+Space` in settings. While Leaf runs, that combination translates instead of opening the Windows system menu. If another shortcut utility uses the same combination, change it in one of the apps.
 
 Opening the popup keeps focus in your current application. Click the popup to interact. Settings and **History (历史记录)** are available from the tray menu; check the taskbar's hidden-icons area if you cannot find Leaf.
@@ -165,6 +198,8 @@ Opening the popup keeps focus in your current application. Click the popup to in
 Translation, word lookup, follow-up questions, and connection testing send requests to your configured API endpoint. Translation includes the source text and context; word lookup and questions also include relevant translations, learning preferences, or recent conversation. Fetching models queries that service's catalog without sending reading content. Leaf has no project-operated relay server.
 
 History stays on your computer. Opening it makes no API request. The default limit is 200 records; you can change retention or disable saving. **Disabling saving clears existing history.** Deleting records or clearing history also removes the associated cache.
+
+Local diagnostic logs are in `%LOCALAPPDATA%\LeafTranslate\logs`, accessible through **Open logs (打开日志)** in the tray. They contain request timing, provider/model, HTTP status and error codes, with no API keys, source text, translations, or questions. Logs rotate automatically across at most five files, totaling about 5 MiB, and are never uploaded automatically.
 
 ## Frequently asked questions
 
@@ -199,4 +234,4 @@ This version is Windows-only and does not include OCR, screenshot translation, o
 - [Development and contribution guide](CONTRIBUTING.md)
 - [Report a problem or suggest a feature](https://github.com/Inmata/leaf-translate/issues)
 
-For a bug report, include the app version, Windows version, capture mode, and steps to reproduce it. Please do not include API keys.
+For a bug report, include the app version, Windows version, capture mode, and steps to reproduce it. You may attach `leaf.log` covering the relevant time from **Open logs (打开日志)**. Review it first; do not include credentials or private history.

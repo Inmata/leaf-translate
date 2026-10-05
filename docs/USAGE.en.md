@@ -12,7 +12,9 @@ Settings opens on first launch. It can also be opened through **Settings (设置
 
 ## Configure an API
 
-Select Zhipu (智谱), Qwen (千问), or DeepSeek, enter your key, and click **Fetch models (获取模型)** to choose a model. You can also type an ID from the provider's documentation. New settings leave the model empty; default endpoints are provided. If a service does not expose a model catalog, manual entry still works.
+Start with **API Key**, then choose an **API service (API 服务)**. OpenAI, Zhipu (智谱), Qwen (千问), and DeepSeek supply official presets. For another service, choose **Custom compatible service (自定义兼容服务)** and enter its base URL under **Endpoint (接口地址)**. You can also enter the URL before the key.
+
+Once the endpoint is known, Leaf automatically fetches models after you finish typing, with loading and result feedback. Choose a text-chat model or use **Refresh models (刷新模型)** to retry. Keys are never used to guess or probe providers. Catalog ownership is displayed when supplied, otherwise it is not guessed. A manual model ID remains available when a catalog is unsupported. Saving remembers the endpoint for subsequent key changes.
 
 A catalog entry does not establish account access or quota; test the connection after selecting it. A stored key is not displayed in the input. When **Key saved (已保存密钥)** appears below it, leaving the field empty continues using that key. Fetching a catalog authenticates with the configured service without sending your text or conversation.
 
@@ -20,11 +22,17 @@ Expand **Endpoint (接口地址)** to change the URL or request deletion of a sa
 
 **Test connection (测试连接)** sends a short request using the currently edited configuration. It may count toward provider usage. After a successful test, click **Save settings (保存设置)** to apply the configuration. Model availability and pricing are determined by your provider account.
 
+**Advanced options (高级选项)** are collapsed initially. Thinking mode supports Auto, Enabled, and Disabled; Auto is recommended. GLM-5.3 / Flash require thinking, so Disabled is unavailable. They default to light effort, with high and maximum effort available. Unknown GLM models keep the provider default. Thinking requests can wait up to 120 seconds; only answer text is displayed.
+
+OpenAI and custom endpoints keep model-default reasoning without other providers' special parameters. The thinking control is disabled there; the output cap remains adjustable. This version supports Chat Completions, not services offering only Responses, native Anthropic Messages, or other protocols.
+
+Leave the output token cap blank to adapt automatically; GLM-5.3 defaults to 8192. Custom limits range from 256 to 32768 and include reasoning and visible output. A small cap can truncate the answer. The cap is not actual usage; your provider bills the tokens it uses.
+
 ## Translate text
 
-Clipboard mode is enabled initially. Copy some text, then press `Ctrl+Alt+T`. The popup identifies clipboard text as **From clipboard (来自剪贴板)**. Copying alone does not trigger translation.
+New settings have clipboard mode disabled. Select text, then press `Ctrl+Alt+T`. Upgrades preserve your saved capture mode.
 
-To capture a selection directly, turn off **Clipboard mode (剪贴板模式)** in the tray menu or uncheck **Read clipboard with shortcut (快捷键读取剪贴板)** in settings. Unsupported or elevated applications may require manual copying. A failed capture shows an error rather than translating stale clipboard text.
+To copy first, enable **Clipboard mode (剪贴板模式)** in the tray or **Read clipboard with shortcut (快捷键读取剪贴板)** in settings. Press `Ctrl+C`, then the translation shortcut. The popup identifies clipboard text as **From clipboard (来自剪贴板)**. Copying alone never uploads or translates text. Unsupported or elevated applications may require manual copying. A failed capture shows an error rather than translating stale clipboard text.
 
 Source text is limited to 6000 UTF-16 code units per request. Split long passages when prompted. Network errors, timeouts, invalid keys, exhausted quota, rate limits, and malformed responses receive visible messages. Retry manually or update settings as appropriate.
 
@@ -56,6 +64,10 @@ The popup does not activate when opened. Click it to interact. Clicking outside 
 
 The first popup appears on the right of the primary display. Moving and resizing automatically saves the last position and size for subsequent shortcuts and restarts. Retry keeps a visible popup in place. Drag to a secondary monitor directly; if it is removed or the work area shrinks, Leaf brings the popup into an available area.
 
+Shrinking the window moderately reduces body text, line spacing, and padding, with readable minimum sizes. Buttons retain their size and long content remains scrollable. Larger windows do not enlarge text.
+
+Click the shortcut field and press a combination containing Ctrl, Alt, or Win plus another key. `Esc` cancels; save settings to apply it. The live shortcut is temporarily released during recording and restored afterward.
+
 A visible popup has a taskbar icon; hiding it keeps Leaf in the tray. The shortcut also supports **Alt+Space**. While configured, Leaf uses that combination for translation instead of the Windows system menu. Holding it triggers once; exiting releases it. If another shortcut utility uses it, change the combination in one of the applications.
 
 Hiding the popup keeps the current conversation and draft. Use **Exit (退出)** in the tray menu to stop Leaf. Starting with Windows is disabled by default. If you enable it, keep the app in a stable folder; after moving it, turn startup off and on again.
@@ -71,6 +83,14 @@ History keeps the latest 200 entries by default. Retention can be set to 20–10
 Settings and history are stored in `%LOCALAPPDATA%\LeafTranslate`. If a file cannot be read, Leaf attempts to preserve a `.corrupt-...` backup. API keys are stored separately in Windows Credential Manager under `LeafTranslate/provider-id`.
 
 Translation sends source text and context to the configured endpoint. Word lookups and follow-ups also send relevant translations, preferences, or recent conversation. Leaf has no project-operated relay server. Stopping a request ends the local wait but does not guarantee the provider will waive usage charges.
+
+## Diagnostic logs
+
+Use **Open logs (打开日志)** in the tray to open `%LOCALAPPDATA%\LeafTranslate\logs`. The current file is `leaf.log`, with backups `leaf.1.log` through `leaf.4.log`. Each file is limited to 1 MiB and rotates automatically.
+
+Each line is a JSON record containing time, version, request ID, provider/model, endpoint host, duration, HTTP status, provider code/related parameter, exception type, and application method locations. API keys, source text, translations, learning context, questions, and raw error bodies are excluded. Nothing is automatically uploaded. A `started` record with no ending record can indicate a forced shutdown.
+
+For a bug report, provide reproduction steps and the error time, and optionally the relevant log. Review it before sharing; do not attach credentials or private history. An unwritable log directory does not stop translation.
 
 ## Common problems
 

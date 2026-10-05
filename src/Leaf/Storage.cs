@@ -10,6 +10,7 @@ namespace Leaf
     public sealed class LocalStore
     {
         private readonly string folder;
+        public string Folder { get { return folder; } }
         private readonly object sync = new object();
         private List<TranslationRecord> records;
         public Settings Settings { get; private set; }

@@ -19,7 +19,7 @@ namespace Leaf
         {
             Popup.Closing += (s, e) => { if (!exiting) { e.Cancel = true; HidePopup(); } };
             Popup.LocationChanged += (s, e) => QueuePlacementSave();
-            Popup.SizeChanged += (s, e) => QueuePlacementSave();
+            Popup.SizeChanged += (s, e) => { UpdatePopupTypography(); QueuePlacementSave(); };
             Ui.Click(Popup, "HideButton", HidePopup);
             Ui.Click(Popup, "PinButton", () => {
                 pinned = !pinned;
@@ -105,6 +105,44 @@ namespace Leaf
             translationMenu.Items.Add(regenerate);
             Ui.Get<TextBlock>(Popup, "TranslationText").ContextMenu = translationMenu;
             DisplayRecord();
+            UpdatePopupTypography();
+        }
+        public static double TypographyScale(double width, double height)
+        {
+            return Math.Max(0.84, Math.Min(1, Math.Min(width / 456.0, height / 620.0)));
+        }
+        public void UpdatePopupTypography()
+        {
+            double scale = TypographyScale(Popup.Width, Popup.Height);
+            var source = Ui.Get<RichTextBox>(Popup, "SourceText");
+            source.FontSize = source.Document.FontSize = 16 * scale;
+            source.MaxHeight = 100 * scale;
+            foreach (var paragraph in source.Document.Blocks.OfType<Paragraph>()) paragraph.LineHeight = 25 * scale;
+            SetTypography("TranslationText", 22 * scale, 34 * scale);
+            SetTypography("WordTitle", 16 * scale, 0);
+            SetTypography("WordMeaning", 17 * scale, 26 * scale);
+            SetTypography("WordMeta", 12, 0);
+            SetTypography("EmptyHint", Math.Max(13, 15 * scale), 0);
+            SetTypography("ErrorText", Math.Max(12, 13 * scale), 21 * scale);
+            foreach (string name in new[] { "LearningSections", "ChatMessages" }) {
+                var children = Ui.Get<StackPanel>(Popup, name).Children.OfType<TextBlock>().ToArray();
+                for (int i = 0; i < children.Length; i++) {
+                    bool label = i % 2 == 0;
+                    children[i].FontSize = label ? 11 : Math.Max(12, 13 * scale);
+                    if (!label) children[i].LineHeight = (name == "ChatMessages" ? 23 : 22) * scale;
+                    children[i].Margin = new Thickness(0, 0, 0, (label ? 5 : 15) * scale);
+                }
+            }
+            double compact = (scale - 0.84) / 0.16;
+            Ui.Get<Grid>(Popup, "PopupContent").Margin = new Thickness(16 + 6 * compact, 12, 16 + 6 * compact, 12 + 4 * compact);
+            Ui.Get<Border>(Popup, "SourcePanel").Padding = new Thickness(0, 8 + 4 * compact, 0, 12 + 6 * compact);
+            Ui.Get<ScrollViewer>(Popup, "BodyScroll").Margin = new Thickness(0, 12 + 6 * compact, 0, 0);
+            var input = Ui.Get<TextBox>(Popup, "QuestionInput"); input.FontSize = Math.Max(12, 14 * scale); input.Height = 66 * scale;
+        }
+        private void SetTypography(string name, double font, double line)
+        {
+            var text = Ui.Get<TextBlock>(Popup, name); text.FontSize = font;
+            if (line > 0) text.LineHeight = line;
         }
 
         private void DisplayRecord()
@@ -135,6 +173,7 @@ namespace Leaf
                 wordLinks[piece.Key] = link; paragraph.Inlines.Add(link);
             }
             source.Document.Blocks.Add(paragraph);
+            UpdatePopupTypography();
             DrawTranslation("");
             Ui.Get<TextBox>(Popup, "QuestionInput").Text = Current.Draft ?? "";
             DrawChat(); Topic(); Busy(); Ui.Get<ScrollViewer>(Popup, "BodyScroll").ScrollToTop();
@@ -207,6 +246,7 @@ namespace Leaf
                 SaveCurrent();
             } catch (OperationCanceledException) { }
             catch (Exception error) {
+                Log.Event("translation_failed", error);
                 if (generation.IsCurrent(version)) {
                     translating = false; Busy();
                     ShowError(error is UserError ? error.Message : "翻译没有完成，请重试。", async () => await TranslateAsync(text, sourceKind, true));
@@ -252,6 +292,7 @@ namespace Leaf
                 wordBusy = false; DrawCard(selectedCard); SaveCurrent(); Busy();
             } catch (OperationCanceledException) { }
             catch (Exception error) {
+                Log.Event("word_card_failed", error);
                 if (Current == record && wordGeneration.IsCurrent(version)) {
                     wordBusy = false; Busy(); Ui.Get<TextBlock>(Popup, "WordMeaning").Text = "词卡暂未完成。";
                     ShowError(error is UserError ? error.Message : "查词没有完成，请重试。", async () => await SelectWordAsync(word, true));
@@ -275,6 +316,7 @@ namespace Leaf
                 panel.Children.Add(new TextBlock { Text = section.content, FontSize = 13, LineHeight = 22, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 15) });
             }
             HighlightSource(); DrawTranslation(card.target_phrase); Topic();
+            UpdatePopupTypography();
         }
         private void Topic()
         {
@@ -285,14 +327,14 @@ namespace Leaf
             var panel = Ui.Get<StackPanel>(Popup, "ChatMessages"); panel.Children.Clear();
             Ui.Visible(Ui.Get<Border>(Popup, "ChatPanel"), Current != null && Current.Chat.Count > 0);
             if (Current == null) return;
-            foreach (var turn in Current.Chat) AddChat(panel, turn.Role == "user" ? "你 · " + turn.Topic : "叶译", turn.Content, turn.Role == "user");
+            foreach (var turn in Current.Chat) AddChat(panel, turn.Role == "user" ? "你 · " + turn.Topic : "Leaf", turn.Content, turn.Role == "user");
         }
         private TextBlock AddChat(StackPanel panel, string label, string content, bool user)
         {
             panel.Children.Add(new TextBlock { Text = label, FontSize = 11, Foreground = Ui.Brush("Muted"), Margin = new Thickness(0, 0, 0, 6) });
             var text = new TextBlock { Text = content, FontSize = 13, LineHeight = 23, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 18) };
             if (user) text.Foreground = Ui.Brush("Accent");
-            panel.Children.Add(text); return text;
+            panel.Children.Add(text); UpdatePopupTypography(); return text;
         }
         public async Task SendChatAsync()
         {
@@ -310,7 +352,7 @@ namespace Leaf
             var panel = Ui.Get<StackPanel>(Popup, "ChatMessages");
             Ui.Visible(Ui.Get<Border>(Popup, "ChatPanel"), true);
             AddChat(panel, "你 · " + topic, question, true);
-            var response = AddChat(panel, "叶译", "正在回答…", false);
+            var response = AddChat(panel, "Leaf", "正在回答…", false);
             try {
                 string result = await Client.CompleteAsync(provider, KeyFor(provider), Prompts.Followup(record, topic, card, question), true, false,
                     partial => Popup.Dispatcher.BeginInvoke(new Action(() => {
@@ -326,6 +368,7 @@ namespace Leaf
                 Ui.Get<ScrollViewer>(Popup, "BodyScroll").ScrollToBottom();
             } catch (OperationCanceledException) { }
             catch (Exception error) {
+                Log.Event("followup_failed", error);
                 if (Current == record && generation.IsCurrent(version)) {
                     chatBusy = false; DrawChat(); Busy();
                     ShowError(error is UserError ? error.Message : "追问没有完成，请重试。", async () => await SendChatAsync());

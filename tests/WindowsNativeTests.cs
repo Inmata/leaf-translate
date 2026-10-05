@@ -10,6 +10,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Interop;
+using System.Windows.Input;
 using System.Windows.Threading;
 using Leaf;
 
@@ -66,6 +67,19 @@ public static class WindowsNativeTests
                     Ui.Get<TextBlock>(window.Window, "KeyHint").Text.Contains("已保存密钥"), "Reopened settings recognize the saved key for the active provider");
                 Ui.Get<Button>(window.Window, "SaveSettingsButton").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
                 Check(Credentials.Read(chosenId) == sampleKey, "Saving with a blank password preserves the existing credential");
+
+                window = new SettingsWindow(shell); window.Window.Show(); window.Window.Activate();
+                var recorder = Ui.Get<TextBox>(window.Window, "ShortcutInput");
+                recorder.Focus(); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                var registrationField = typeof(AppShell).GetField("shortcutRegistration", BindingFlags.Instance | BindingFlags.NonPublic);
+                Check(recorder.IsKeyboardFocused && recorder.IsReadOnly && recorder.Text.Contains("请按下") && registrationField.GetValue(shell) == null,
+                    "Focusing the recorder releases the live shortcut so it cannot consume recorded keys");
+                var escape = new KeyEventArgs(Keyboard.PrimaryDevice, PresentationSource.FromVisual(window.Window), 0, Key.Escape) { RoutedEvent = Keyboard.PreviewKeyDownEvent };
+                recorder.RaiseEvent(escape); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                Check(escape.Handled && recorder.Text == "alt + space" && registrationField.GetValue(shell) != null,
+                    "Escape cancels WPF key recording and restores the existing shortcut");
+                recorder.Focus(); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle); window.Window.Close();
+                Check(registrationField.GetValue(shell) != null, "Closing settings during recording restores the global shortcut");
 
                 var registration = typeof(AppShell).GetField("shortcutRegistration", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(shell);
                 var hook = typeof(GlobalShortcut).GetField("hook", BindingFlags.Instance | BindingFlags.NonPublic);

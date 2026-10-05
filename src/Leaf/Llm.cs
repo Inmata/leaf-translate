@@ -1,16 +1,23 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 
 namespace Leaf
 {
+    public sealed class ModelCatalog
+    {
+        public List<string> Models = new List<string>();
+        public Dictionary<string, string> Owners = new Dictionary<string, string>(StringComparer.Ordinal);
+    }
     public static class Prompts
     {
         private static string Rules(Settings s)
@@ -72,6 +79,7 @@ namespace Leaf
     public sealed class LlmClient : IDisposable
     {
         private readonly HttpClient client;
+        public DiagnosticLog Log { get; set; }
         public LlmClient() : this(null) { }
         public LlmClient(HttpMessageHandler handler)
         {
@@ -107,19 +115,32 @@ namespace Leaf
         }
         public async Task<List<string>> ListModelsAsync(ProviderProfile provider, string key, CancellationToken cancellation)
         {
+            return (await ListCatalogAsync(provider, key, cancellation).ConfigureAwait(false)).Models;
+        }
+        public async Task<ModelCatalog> ListCatalogAsync(ProviderProfile provider, string key, CancellationToken cancellation)
+        {
+            string requestId = Guid.NewGuid().ToString("N"); var watch = Stopwatch.StartNew();
+            int status = 0; Exception failure = null; string apiCode = "", parameter = "";
+            if (Log != null) Log.Request(requestId, "models", provider, false, 0, "started", 0, 0, null, "", "");
+            try {
             if (string.IsNullOrWhiteSpace(key)) throw new UserError("key", "请先填写 API 密钥，再获取模型列表。");
             using (var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation)) {
                 deadline.CancelAfter(TimeSpan.FromSeconds(15));
                 var models = new HashSet<string>(StringComparer.Ordinal);
+                var catalog = new ModelCatalog();
                 try {
                     for (int page = 1; page <= 10; page++) {
                         using (var request = new HttpRequestMessage(HttpMethod.Get, ModelsEndpoint(provider, page))) {
                             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
                             using (var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token).ConfigureAwait(false)) {
+                                status = (int)response.StatusCode;
                                 string payload = await ReadBoundedAsync(response.Content, deadline.Token).ConfigureAwait(false);
                                 if ((int)response.StatusCode == 404 || (int)response.StatusCode == 405)
                                     throw new UserError("models", "此接口未提供模型列表，请直接填写服务商文档中的模型 ID。");
-                                if (!response.IsSuccessStatusCode) throw Classify((int)response.StatusCode, payload);
+                                if (!response.IsSuccessStatusCode) {
+                                    apiCode = ErrorCode(payload, key); parameter = ErrorParameter(payload);
+                                    throw Classify((int)response.StatusCode, payload, key);
+                                }
                                 Dictionary<string, object> root;
                                 try { root = Json.Read(payload) as Dictionary<string, object>; }
                                 catch { throw new UserError("format", "模型列表格式异常，请直接填写模型 ID。"); }
@@ -133,7 +154,14 @@ namespace Leaf
                                     var model = item as Dictionary<string, object>; object identifier;
                                     if (model == null || (!model.TryGetValue("id", out identifier) && !model.TryGetValue("model", out identifier))) continue;
                                     string id = identifier as string;
-                                    if (!string.IsNullOrWhiteSpace(id) && id.Length <= 100 && !id.Any(char.IsControl)) models.Add(id.Trim());
+                                    if (!string.IsNullOrWhiteSpace(id) && id.Length <= 100 && !id.Any(char.IsControl)) {
+                                        id = id.Trim(); models.Add(id);
+                                        object owner;
+                                        if (model.TryGetValue("owned_by", out owner) || model.TryGetValue("provider", out owner)) {
+                                            string name = owner as string;
+                                            if (!string.IsNullOrWhiteSpace(name) && name.Length <= 100 && !name.Any(char.IsControl)) catalog.Owners[id] = name.Trim();
+                                        }
+                                    }
                                 }
                                 int total = 0; object count;
                                 if (output != null && output.TryGetValue("total", out count)) int.TryParse(Convert.ToString(count), out total);
@@ -143,7 +171,7 @@ namespace Leaf
                         }
                     }
                     if (models.Count == 0) throw new UserError("models", "没有取得模型 ID，可直接填写服务商文档中的名称。");
-                    return models.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList();
+                    catalog.Models = models.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList(); return catalog;
                 } catch (OperationCanceledException) {
                     if (cancellation.IsCancellationRequested) throw;
                     throw new UserError("timeout", "获取模型超过 15 秒，可重试或直接填写模型 ID。");
@@ -158,51 +186,104 @@ namespace Leaf
                     throw;
                 }
             }
+            } catch (Exception error) { failure = error; throw; }
+            finally {
+                if (Log != null) Log.Request(requestId, "models", provider, false, 0,
+                    failure == null ? "success" : failure is OperationCanceledException ? "cancelled" : "failed",
+                    status, watch.ElapsedMilliseconds, failure, apiCode, parameter);
+            }
         }
 
+        public static bool IsGlm53(ProviderProfile provider)
+        {
+            string model = provider.Model ?? "";
+            return provider.Id == "zhipu" && (model.Equals("glm-5.3", StringComparison.OrdinalIgnoreCase) ||
+                model.StartsWith("glm-5.3-", StringComparison.OrdinalIgnoreCase));
+        }
+        private static bool CanDisableGlm(ProviderProfile provider)
+        {
+            return provider.Id == "zhipu" && Regex.IsMatch(provider.Model ?? "", @"^glm-(4\.[567]|5(?:\.[12])?)(?:-|$)", RegexOptions.IgnoreCase);
+        }
+        public static int OutputBudget(ProviderProfile provider, bool json)
+        {
+            // Unknown GLM versions keep the provider's default reasoning mode too.
+            return provider.MaxOutputTokens > 0 ? provider.MaxOutputTokens :
+                provider.ThinkingMode == "enabled" || provider.Id == "custom" || IsOpenAiReasoning(provider) ||
+                (provider.ThinkingMode != "disabled" && provider.Id == "zhipu" && !CanDisableGlm(provider)) ? 8192 : json ? 1800 : 1600;
+        }
+        public static bool IsOpenAiReasoning(ProviderProfile provider)
+        {
+            return (provider.Id == "openai" || provider.Id == "custom") &&
+                Regex.IsMatch((provider.Model ?? "").Split('/').Last(), @"^(gpt-[5-9](?:[.-]|$)|o[1-9](?:[.-]|$))", RegexOptions.IgnoreCase);
+        }
+        public static void ValidateProfile(ProviderProfile provider)
+        {
+            if (IsGlm53(provider) && provider.ThinkingMode == "disabled")
+                throw new UserError("parameter", "GLM-5.3 / Flash 必须开启思考。请将高级选项中的思考模式改为自动适配或开启。");
+            if (provider.MaxOutputTokens != 0 && (provider.MaxOutputTokens < 256 || provider.MaxOutputTokens > 32768))
+                throw new UserError("parameter", "输出上限需为 256–32768；留空使用自动值。");
+        }
         public static string RequestBody(ProviderProfile provider, IList<ChatTurn> messages, bool stream, int maxTokens, bool json)
         {
+            ValidateProfile(provider);
             var body = new Dictionary<string, object> {
                 { "model", provider.Model }, { "messages", messages.Select(m => new { role = m.Role, content = m.Content }).ToArray() },
-                { "stream", stream }, { "max_tokens", maxTokens }, { "temperature", 0.3 }
+                { "stream", stream }, { provider.Id == "openai" || IsOpenAiReasoning(provider) ? "max_completion_tokens" : "max_tokens", maxTokens }
             };
-            if (provider.Id == "zhipu" && provider.Model.StartsWith("glm-", StringComparison.OrdinalIgnoreCase))
+            if (IsGlm53(provider)) {
+                body["thinking"] = new { type = "enabled" };
+                body["reasoning_effort"] = new[] { "low", "high", "max" }.Contains(provider.ReasoningEffort) ? provider.ReasoningEffort : "low";
+                body["temperature"] = 1.0;
+            } else if (provider.Id == "zhipu" && (provider.ThinkingMode == "enabled" || provider.ThinkingMode == "disabled"))
+                body["thinking"] = new { type = provider.ThinkingMode };
+            else if (CanDisableGlm(provider))
                 body["thinking"] = new { type = "disabled" };
-            if (provider.Id == "qwen") body["enable_thinking"] = false;
-            if (provider.Id == "deepseek" && (provider.Model == "deepseek-flash" || provider.Model.StartsWith("deepseek-v4-", StringComparison.OrdinalIgnoreCase)))
-                body["thinking"] = new { type = "disabled" };
-            // Prompt-enforced JSON is accepted by all three providers without requiring identical schema features.
+            if (provider.Id == "qwen" || provider.Id == "deepseek" || CanDisableGlm(provider)) body["temperature"] = 0.3;
+            if (provider.Id == "qwen") body["enable_thinking"] = provider.ThinkingMode == "enabled";
+            if (provider.Id == "deepseek" && (provider.ThinkingMode == "enabled" || provider.ThinkingMode == "disabled" ||
+                provider.Model == "deepseek-flash" || provider.Model.StartsWith("deepseek-v4-", StringComparison.OrdinalIgnoreCase)))
+                body["thinking"] = new { type = provider.ThinkingMode == "enabled" ? "enabled" : "disabled" };
+            // Request JSON through the prompt without requiring provider-specific schema features.
             return Json.Write(body);
         }
 
         public async Task<string> CompleteAsync(ProviderProfile provider, string key, IList<ChatTurn> messages,
             bool stream, bool json, Action<string> progress, CancellationToken cancellation)
         {
+            string requestId = Guid.NewGuid().ToString("N"); var watch = Stopwatch.StartNew();
+            int status = 0, budget = OutputBudget(provider, json);
+            int seconds = IsGlm53(provider) || IsOpenAiReasoning(provider) || provider.Id == "custom" || provider.ThinkingMode == "enabled" ||
+                (provider.Id == "zhipu" && !CanDisableGlm(provider) && provider.ThinkingMode != "disabled") ? 120 : 75;
+            Exception failure = null; string apiCode = "", parameter = "";
+            if (Log != null) Log.Request(requestId, "completion", provider, stream, budget, "started", 0, 0, null, "", "");
+            try {
             if (string.IsNullOrWhiteSpace(key)) throw new UserError("key", "还没有 API 密钥。请从托盘打开设置，选择服务并填写密钥。");
             if (string.IsNullOrWhiteSpace(provider.Model)) throw new UserError("model", "请在设置中填写模型名称。");
             using (var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation)) {
-                deadline.CancelAfter(TimeSpan.FromSeconds(75));
+                deadline.CancelAfter(TimeSpan.FromSeconds(seconds));
                 try {
                     using (var request = new HttpRequestMessage(HttpMethod.Post, Endpoint(provider.BaseUrl))) {
                         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
-                        request.Content = new StringContent(RequestBody(provider, messages, stream, json ? 1800 : 1600, json), Encoding.UTF8, "application/json");
+                        request.Content = new StringContent(RequestBody(provider, messages, stream, budget, json), Encoding.UTF8, "application/json");
                         using (var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token).ConfigureAwait(false)) {
+                            status = (int)response.StatusCode;
                             if (!response.IsSuccessStatusCode) {
                                 string body = await ReadBoundedAsync(response.Content, deadline.Token).ConfigureAwait(false);
-                                throw Classify((int)response.StatusCode, body);
+                                apiCode = ErrorCode(body, key); parameter = ErrorParameter(body);
+                                throw Classify((int)response.StatusCode, body, key);
                             }
                             string media = response.Content.Headers.ContentType == null ? "" : response.Content.Headers.ContentType.MediaType;
                             if (stream && media == "text/event-stream") {
                                 using (var input = await response.Content.ReadAsStreamAsync().ConfigureAwait(false))
                                 using (var stop = deadline.Token.Register(() => input.Dispose()))
                                 using (var reader = new StreamReader(input, Encoding.UTF8)) {
-                                    string result = await ReadSseAsync(reader, progress, deadline.Token).ConfigureAwait(false);
+                                    string result = await ReadSseAsync(reader, progress, deadline.Token, key).ConfigureAwait(false);
                                     if (string.IsNullOrWhiteSpace(result)) throw new UserError("format", "模型没有返回文字，请重试或更换模型。");
                                     return result.Trim();
                                 }
                             }
                             string payload = await ReadBoundedAsync(response.Content, deadline.Token).ConfigureAwait(false);
-                            string text = ExtractContent(payload, false);
+                            string text = ExtractContent(payload, false, key);
                             if (string.IsNullOrWhiteSpace(text)) throw new UserError("format", "模型没有返回可读内容，请重试。");
                             if (progress != null) progress(text);
                             return text.Trim();
@@ -210,7 +291,7 @@ namespace Leaf
                     }
                 } catch (OperationCanceledException) {
                     if (cancellation.IsCancellationRequested) throw;
-                    throw new UserError("timeout", "等待超过 75 秒。可以重试，或选择更快的模型。");
+                    throw new UserError("timeout", "等待超过 " + seconds + " 秒。可以重试，或选择更快的模型。");
                 } catch (HttpRequestException) {
                     throw new UserError("network", "无法连接翻译服务。请检查网络、代理和接口地址。");
                 } catch (IOException) {
@@ -222,6 +303,12 @@ namespace Leaf
                     if (deadline.IsCancellationRequested) throw new UserError("timeout", "请求超时，请重试。");
                     throw;
                 }
+            }
+            } catch (Exception error) { failure = error; throw; }
+            finally {
+                if (Log != null) Log.Request(requestId, "completion", provider, stream, budget,
+                    failure == null ? "success" : failure is OperationCanceledException ? "cancelled" : "failed",
+                    status, watch.ElapsedMilliseconds, failure, apiCode, parameter);
             }
         }
 
@@ -240,7 +327,7 @@ namespace Leaf
             }
         }
 
-        public static async Task<string> ReadSseAsync(TextReader reader, Action<string> progress, CancellationToken cancellation)
+        public static async Task<string> ReadSseAsync(TextReader reader, Action<string> progress, CancellationToken cancellation, string secret = "")
         {
             var output = new StringBuilder(); var data = new StringBuilder();
             string line; bool done = false, finished = false; int characters = 0;
@@ -253,7 +340,7 @@ namespace Leaf
                         string chunk = data.ToString().Trim();
                         if (chunk == "[DONE]") { done = true; break; }
                         finished = finished || HasFinish(chunk);
-                        string delta = ExtractContent(chunk, true);
+                        string delta = ExtractContent(chunk, true, secret);
                         if (delta.Length > 0) { output.Append(delta); if (progress != null) progress(output.ToString()); }
                         data.Clear();
                     }
@@ -266,7 +353,7 @@ namespace Leaf
                 string last = data.ToString().Trim();
                 if (last != "[DONE]") {
                     finished = finished || HasFinish(last);
-                    output.Append(ExtractContent(last, true));
+                    output.Append(ExtractContent(last, true, secret));
                     if (progress != null) progress(output.ToString());
                 } else done = true;
             }
@@ -288,12 +375,12 @@ namespace Leaf
                 return choice != null && choice.TryGetValue("finish_reason", out finish) && finish != null;
             } catch { return false; }
         }
-        public static string ExtractContent(string payload, bool delta)
+        public static string ExtractContent(string payload, bool delta, string secret = "")
         {
             try {
                 var root = Json.Read(payload) as Dictionary<string, object>;
                 if (root == null) throw new FormatException();
-                if (root.ContainsKey("error")) throw new UserError("api", "服务返回错误，请检查模型和账号额度后重试。");
+                if (root.ContainsKey("error")) throw Classify(400, payload, secret);
                 object raw;
                 if (!root.TryGetValue("choices", out raw)) return delta ? "" : Invalid();
                 var choices = raw as object[];
@@ -302,7 +389,7 @@ namespace Leaf
                 if (choice == null) throw new FormatException();
                 object finish;
                 if (choice.TryGetValue("finish_reason", out finish) && finish != null) {
-                    if (Convert.ToString(finish) == "length") throw new UserError("length", "模型输出达到长度限制，内容未完成。请缩小输入或重试。");
+                    if (Convert.ToString(finish) == "length") throw new UserError("length", "模型输出达到长度限制（含思考），内容未完成。请缩小输入或选择更轻量的模型。");
                 }
                 object container;
                 if (!choice.TryGetValue(delta ? "delta" : "message", out container)) return delta ? "" : Invalid();
@@ -314,7 +401,35 @@ namespace Leaf
             catch { throw new UserError("format", "服务返回格式异常，请检查接口或更换模型。"); }
         }
         private static string Invalid() { throw new UserError("format", "服务返回格式异常，请检查接口或更换模型。"); }
-        public static UserError Classify(int status, string body)
+        private static Dictionary<string, object> ErrorObject(string body)
+        {
+            try {
+                var root = Json.Read(body ?? "") as Dictionary<string, object>; object raw;
+                return root != null && root.TryGetValue("error", out raw) ? raw as Dictionary<string, object> : root;
+            } catch { return null; }
+        }
+        private static string Redact(string text, string secret)
+        {
+            if (!string.IsNullOrEmpty(secret)) text = text.Replace(secret, "[redacted]");
+            text = Regex.Replace(text, @"(?i)(?:Bearer\s+\S+|sk-[a-z0-9_-]{8,}|[a-z0-9_-]{16,}\.[a-z0-9_-]{8,})", "[redacted]");
+            text = new string(text.Where(c => !char.IsControl(c)).ToArray());
+            return text.Length > 240 ? text.Substring(0, 240) + "…" : text;
+        }
+        public static string ErrorCode(string body, string secret)
+        {
+            var error = ErrorObject(body); object code;
+            string value = error != null && error.TryGetValue("code", out code) ? Redact(Convert.ToString(code), secret) : "";
+            return Regex.IsMatch(value, @"^[A-Za-z0-9_.-]{1,60}$") ? value : "";
+        }
+        public static string ErrorParameter(string body)
+        {
+            string text = (body ?? "").ToLowerInvariant();
+            if (text.Contains("思考")) return "thinking";
+            foreach (string name in new[] { "thinking", "reasoning_effort", "temperature", "max_completion_tokens", "max_tokens", "enable_thinking", "response_format" })
+                if (text.Contains(name)) return name;
+            return "";
+        }
+        public static UserError Classify(int status, string body, string secret = "")
         {
             string text = (body ?? "").ToLowerInvariant();
             if (status == 402 || text.Contains("insufficient_quota") || text.Contains("balance") || text.Contains("余额") || text.Contains("额度不足"))
@@ -323,7 +438,14 @@ namespace Leaf
             if (status == 429) return new UserError("rate", "请求过于频繁。请稍候再试。");
             if (status >= 500) return new UserError("server", "翻译服务暂时不可用。请稍候再试。");
             if (status >= 300 && status < 400) return new UserError("endpoint", "接口返回跳转，请在设置中填写最终的 API 地址。");
-            return new UserError("model", "服务拒绝了请求。请检查接口地址、模型名称和账号权限。");
+            string message = ""; var error = ErrorObject(body); object detail;
+            if (error != null && error.TryGetValue("message", out detail) && detail is string) message = Redact((string)detail, secret);
+            string code = ErrorCode(body, secret);
+            string suffix = "（HTTP " + status + (code.Length > 0 ? "，" + code : "") + "）";
+            bool incompatible = ErrorParameter(body).Length > 0;
+            return new UserError(incompatible ? "parameter" : "model",
+                (incompatible ? "模型不接受当前请求参数" : "服务拒绝了请求") + suffix + "。" +
+                (message.Length > 0 ? "\n" + message : "请检查接口地址、模型名称和账号权限。"));
         }
         public void Dispose() { client.Dispose(); }
     }

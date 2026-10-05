@@ -36,11 +36,31 @@ namespace Leaf
                     Check(!shell.Pinned, "Asking does not pin the popup", checks);
                     Check(Ui.Get<TextBlock>(shell.Popup, "TopicLabel").Text.Contains("prowess"), "Follow-up identifies the selected word", checks);
                     Ui.Render(shell.Popup, Path.Combine(folder, "popup-question.png"));
+                    shell.Popup.Width = 360; shell.Popup.Height = 380; shell.UpdatePopupTypography();
+                    var translation = Ui.Get<TextBlock>(shell.Popup, "TranslationText");
+                    Check(translation.FontSize < 22 && translation.FontSize >= 18, "Compact popup reduces translation typography within readable bounds", checks);
+                    Check(Ui.Get<RichTextBox>(shell.Popup, "SourceText").Document.FontSize < 16, "Compact popup scales the FlowDocument source too", checks);
+                    Check(Ui.Get<StackPanel>(shell.Popup, "LearningSections").Children.OfType<TextBlock>().All(x => x.FontSize >= 11), "Learning text has a readable minimum", checks);
+                    Ui.Render(shell.Popup, Path.Combine(folder, "popup-small-question.png"));
+                    Ui.Visible(Ui.Get<Border>(shell.Popup, "InputPanel"), false);
+                    Ui.Render(shell.Popup, Path.Combine(folder, "popup-small.png"));
+                    shell.Popup.Width = 700; shell.Popup.Height = 900; shell.UpdatePopupTypography();
+                    Check(translation.FontSize == 22, "Large popup never excessively enlarges the text", checks);
+                    Ui.Render(shell.Popup, Path.Combine(folder, "popup-large.png"));
+                    shell.Popup.Width = 456; shell.Popup.Height = 620; shell.UpdatePopupTypography();
+                    Check(translation.FontSize == 22, "Resizing back restores the original typography without cumulative scaling", checks);
 
                     var settings = new SettingsWindow(shell);
+                    Check(Ui.Get<ComboBox>(settings.Window, "ProviderCombo").SelectedIndex == -1, "New users choose an endpoint explicitly rather than guessing from a key", checks);
+                    Ui.Get<ComboBox>(settings.Window, "ProviderCombo").SelectedIndex = 0;
                     Check(settings.Window.FindName("MonitorCombo") == null, "Popup-position selection is removed from settings", checks);
                     var model = Ui.Get<ComboBox>(settings.Window, "ModelInput");
                     Check(model.IsEditable, "Model selection accepts a manual ID", checks);
+                    Check(Ui.Get<TextBox>(settings.Window, "ShortcutInput").IsReadOnly, "Shortcut settings record keys instead of accepting typed names", checks);
+                    Check(Ui.Get<CheckBox>(settings.Window, "ClipboardModeCheck").IsChecked == false, "The default clipboard checkbox is off", checks);
+                    model.Text = "glm-5.3-flash";
+                    Check(!Ui.Get<ComboBoxItem>(settings.Window, "DisableThinkingOption").IsEnabled && Ui.Get<StackPanel>(settings.Window, "ReasoningPanel").Visibility == Visibility.Visible,
+                        "GLM-5.3 advanced options explain mandatory reasoning and expose effort", checks);
                     model.Text = "example-model";
                     var scene = Ui.Get<ComboBox>(settings.Window, "SceneCombo");
                     scene.SelectedItem = "游戏";

@@ -35,7 +35,7 @@ public static class CoreTests
         string folder = Path.Combine(Path.GetTempPath(), "leaf-tests-" + Guid.NewGuid().ToString("N"));
         try {
             if (args.Contains("--native")) return WindowsNativeTests.Run(folder);
-            Domain(); Storage(folder); Transport().GetAwaiter().GetResult();
+            Domain(); Storage(folder); Transport().GetAwaiter().GetResult(); Diagnostics(folder).GetAwaiter().GetResult();
             assertions += ApplicationTests.Run(Path.Combine(folder, "app"));
             Console.WriteLine("SUCCESS: " + assertions + " assertions"); return 0;
         } catch (Exception error) { Console.Error.WriteLine(error); return 1; }
@@ -48,11 +48,21 @@ public static class CoreTests
     private static void Domain()
     {
         var settings = Settings.Defaults();
+        Check(!settings.ClipboardMode, "New settings default to selection mode");
+        var optedIn = Json.Copy(settings); optedIn.ClipboardMode = true; optedIn.Normalize();
+        Check(optedIn.ClipboardMode, "Upgrades preserve an explicitly enabled clipboard preference");
+        var previousProviders = Json.Copy(settings); previousProviders.Providers.RemoveAll(p => p.Id == "openai" || p.Id == "custom");
+        previousProviders.Normalize();
+        Check(previousProviders.Providers.Any(p => p.Id == "openai") && previousProviders.Providers.Any(p => p.Id == "custom"), "Existing settings gain OpenAI and custom endpoint presets without replacing the active provider");
         string key = CacheKeys.For("prowess", settings);
         var other = Json.Copy(settings); other.Scene = "游戏"; other.SceneDetail = "Example";
         Check(key != CacheKeys.For("prowess", other), "Context changes invalidate cache");
         other = Json.Copy(settings); other.Providers[0].Model = "different-model";
         Check(key != CacheKeys.For("prowess", other), "Model changes invalidate cache");
+        other = Json.Copy(settings); other.Provider.ThinkingMode = "enabled";
+        Check(key != CacheKeys.For("prowess", other), "Thinking-mode changes invalidate cached answers");
+        other = Json.Copy(settings); other.Provider.MaxOutputTokens = 4096;
+        Check(key != CacheKeys.For("prowess", other), "Output-limit changes invalidate cached answers");
         other = Json.Copy(settings); other.TargetLanguage = "日本語";
         Check(key != CacheKeys.For("prowess", other), "Target language changes invalidate cache");
         other = Json.Copy(settings); other.Learning[2].Enabled = true;
@@ -82,6 +92,10 @@ public static class CoreTests
         Check(HotkeySpec.Parse(" alt + space ").VirtualKey == 32 && (HotkeySpec.Parse("alt+space").Modifiers & 15) == 1, "Alt+Space accepts spaces and case differences");
         Check(HotkeySpec.Parse("Alt+空格").VirtualKey == 32, "The Chinese space-key name is accepted");
         Check(HotkeySpec.Parse("Ctrl+1").VirtualKey == 49, "Digit shortcuts use the digit key rather than numeric enum values");
+        Check(HotkeySpec.Record(System.Windows.Input.Key.Space, System.Windows.Input.ModifierKeys.Alt) == "Alt+Space", "Key recording preserves Alt+Space");
+        Check(HotkeySpec.Record(System.Windows.Input.Key.D1, System.Windows.Input.ModifierKeys.Control) == "Ctrl+1", "Key recording displays digits canonically");
+        Throws(() => HotkeySpec.Record(System.Windows.Input.Key.A, System.Windows.Input.ModifierKeys.Shift), "shortcut", "Key recording rejects typing-only combinations");
+        Throws(() => HotkeySpec.Record(System.Windows.Input.Key.LeftAlt, System.Windows.Input.ModifierKeys.Alt), "shortcut", "Modifier-only recording waits for a main key");
         Throws(() => HotkeySpec.Parse("Shift+A"), "shortcut", "Typing-only shortcuts are rejected");
         Throws(() => HotkeySpec.Parse("Ctrl+NoSuchKey"), "shortcut", "Invalid shortcut key is rejected");
         var gate = new RequestGate(); long old = gate.Next(), latest = gate.Next();
@@ -163,9 +177,29 @@ public static class CoreTests
         string zhipu = LlmClient.RequestBody(profiles[0], messages, true, 1600, false);
         string qwen = LlmClient.RequestBody(profiles[1], messages, true, 1600, false);
         string deepseek = LlmClient.RequestBody(profiles[2], messages, true, 1600, false);
-        Check(zhipu.Contains("\"thinking\"") && zhipu.Contains("disabled"), "Zhipu request disables reasoning");
+        Check(!zhipu.Contains("\"thinking\"") && !zhipu.Contains("\"temperature\""), "Unknown GLM versions keep provider defaults without unsupported overrides");
+        foreach (string model in new[] { "glm-5.3", "glm-5.3-flash", "glm-5.3-flashx" }) {
+            var profile = Json.Copy(profiles[0]); profile.Model = model;
+            string body = LlmClient.RequestBody(profile, messages, true, LlmClient.OutputBudget(profile, false), false);
+            Check(body.Contains("\"type\":\"enabled\"") && body.Contains("\"reasoning_effort\":\"low\"") && body.Contains("\"max_tokens\":8192"), model + " uses supported light reasoning and enough output budget");
+            profile.ThinkingMode = "disabled";
+            Throws(() => LlmClient.RequestBody(profile, messages, false, 8192, false), "parameter", model + " cannot send unsupported disabled reasoning");
+        }
+        var legacy = Json.Copy(profiles[0]); legacy.Model = "glm-5.2";
+        Check(LlmClient.RequestBody(legacy, messages, false, 1600, false).Contains("disabled"), "Known switchable GLM versions retain fast translation defaults");
+        legacy.ThinkingMode = "enabled"; legacy.MaxOutputTokens = 12345;
+        Check(LlmClient.RequestBody(legacy, messages, false, LlmClient.OutputBudget(legacy, false), false).Contains("enabled") && LlmClient.OutputBudget(legacy, false) == 12345, "Advanced thinking and token limits affect the actual request");
+        var advanced = Json.Copy(profiles[0]); advanced.Model = "glm-5.3"; advanced.ReasoningEffort = "high";
+        Check(LlmClient.RequestBody(advanced, messages, false, 8192, false).Contains("\"reasoning_effort\":\"high\""), "The selected GLM thinking effort is serialized");
         Check(qwen.Contains("\"enable_thinking\":false"), "Qwen request disables reasoning");
         Check(deepseek.Contains("\"thinking\"") && deepseek.Contains("disabled"), "Current DeepSeek translation requests disable unnecessary reasoning");
+        var openai = Settings.Defaults().Providers.First(p => p.Id == "openai"); openai.Model = "gpt-5-mini";
+        string openaiBody = LlmClient.RequestBody(openai, messages, true, LlmClient.OutputBudget(openai, false), false);
+        Check(openaiBody.Contains("\"max_completion_tokens\":8192") && !openaiBody.Contains("\"max_tokens\"") && !openaiBody.Contains("temperature") && !openaiBody.Contains("thinking"),
+            "OpenAI reasoning requests use completion-token limits without incompatible sampling or vendor-specific thinking parameters");
+        var compatible = Settings.Defaults().Providers.First(p => p.Id == "custom"); compatible.Model = "provider-model";
+        Check(!LlmClient.RequestBody(compatible, messages, true, 1600, false).Contains("temperature"), "Custom compatible services send minimal common parameters");
+        Check(LlmClient.OutputBudget(compatible, false) == 8192, "Unknown compatible models retain enough room for default reasoning");
 
         string sse = ": keepalive\n\ndata: {\"choices\":[{\"delta\":{\"reasoning_content\":\"ignored\"}}]}\n\n" +
             "data: {\"choices\":[{\"delta\":{\"content\":\"你好\"}}]}\n\n" +
@@ -192,6 +226,9 @@ public static class CoreTests
         Check(LlmClient.Classify(429, "insufficient_quota").Code == "quota", "Quota exhaustion is distinguished from rate limiting");
         Check(LlmClient.Classify(429, "").Code == "rate", "Rate limiting gets a dedicated error");
         Check(LlmClient.Classify(503, "").Code == "server", "Provider failures get a dedicated error");
+        var rejected = LlmClient.Classify(400, "{\"error\":{\"code\":\"1210\",\"message\":\"thinking is unsupported, private-key-fixture\"}}", "private-key-fixture");
+        Check(rejected.Code == "parameter" && rejected.Message.Contains("1210") && !rejected.Message.Contains("private-key-fixture"), "Parameter errors show provider diagnostics while redacting the supplied key");
+        Check(LlmClient.Classify(400, "<html>private-key-fixture</html>").Message.IndexOf("<html>", StringComparison.Ordinal) < 0, "HTML error pages are not displayed as diagnostic messages");
         using (var handler = new FixtureHandler("{}", "application/json", 401))
         using (var client = new LlmClient(handler))
             await ThrowsAsync(() => client.CompleteAsync(profiles[0], "test-only", messages, false, false, null, CancellationToken.None), "key", "HTTP failures use visible user errors");
@@ -221,6 +258,25 @@ public static class CoreTests
             var models = await client.ListModelsAsync(profiles[1], "test-only", CancellationToken.None);
             Check(models.Count == 101 && handler.Pages.SequenceEqual(new[] { 1, 2 }), "Bailian catalog pagination includes models beyond the first page");
         }
+    }
+    private static async Task Diagnostics(string folder)
+    {
+        var profile = Settings.Defaults().Provider; profile.Model = "glm-5.3";
+        var log = new DiagnosticLog(Path.Combine(folder, "logs"), 1024);
+        var turns = new List<ChatTurn> { new ChatTurn { Role = "user", Content = "private source fixture" } };
+        using (var handler = new FixtureHandler("{\"error\":{\"code\":\"1210\",\"message\":\"thinking rejected private-key-fixture private source fixture\"}}", "application/json", 400))
+        using (var client = new LlmClient(handler) { Log = log })
+            await ThrowsAsync(() => client.CompleteAsync(profile, "private-key-fixture", turns, true, false, null, CancellationToken.None), "parameter", "Failed API calls produce structured local diagnostics");
+        string entries = string.Concat(Directory.GetFiles(log.Folder).Select(File.ReadAllText));
+        Check(entries.Contains("1210") && entries.Contains("thinking") && entries.Contains("elapsed_ms") && entries.Contains("400"), "Logs identify model, HTTP status, provider code, parameter and timing");
+        Check(!entries.Contains("private-key-fixture") && !entries.Contains("private source fixture") && !entries.Contains("thinking rejected"), "Neither keys, request text nor raw provider messages enter logs");
+        await Task.WhenAll(Enumerable.Range(0, 60).Select(i => Task.Run(() => log.Event("fixture", new Exception("private exception fixture")))));
+        var files = Directory.GetFiles(log.Folder);
+        Check(files.Length == 5 && files.All(x => new FileInfo(x).Length <= 1024), "Concurrent logging rotates at a bounded five-file limit");
+        Check(files.SelectMany(File.ReadAllLines).All(x => Json.Read(x) is Dictionary<string, object>), "Concurrent log writes remain complete JSON records");
+        string occupied = Path.Combine(folder, "log-path-is-file"); File.WriteAllText(occupied, "fixture");
+        var unavailable = new DiagnosticLog(occupied); unavailable.Event("fixture", null);
+        Check(unavailable.WriteFailed, "An unavailable log directory cannot crash the application");
     }
     private static async Task Loopback(List<ChatTurn> messages)
     {

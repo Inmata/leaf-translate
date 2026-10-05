@@ -22,6 +22,9 @@ namespace Leaf
         public string Name { get; set; }
         public string BaseUrl { get; set; }
         public string Model { get; set; }
+        public string ThinkingMode { get; set; }
+        public string ReasoningEffort { get; set; }
+        public int MaxOutputTokens { get; set; }
         public override string ToString() { return Name; }
     }
     public sealed class LearningOption
@@ -79,14 +82,16 @@ namespace Leaf
         public static Settings Defaults()
         {
             return new Settings {
-                Version = 2, ProviderId = "zhipu", TargetLanguage = "中文", ClipboardMode = true,
+                Version = 2, ProviderId = "zhipu", TargetLanguage = "中文", ClipboardMode = false,
                 Shortcut = "Ctrl+Alt+T", Scene = "通用", SceneDetail = "", GameTextType = "自动判断",
                 Style = "自然准确", HistoryEnabled = true, HistoryLimit = 200,
                 Presets = new List<LearningPreset>(),
                 Providers = new List<ProviderProfile> {
                     new ProviderProfile { Id = "zhipu", Name = "智谱", BaseUrl = "https://open.bigmodel.cn/api/paas/v4", Model = "" },
                     new ProviderProfile { Id = "qwen", Name = "千问", BaseUrl = "https://dashscope.aliyuncs.com/compatible-mode/v1", Model = "" },
-                    new ProviderProfile { Id = "deepseek", Name = "DeepSeek", BaseUrl = "https://api.deepseek.com", Model = "" }
+                    new ProviderProfile { Id = "deepseek", Name = "DeepSeek", BaseUrl = "https://api.deepseek.com", Model = "" },
+                    new ProviderProfile { Id = "openai", Name = "OpenAI", BaseUrl = "https://api.openai.com/v1", Model = "" },
+                    new ProviderProfile { Id = "custom", Name = "自定义兼容服务", BaseUrl = "", Model = "" }
                 },
                 Learning = new List<LearningOption> {
                     new LearningOption { Id = "lemma", Name = "原形与词形", Instruction = "解释原形、词性、当前形式与原形的关系。", Enabled = true },
@@ -101,6 +106,10 @@ namespace Leaf
         {
             var defaults = Defaults();
             if (Providers == null || Providers.Count == 0) Providers = defaults.Providers;
+            if (Providers.Any(p => p.Id == "zhipu" || p.Id == "qwen" || p.Id == "deepseek")) {
+                foreach (var profile in defaults.Providers.Where(p => p.Id == "openai" || p.Id == "custom"))
+                    if (!Providers.Any(p => p.Id == profile.Id)) Providers.Add(profile);
+            }
             if (Learning == null) Learning = defaults.Learning;
             if (Presets == null) Presets = new List<LearningPreset>();
             if (Version < 2) {
@@ -202,6 +211,8 @@ namespace Leaf
             var state = new {
                 text = text.Trim(), provider = settings.Provider.Id,
                 endpoint = settings.Provider.BaseUrl.TrimEnd('/'), model = settings.Provider.Model,
+                thinking = settings.Provider.ThinkingMode ?? "auto", effort = settings.Provider.ReasoningEffort ?? "low",
+                output_limit = settings.Provider.MaxOutputTokens,
                 target = settings.TargetLanguage, scene = settings.Scene,
                 detail = settings.Scene == "通用" ? "" : settings.SceneDetail,
                 gameType = settings.Scene == "游戏" ? settings.GameTextType : "", style = settings.Style,

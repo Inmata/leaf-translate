@@ -17,6 +17,7 @@ namespace Leaf
     {
         public LocalStore Store { get; private set; }
         public LlmClient Client { get; private set; }
+        public DiagnosticLog Log { get; private set; }
         public Window Popup { get; private set; }
         public bool NativeEnabled { get; private set; }
         public TranslationRecord Current { get; private set; }
@@ -28,6 +29,7 @@ namespace Leaf
         private IntPtr handle;
         private string registeredShortcut;
         private GlobalShortcut shortcutRegistration;
+        private bool shortcutRecording;
         private DispatcherTimer placementTimer;
         private bool restoringPlacement, placementInitialized;
         private OutsideClick outsideClick;
@@ -44,6 +46,7 @@ namespace Leaf
         public AppShell(LocalStore store, bool native, LlmClient client)
         {
             Store = store; NativeEnabled = native; Client = client;
+            Log = client.Log ?? new DiagnosticLog(System.IO.Path.Combine(store.Folder, "logs")); Client.Log = Log;
             Popup = Ui.Load("Popup"); InitializePopup();
         }
         public void Start(bool background, bool demonstration)
@@ -56,17 +59,17 @@ namespace Leaf
             })));
             BuildTray();
             try { RegisterShortcut(Store.Settings.Shortcut); }
-            catch (UserError error) { ShowError(error.Message, OpenSettings); }
+            catch (UserError error) { Log.Event("shortcut_register_failed", error); ShowError(error.Message, OpenSettings); }
             if (demo) { PopulateDemo(); ShowPopup(); }
             else if (!background && (Credentials.Read(Store.Settings.ProviderId).Length == 0 || string.IsNullOrWhiteSpace(Store.Settings.Provider.Model))) OpenSettings();
             else if (!background) ShowPopup();
             if (!string.IsNullOrEmpty(Store.Warning)) {
-                tray.ShowBalloonTip(5000, "叶译", Store.Warning, Forms.ToolTipIcon.Warning);
+                tray.ShowBalloonTip(5000, "Leaf", Store.Warning, Forms.ToolTipIcon.Warning);
             }
         }
         private IntPtr Messages(IntPtr window, int message, IntPtr wparam, IntPtr lparam, ref bool handled)
         {
-            if (message == 0x0312 && wparam.ToInt32() == HotkeyId) { handled = true; CaptureAndTranslate(); }
+            if (message == 0x0312 && wparam.ToInt32() == HotkeyId) { handled = true; if (!shortcutRecording) CaptureAndTranslate(); }
             if (message == 0x8001) { handled = true; ShowPopup(); }
             return IntPtr.Zero;
         }
@@ -79,15 +82,21 @@ namespace Leaf
                 try {
                     var settings = Json.Copy(Store.Settings); settings.ClipboardMode = !settings.ClipboardMode;
                     Store.SaveSettings(settings); clipboardMenu.Checked = settings.ClipboardMode;
-                    tray.ShowBalloonTip(2500, "叶译", settings.ClipboardMode ? "快捷键读取剪贴板，请先复制文字。" : "快捷键尝试读取当前选中文字。", Forms.ToolTipIcon.Info);
+                    tray.ShowBalloonTip(2500, "Leaf", settings.ClipboardMode ? "快捷键读取剪贴板，请先复制文字。" : "快捷键尝试读取当前选中文字。", Forms.ToolTipIcon.Info);
                 } catch (UserError error) { ShowError(error.Message, null); }
             };
             menu.Items.Add(clipboardMenu); menu.Items.Add(new Forms.ToolStripSeparator());
             menu.Items.Add("历史记录", null, (s, e) => OpenHistory());
             menu.Items.Add("设置", null, (s, e) => OpenSettings());
+            menu.Items.Add("打开日志", null, (s, e) => {
+                try {
+                    System.IO.Directory.CreateDirectory(Log.Folder);
+                    Process.Start(new ProcessStartInfo(Log.Folder) { UseShellExecute = true });
+                } catch (Exception error) { Log.Event("logs_open_failed", error); ShowError("无法打开日志目录。", null); ShowPopup(); }
+            });
             menu.Items.Add(new Forms.ToolStripSeparator());
             menu.Items.Add("退出", null, (s, e) => Exit());
-            tray = new Forms.NotifyIcon { Icon = TrayIcon(), Text = "叶译 · " + Store.Settings.Shortcut, ContextMenuStrip = menu, Visible = true };
+            tray = new Forms.NotifyIcon { Icon = TrayIcon(), Text = "Leaf · " + Store.Settings.Shortcut, ContextMenuStrip = menu, Visible = true };
             tray.DoubleClick += (s, e) => ShowPopup();
         }
         private static Icon TrayIcon()
@@ -112,15 +121,29 @@ namespace Leaf
                 throw;
             }
             registeredShortcut = shortcut;
+            Log.Event("shortcut_registered", null);
+        }
+        public void SetShortcutRecording(bool recording)
+        {
+            if (shortcutRecording == recording) return;
+            shortcutRecording = recording;
+            if (recording) {
+                if (shortcutRegistration != null) { shortcutRegistration.Dispose(); shortcutRegistration = null; }
+                registeredShortcut = null;
+            } else if (!disposed && !exiting) {
+                try { RegisterShortcut(Store.Settings.Shortcut); }
+                catch (UserError error) { Log.Event("shortcut_restore_failed", error); ShowError(error.Message, OpenSettings); }
+            }
         }
         private async void CaptureAndTranslate()
         {
-            if (captureBusy) return;
+            if (captureBusy || shortcutRecording) return;
             captureBusy = true;
             string text = null, kind = Store.Settings.ClipboardMode ? "剪贴板" : "选中文字";
             try {
                 text = Store.Settings.ClipboardMode ? Native.ClipboardText() : await Native.SelectedTextAsync();
             } catch (Exception error) {
+                Log.Event("capture_failed", error);
                 if (!(error is OperationCanceledException)) {
                     CancelRequests(); Current = null; DisplayRecord();
                     Ui.Get<TextBlock>(Popup, "SourceBadge").Text = Store.Settings.ClipboardMode ? "剪贴板模式" : "选中模式";
@@ -159,7 +182,7 @@ namespace Leaf
             var placement = Native.CapturePlacement(Popup);
             if (placement == null || placement.Width <= 0 || placement.Height <= 0 || Json.Write(placement) == Json.Write(Store.Settings.Placement)) return;
             try { Store.SavePlacement(placement); }
-            catch (UserError error) { ShowError(error.Message, null); }
+            catch (UserError error) { Log.Event("placement_save_failed", error); ShowError(error.Message, null); }
         }
         public void HidePopup()
         {
@@ -211,8 +234,9 @@ namespace Leaf
             }
             CancelRequests();
             if (!settings.HistoryEnabled) Forget(null);
-            if (clipboardMenu != null) { clipboardMenu.Checked = settings.ClipboardMode; tray.Text = "叶译 · " + settings.Shortcut; }
+            if (clipboardMenu != null) { clipboardMenu.Checked = settings.ClipboardMode; tray.Text = "Leaf · " + settings.Shortcut; }
             if (historyWindow != null) historyWindow.Refresh();
+            Log.Event("settings_saved", null);
         }
         public void OpenRecord(TranslationRecord record)
         {
@@ -228,7 +252,7 @@ namespace Leaf
         {
             if (Current == null || demo) return;
             try { Store.Save(Current); if (historyWindow != null) historyWindow.Refresh(); }
-            catch (UserError error) { ShowError(error.Message, null); }
+            catch (UserError error) { Log.Event("history_save_failed", error); ShowError(error.Message, null); }
         }
         private void CancelRequests()
         {
@@ -251,6 +275,7 @@ namespace Leaf
             if (disposed) return;
             RememberPlacement();
             disposed = true;
+            Log.Event("app_exit", null);
             if (Current != null && !demo) {
                 Current.Draft = Ui.Get<TextBox>(Popup, "QuestionInput").Text;
                 try { Store.Save(Current); } catch { }
