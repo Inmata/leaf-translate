@@ -60,14 +60,14 @@ public static class ExitScenarioTests
         throw new ArgumentException("Unknown exit scenario: " + mode);
     }
 
-    private static async Task<LocalStore> ConfiguredStore(string data)
+    private static Task<LocalStore> ConfiguredStore(string data)
     {
         var store = new LocalStore(data);
         var settings = Json.Copy(store.Settings);
         settings.Provider.Model = "exit-fixture-model";
         settings.Provider.BaseUrl = "https://exit.invalid/v1";
         store.SaveSettings(settings);
-        return store;
+        return Task.FromResult(store);
     }
 
     private static async Task Normal(string data, string folder)

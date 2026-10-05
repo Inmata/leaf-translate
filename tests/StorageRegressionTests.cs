@@ -1368,7 +1368,6 @@ public static class StorageRegressionTests
         private readonly Dictionary<string, string> keys = new Dictionary<string, string>();
         public bool FailNextSave;
         public Func<string, bool> FailDelete;
-        public Func<string, bool> FailSave;
         public readonly List<string> Log = new List<string>();
         public string Read(ProviderProfile profile)
         {
@@ -1381,7 +1380,6 @@ public static class StorageRegressionTests
             string id = Credentials.ScopedId(profile);
             Log.Add("save " + id + " " + key);
             if (FailNextSave) { FailNextSave = false; throw new UserError("credentials", "Fixture failure"); }
-            if (FailSave != null && FailSave(id)) throw new UserError("credentials", "Fixture save failure");
             keys[id] = key;
         }
         public void Delete(ProviderProfile profile)
