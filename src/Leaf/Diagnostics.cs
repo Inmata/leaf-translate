@@ -10,6 +10,10 @@ namespace Leaf
     // Structured metadata only: never accept request/response bodies or passwords.
     public sealed class DiagnosticLog
     {
+        // Fixed stage names are the only strings a capture row may carry.
+        private static readonly string[] CaptureStages = {
+            "snapshot", "uia", "copy_wait", "copy_send", "clipboard_read", "clipboard_restore", "result"
+        };
         private readonly object sync = new object();
         private readonly int limit;
         public string Folder { get; private set; }
@@ -45,6 +49,40 @@ namespace Leaf
             row["http_status"] = status; row["elapsed_ms"] = elapsed;
             row["api_code"] = Token(apiCode); row["parameter"] = Token(parameter);
             Error(row, error); Write(row);
+        }
+        // One row per whitelisted stage plus one final row, all sharing the capture id.
+        // This never accepts selection text, window titles, control Name/Value, context,
+        // conversation content or a content hash.
+        public void Capture(CaptureTelemetry telemetry)
+        {
+            if (telemetry == null) return;
+            string id = Token(telemetry.Id);
+            long elapsed = 0;
+            var steps = telemetry.Steps ?? new List<CaptureStep>();
+            foreach (var step in steps) {
+                if (step == null) continue;
+                string stage = Token(step.Stage);
+                if (Array.IndexOf(CaptureStages, stage) < 0) continue;
+                elapsed += step.ElapsedMs;
+                var row = Base("capture_stage");
+                row["capture_id"] = id; row["stage"] = stage;
+                row["reason"] = step.Reason.ToString();
+                row["candidate_count"] = step.CandidateCount; row["control_type_id"] = step.ControlTypeId;
+                row["pattern_supported"] = step.PatternSupported; row["foreground_same"] = step.ForegroundSame;
+                row["clipboard_changed"] = step.ClipboardChanged; row["modifiers_released"] = step.ModifiersReleased;
+                row["native_error"] = step.NativeError; row["hresult"] = step.HResult;
+                row["elapsed_ms"] = step.ElapsedMs;
+                Write(row);
+            }
+            // Only a definite system failure is a capture_failed; Empty/Unavailable are normal results.
+            var result = Base(telemetry.Status == CaptureStatus.Failed ? "capture_failed" : "capture_result");
+            result["capture_id"] = id; result["stage"] = "result";
+            result["clipboard_mode"] = telemetry.ClipboardMode; result["shortcut"] = Token(telemetry.Shortcut);
+            result["foreground_process_id"] = (long)telemetry.ForegroundProcessId;
+            result["status"] = telemetry.Status.ToString(); result["reason"] = telemetry.Reason.ToString();
+            result["text_length"] = telemetry.TextLength; result["step_count"] = steps.Count;
+            result["elapsed_ms"] = elapsed;
+            Write(result);
         }
         private static Dictionary<string, object> Base(string name)
         {

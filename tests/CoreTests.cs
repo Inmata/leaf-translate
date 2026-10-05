@@ -35,7 +35,9 @@ public static class CoreTests
         string folder = Path.Combine(Path.GetTempPath(), "leaf-tests-" + Guid.NewGuid().ToString("N"));
         try {
             if (args.Contains("--native")) return WindowsNativeTests.Run(folder);
-            Domain(); Storage(folder); Transport().GetAwaiter().GetResult(); Diagnostics(folder).GetAwaiter().GetResult();
+            Domain(); Storage(folder);
+            assertions += SelectionTests.Run().GetAwaiter().GetResult();
+            Transport().GetAwaiter().GetResult(); Diagnostics(folder).GetAwaiter().GetResult();
             assertions += ApplicationTests.Run(Path.Combine(folder, "app"));
             Console.WriteLine("SUCCESS: " + assertions + " assertions"); return 0;
         } catch (Exception error) { Console.Error.WriteLine(error); return 1; }
