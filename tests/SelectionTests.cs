@@ -118,6 +118,7 @@ internal static class SelectionTests
         await StagesRetained(reader, probe);
         await Diagnostics(reader, probe);
         CopyStateMachine();
+        await CopyWorker();
         return count + assertions;
     }
 
@@ -197,6 +198,158 @@ internal static class SelectionTests
             "Clipboard content is used only when its owner is the captured process");
     }
 
+    // The production copy worker against a scripted desktop: sequence, ownership,
+    // cancellation and restore are checked on the real state machine, not only on a predicate.
+    private static async Task CopyWorker()
+    {
+        var target = new CaptureTarget { Window = new IntPtr(123), ProcessId = 456 };
+
+        // The public entry point runs the same worker against the supplied host.
+        var throughWorker = await Native.CopySelectionAsync(target, CancellationToken.None, new ScriptedCopyHost());
+        Check(throughWorker.Status == CaptureStatus.Text && throughWorker.Text == "copy fixture",
+            "The copy entry point runs the scripted host through the real worker");
+
+        // An old clipboard that could not be read completely is "unknown", never "empty".
+        var blind = new ScriptedCopyHost { BackupResult = null };
+        using (var deadline = new CancellationTokenSource()) {
+            var outcome = Native.CopyOnSta(target, deadline, new List<CaptureStep>(), blind);
+            Check(outcome.Status == CaptureStatus.Text && blind.RestoreCalls == 0 && blind.EmptyRestoreCalls == 0,
+                "An old clipboard that could not be saved is left alone instead of being cleared");
+            Check(Step(outcome, "clipboard_restore") != null && !Step(outcome, "clipboard_restore").ClipboardChanged &&
+                Step(outcome, "clipboard_restore").Reason != CaptureReason.None,
+                "A restore that was not performed is reported with an honest reason");
+        }
+
+        // A clipboard that was read and found empty can be restored as empty.
+        var emptyClipboard = new ScriptedCopyHost { BackupResult = ClipboardBackup.Empty() };
+        using (var deadline = new CancellationTokenSource()) {
+            var outcome = Native.CopyOnSta(target, deadline, new List<CaptureStep>(), emptyClipboard);
+            Check(emptyClipboard.RestoreCalls == 1 && emptyClipboard.EmptyRestoreCalls == 1 &&
+                Step(outcome, "clipboard_restore").ClipboardChanged && Step(outcome, "clipboard_restore").Reason == CaptureReason.None,
+                "A clipboard that was verified empty is put back as empty");
+        }
+
+        // Cancelling during the read stops the worker before it writes anything back.
+        var slowCancel = new ScriptedCopyHost();
+        using (var deadline = new CancellationTokenSource()) {
+            slowCancel.OnRead = () => deadline.Cancel();
+            var outcome = Native.CopyOnSta(target, deadline, new List<CaptureStep>(), slowCancel);
+            Check(outcome.Status == CaptureStatus.Cancelled && slowCancel.RestoreCalls == 0 && slowCancel.EmptyRestoreCalls == 0,
+                "A cancelled worker never writes the clipboard back after its deadline");
+        }
+
+        // A slow read must not accept what the user copied while it was reading.
+        var racing = new ScriptedCopyHost();
+        racing.OnRead = () => { racing.Sequence++; racing.Owner = 789; racing.Text = "user's newer copy"; };
+        using (var deadline = new CancellationTokenSource()) {
+            var outcome = Native.CopyOnSta(target, deadline, new List<CaptureStep>(), racing);
+            Check(outcome.Status != CaptureStatus.Text && outcome.Text == "" && racing.RestoreCalls == 0,
+                "Text the user copied during the read is discarded instead of becoming the selection");
+            Check(Step(outcome, "clipboard_restore") != null && !Step(outcome, "clipboard_restore").ClipboardChanged,
+                "A newer user copy is not overwritten by the restore");
+        }
+
+        // A definite clipboard read failure is typed, keeps its HResult and still restores.
+        var broken = new ScriptedCopyHost { ReadThrows = new System.Runtime.InteropServices.ExternalException("fixture clipboard failure", unchecked((int)0x800401D0)) };
+        using (var deadline = new CancellationTokenSource()) {
+            var outcome = Native.CopyOnSta(target, deadline, new List<CaptureStep>(), broken);
+            Check(outcome.Status == CaptureStatus.Failed && outcome.Reason == CaptureReason.ClipboardBusy &&
+                Step(outcome, "clipboard_read") != null && Step(outcome, "clipboard_read").HResult == unchecked((int)0x800401D0),
+                "A clipboard read failure is reported as a typed failure with its HResult");
+            Check(broken.RestoreCalls == 1, "A failed read still puts back the clipboard this copy replaced");
+        }
+
+        // No sequence change at all is "no new copy", not "unknown origin".
+        var unchanged = new ScriptedCopyHost { CopyLandsOnSend = false, PauseMs = 0 };
+        using (var deadline = new CancellationTokenSource()) {
+            var outcome = Native.CopyOnSta(target, deadline, new List<CaptureStep>(), unchanged);
+            Check(outcome.Status == CaptureStatus.Unavailable && outcome.Reason == CaptureReason.CopyNoUpdate,
+                "A copy that produced no new sequence is reported as no update, not as an unknown clipboard");
+        }
+
+        // A new sequence that belongs to another process is unknown, never our text.
+        var foreign = new ScriptedCopyHost { Owner = 789, PauseMs = 0 };
+        using (var deadline = new CancellationTokenSource()) {
+            var outcome = Native.CopyOnSta(target, deadline, new List<CaptureStep>(), foreign);
+            Check(outcome.Status == CaptureStatus.Unavailable && outcome.Reason == CaptureReason.ClipboardOriginUnknown &&
+                outcome.Text == "" && foreign.RestoreCalls == 0,
+                "A clipboard written by another process is never read as this selection");
+        }
+
+        // Cancelling while the shortcut keys are still held stops the worker before SendInput.
+        var held = new ScriptedCopyHost();
+        using (var deadline = new CancellationTokenSource()) {
+            held.Modifiers = () => { deadline.Cancel(); return true; };
+            var outcome = Native.CopyOnSta(target, deadline, new List<CaptureStep>(), held);
+            Check(outcome.Status == CaptureStatus.Cancelled && held.SendCalls == 0,
+                "A cancelled worker never injects the simulated copy");
+        }
+
+        // A refused input injection is a definite failure with its Win32 error.
+        var denied = new ScriptedCopyHost { SendAccepted = false, LastSendError = 5 };
+        using (var deadline = new CancellationTokenSource()) {
+            var outcome = Native.CopyOnSta(target, deadline, new List<CaptureStep>(), denied);
+            Check(outcome.Status == CaptureStatus.Failed && outcome.Reason == CaptureReason.InputDenied &&
+                Step(outcome, "copy_send").NativeError == 5,
+                "A refused copy injection reports its own Win32 error");
+        }
+
+        // A restore that fails is metadata, never a claimed success.
+        var restoreFails = new ScriptedCopyHost { RestoreThrows = new System.Runtime.InteropServices.ExternalException("fixture restore failure", unchecked((int)0x800401D0)) };
+        using (var deadline = new CancellationTokenSource()) {
+            var outcome = Native.CopyOnSta(target, deadline, new List<CaptureStep>(), restoreFails);
+            Check(outcome.Status == CaptureStatus.Text && Step(outcome, "clipboard_restore") != null &&
+                !Step(outcome, "clipboard_restore").ClipboardChanged &&
+                Step(outcome, "clipboard_restore").Reason == CaptureReason.ClipboardBusy &&
+                Step(outcome, "clipboard_restore").HResult == unchecked((int)0x800401D0),
+                "A failed restore leaves only its own metadata instead of a reason of None");
+        }
+
+        // Stage durations are differences of one stopwatch, so their sum is the elapsed time
+        // rather than a multiple of it.
+        var timed = new ScriptedCopyHost { CopyLandsOnSend = false, SequenceChangeAfterPauses = 3, PauseMs = 25 };
+        using (var deadline = new CancellationTokenSource()) {
+            var steps = new List<CaptureStep>();
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            var outcome = Native.CopyOnSta(target, deadline, steps, timed);
+            watch.Stop();
+            long total = 0; foreach (var step in steps) total += step.ElapsedMs;
+            Check(outcome.Status == CaptureStatus.Text && total <= watch.ElapsedMilliseconds + 40,
+                "Stage elapsed times are durations, not cumulative readings (sum " + total + "ms of " + watch.ElapsedMilliseconds + "ms)");
+            Check(total >= 50, "A worker that waits for a late copy still reports that wait");
+        }
+
+        // The compatibility wrapper keeps the acquirer's order and its input limit instead of
+        // copying blindly. Its fixture window is never the real foreground one, so the worker
+        // refuses to inject anything even on the unfixed path.
+        var wrapperProbe = new FakeSelectionProbe();
+        wrapperProbe.Automation = SelectionCaptureResult.Success("wrapper fixture");
+        wrapperProbe.Copy = SelectionCaptureResult.Success("copy fixture");
+        Check(await Native.SelectedTextAsync(new SelectionAcquirer(wrapperProbe)) == "wrapper fixture",
+            "The compatibility wrapper reads automation before falling back to a copy");
+        Check(wrapperProbe.CopyCalls == 0, "A confirmed automation answer is not re-read through the clipboard");
+
+        wrapperProbe.Automation = SelectionCaptureResult.NoText(CaptureStatus.Unavailable, CaptureReason.UnsupportedPattern);
+        wrapperProbe.Copy = SelectionCaptureResult.NoText(CaptureStatus.Unavailable, CaptureReason.CopyNoUpdate);
+        Check(wrapperProbe.CopyCalls == 0, "An inconclusive automation answer has not copied anything yet");
+        await ThrowsAsync(() => Native.SelectedTextAsync(new SelectionAcquirer(wrapperProbe)), "selection",
+            "The compatibility wrapper still reports an inconclusive capture as a selection error");
+        Check(wrapperProbe.CopyCalls == 1, "An inconclusive automation answer still attempts exactly one fresh copy");
+
+        var longProbe = new FakeSelectionProbe();
+        longProbe.Automation = SelectionCaptureResult.Success(new string('x', 6001));
+        bool limited = false;
+        try { await Native.SelectedTextAsync(new SelectionAcquirer(longProbe)); }
+        catch (UserError error) { limited = error.Code == "length"; }
+        Check(limited, "The compatibility wrapper keeps the input limit instead of returning oversized text");
+    }
+
+    private static async Task ThrowsAsync(Func<Task> action, string code, string label)
+    {
+        try { await action(); } catch (UserError error) { Check(error.Code == code, label); return; }
+        throw new Exception("FAILED: " + label);
+    }
+
     // The log records fixed stage names and typed reasons only, never content.
     private static Task Diagnostics(SelectionAcquirer reader, FakeSelectionProbe probe)
     {
@@ -236,6 +389,65 @@ internal static class SelectionTests
             if (Directory.Exists(folder) && Path.GetFullPath(folder).StartsWith(Path.GetFullPath(Path.GetTempPath()), StringComparison.OrdinalIgnoreCase))
                 Directory.Delete(folder, true);
         }
+    }
+}
+
+// A scripted desktop for the production copy worker: no clipboard, no keyboard, no
+// foreground and no sleeping unless the test asks for it.
+internal sealed class ScriptedCopyHost : ICopyHost
+{
+    public IntPtr Foreground = new IntPtr(123);
+    public uint Sequence = 10;
+    public uint Owner = 456;
+    public string Text = "copy fixture";
+    public ClipboardBackup BackupResult = ClipboardBackup.Of("old clipboard");
+    public Exception ReadThrows, BackupThrows, RestoreThrows;
+    public bool SendAccepted = true;
+    public int LastSendError;
+    public bool CopyLandsOnSend = true;
+    public int SequenceChangeAfterPauses = -1;
+    public int PauseMs = 1;
+    public Func<bool> Modifiers = () => false;
+    public Action OnRead, OnPause;
+    public int BackupCalls, RestoreCalls, EmptyRestoreCalls, SendCalls, ReadCalls, PauseCalls;
+
+    public IntPtr ForegroundWindow { get { return Foreground; } }
+    public uint ClipboardSequence { get { return Sequence; } }
+    public uint ClipboardOwnerProcess { get { return Owner; } }
+    public int SendError { get { return LastSendError; } }
+    public bool ModifiersHeld() { return Modifiers(); }
+    public void Pause(int milliseconds)
+    {
+        PauseCalls++;
+        if (OnPause != null) OnPause();
+        if (PauseCalls == SequenceChangeAfterPauses) Sequence++;
+        if (PauseMs > 0) Thread.Sleep(PauseMs);
+    }
+    public bool SendCopy()
+    {
+        SendCalls++;
+        if (!SendAccepted) return false;
+        if (CopyLandsOnSend) Sequence++;
+        return true;
+    }
+    public string ReadClipboardText()
+    {
+        ReadCalls++;
+        if (OnRead != null) OnRead();
+        if (ReadThrows != null) throw ReadThrows;
+        return Text;
+    }
+    public ClipboardBackup Backup()
+    {
+        BackupCalls++;
+        if (BackupThrows != null) throw BackupThrows;
+        return BackupResult;
+    }
+    public void Restore(ClipboardBackup backup)
+    {
+        RestoreCalls++;
+        if (backup != null && backup.IsEmpty) EmptyRestoreCalls++;
+        if (RestoreThrows != null) throw RestoreThrows;
     }
 }
 
