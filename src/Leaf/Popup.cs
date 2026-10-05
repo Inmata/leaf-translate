@@ -179,8 +179,22 @@ namespace Leaf
             Ui.Get<TextBlock>(Popup, "SourceEditHint").Text = Current != null && input.Text != Current.Source ? "原文已修改 · Enter 翻译" : "Enter 翻译 · Shift+Enter 换行";
             if (focus) { if (NativeEnabled) Popup.Activate(); input.Focus(); input.SelectAll(); }
         }
-        private void ShowSourceReadOnly()
+        // Brings the existing result back to the reading page without rebuilding it, so the
+        // highlighted word, the conversation and any follow-up draft all survive.
+        private void RestoreCurrentPresentation(bool directInput)
         {
+            if (Current == null) return;
+            fillingSource = true;
+            try { Ui.Get<TextBox>(Popup, "SourceInput").Text = Current.Source; }
+            finally { fillingSource = false; }
+            ShowSourceReadOnly();
+            DrawTranslation(selectedCard == null ? "" : selectedCard.target_phrase);
+            Topic();
+            Busy();
+            ShowPopup();
+            if (directInput) BeginSourceEdit(true);
+        }
+        private void ShowSourceReadOnly()        {
             Ui.Visible(Ui.Get<RichTextBox>(Popup, "SourceText"), true);
             Ui.Visible(Ui.Get<Grid>(Popup, "SourceEditor"), false);
             Ui.Visible(Ui.Get<Grid>(Popup, "SourceActions"), false);
@@ -315,7 +329,10 @@ namespace Leaf
             catch (UserError error) { ShowError(error.Message, null); ShowPopup(); return; }
             if (demo) { demo = false; Current = null; }
             string key = CacheKeys.For(text, Store.Settings);
-            if (!force && Current != null && Current.CacheKey == key && (Current.Completed || translating)) { ShowPopup(); return; }
+            if (!force && Current != null && Current.CacheKey == key && (Current.Completed || translating)) {
+                RestoreCurrentPresentation(false);
+                return;
+            }
             if (!force) {
                 var cached = Store.Find(key);
                 if (cached != null) { OpenRecord(cached); return; }

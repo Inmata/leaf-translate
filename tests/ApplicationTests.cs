@@ -221,6 +221,7 @@ public static class ApplicationTests
                 "Custom service configuration is retained for the next launch");
         }
         await CaptureRouting(folder);
+        assertions += await PopupRegressionTests.Run(Path.Combine(folder, "popup"));
     }
     // Typed capture outcomes must reach the popup as different, non-destructive states.
     private static async Task CaptureRouting(string folder)

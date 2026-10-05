@@ -177,9 +177,21 @@ namespace Leaf
             // Empty and Unavailable both prepare input; neither is a confirmed failure.
             PrepareManualInput(result.Reason, invocation.ClipboardMode);
         }
+        // Leaf itself is in front, so there is no foreign selection to read. An editor the
+        // user has not committed to stays untouched; otherwise the current result comes back.
         private void HandleLeafSelectionShortcut(bool directInput)
         {
+            if (Current == null || !HasPendingDraft()) { RestoreCurrentPresentation(directInput); return; }
             ShowPopup(); BeginSourceEdit(directInput);
+        }
+        // A cleared editor is a draft action, not a new session; an unchanged prefill is not a draft.
+        private bool HasPendingDraft()
+        {
+            if (Current == null) return false;
+            var input = Ui.Get<TextBox>(Popup, "SourceInput");
+            if (Ui.Get<Grid>(Popup, "SourceEditor").Visibility != Visibility.Visible) return false;
+            if (input.Text.Length == 0) return false;
+            return input.Text != Current.Source;
         }
         // Keeps whatever the user already has: the conversation, its drafts and any
         // uncommitted edit. Only the input surface is prepared.
