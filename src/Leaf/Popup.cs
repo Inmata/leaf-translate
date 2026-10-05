@@ -333,6 +333,7 @@ namespace Leaf
             if (BlockedByRecovery()) return;
             CancelRequests();
             Current = TranslationRecord.Create(text, sourceKind, Store.Settings);
+            currentHistoryEpoch = Store.HistoryEpoch;
             var record = Current; long version = generation.Next();
             mainCancellation = new CancellationTokenSource(); var cancellation = mainCancellation;
             translating = true; DisplayRecord(); ShowPopup(); Busy();
@@ -351,7 +352,7 @@ namespace Leaf
                 record.Completed = true; translating = false;
                 DrawTranslation(""); Busy();
                 Ui.Visible(Ui.Get<Button>(Popup, "ExpandWordButton"), TextTools.IsWordInput(record.Source));
-                SaveCurrent();
+                await SaveCurrentAsync();
             } catch (OperationCanceledException) { }
             catch (Exception error) {
                 Log.Event("translation_failed", error);
@@ -398,7 +399,7 @@ namespace Leaf
                 selectedCard = WordCard.Parse(payload, word.Text, record.Translation);
                 if (record.Cards.Count >= 16) record.Cards.Remove(record.Cards.Keys.First());
                 record.Cards[cardKey] = selectedCard;
-                wordBusy = false; DrawCard(selectedCard); SaveCurrent(); Busy();
+                wordBusy = false; DrawCard(selectedCard); await SaveCurrentAsync(); Busy();
             } catch (OperationCanceledException) { }
             catch (Exception error) {
                 Log.Event("word_card_failed", error);
@@ -473,7 +474,7 @@ namespace Leaf
                 while (record.Chat.Count > 24) record.Chat.RemoveRange(0, 2);
                 if (input.Text.Trim() == question) input.Clear();
                 record.Draft = input.Text;
-                response.Text = result; chatBusy = false; DrawChat(); SaveCurrent(); Busy();
+                response.Text = result; chatBusy = false; DrawChat(); await SaveCurrentAsync(); Busy();
                 Ui.Get<ScrollViewer>(Popup, "BodyScroll").ScrollToBottom();
             } catch (OperationCanceledException) { }
             catch (Exception error) {
@@ -493,6 +494,7 @@ namespace Leaf
         {
             demo = true;
             Current = TranslationRecord.Create("His combat prowess gives him an edge.", "剪贴板", Store.Settings);
+            currentHistoryEpoch = Store.HistoryEpoch;
             Current.Translation = "他出色的战斗本领让他占据优势。"; Current.Completed = true;
             var word = TextTools.Pieces(Current.Source).First(p => p.Text == "prowess");
             Current.Cards[word.Key] = DemoCard("prowess");

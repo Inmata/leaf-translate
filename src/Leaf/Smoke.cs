@@ -119,13 +119,14 @@ namespace Leaf
                 Check(Convert.ToString(scene.SelectedItem) == "游戏", "Preference preset restores the scene", checks);
                 Ui.Render(settings.Window, Path.Combine(folder, "settings.png"));
                 settings.Window.Close();
-                await shell.WaitForSettingsAsync();
+                await shell.WaitForPersistenceAsync();
 
-                store.Save(shell.Current);
+                await store.SaveAsync(shell.Current, store.HistoryEpoch);
                 var other = TranslationRecord.Create("Elle a pris son temps.", "选中文字", Settings.Defaults());
-                other.Translation = "她不紧不慢地完成了。"; other.Completed = true; store.Save(other);
+                other.Translation = "她不紧不慢地完成了。"; other.Completed = true; await store.SaveAsync(other, store.HistoryEpoch);
                 var german = TranslationRecord.Create("Das kommt darauf an.", "剪贴板", Settings.Defaults());
-                german.Translation = "这要看情况。"; german.Completed = true; store.Save(german);
+                german.Translation = "这要看情况。"; german.Completed = true; await store.SaveAsync(german, store.HistoryEpoch);
+                await shell.WaitForPersistenceAsync();
                 var history = new HistoryWindow(shell);
                 Check(Ui.Get<ListBox>(history.Window, "HistoryList").Items.Count == 3, "History displays saved translations", checks);
                 Ui.Get<TextBox>(history.Window, "HistorySearch").Text = "prowess";
@@ -136,6 +137,7 @@ namespace Leaf
                 Ui.Render(history.Window, Path.Combine(folder, "history.png"));
                 history.Window.Close();
                 shell.Forget(null);
+                await shell.WaitForPersistenceAsync();
                 Check(Ui.Get<Grid>(shell.Popup, "SourceEditor").Visibility == Visibility.Visible, "Empty popup is ready for manual input", checks);
                 Ui.Render(shell.Popup, Path.Combine(folder, "popup-input.png"));
             }

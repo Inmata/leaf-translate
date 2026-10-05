@@ -585,20 +585,28 @@ namespace Leaf
             Ui.Get<TextBox>(Window, "HistorySearch").TextChanged += (s, e) => Refresh();
             Ui.Get<ListBox>(Window, "HistoryList").MouseDoubleClick += (s, e) => Open();
             Ui.Click(Window, "OpenHistory", Open);
-            Ui.Click(Window, "DeleteHistory", () => {
-                var record = Ui.Get<ListBox>(Window, "HistoryList").SelectedItem as TranslationRecord;
-                if (record == null) return;
-                Try(() => { shell.Store.Delete(record.Id); shell.Forget(record.Id); Refresh(); });
-            });
-            Ui.Click(Window, "ClearHistory", () => {
-                if (MessageBox.Show(Window, "清空全部本地历史？", "Leaf", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
-                Try(() => { shell.Store.Clear(); shell.Forget(null); Refresh(); });
-            });
+            Ui.Click(Window, "DeleteHistory", DeleteSelectedAsync);
+            Ui.Click(Window, "ClearHistory", ClearAllAsync);
             Refresh();
         }
-        private void Try(Action action)
+        private async void DeleteSelectedAsync()
         {
-            try { action(); } catch (Exception error) {
+            var record = Ui.Get<ListBox>(Window, "HistoryList").SelectedItem as TranslationRecord;
+            if (record == null) return;
+            try {
+                await shell.Store.DeleteAsync(record.Id);
+                shell.Forget(record.Id); Refresh();
+            } catch (Exception error) {
+                MessageBox.Show(Window, error is UserError ? error.Message : "无法更新本地历史。", "Leaf");
+            }
+        }
+        private async void ClearAllAsync()
+        {
+            if (MessageBox.Show(Window, "清空全部本地历史？", "Leaf", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
+            try {
+                await shell.Store.ClearAsync();
+                shell.Forget(null); Refresh();
+            } catch (Exception error) {
                 MessageBox.Show(Window, error is UserError ? error.Message : "无法更新本地历史。", "Leaf");
             }
         }

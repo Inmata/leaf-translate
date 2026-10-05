@@ -25,6 +25,7 @@ namespace Leaf
         private readonly bool migrateLegacyCredentials;
         private bool credentialMigrationDone;
         private Task lastSettingsTask = Task.FromResult(0);
+        private long currentHistoryEpoch;
         public TranslationRecord Current { get; private set; }
         private readonly RequestGate generation = new RequestGate();
         private readonly RequestGate wordGeneration = new RequestGate();
@@ -105,7 +106,7 @@ namespace Leaf
                 } catch (Exception error) { Log.Event("logs_open_failed", error); ShowError("无法打开日志目录。", null); ShowPopup(); }
             });
             menu.Items.Add(new Forms.ToolStripSeparator());
-            menu.Items.Add("退出", null, (s, e) => Exit());
+            menu.Items.Add("退出", null, async (s, e) => await ExitAsync());
             tray = new Forms.NotifyIcon { Icon = TrayIcon(), Text = "Leaf · " + Store.Settings.Shortcut, ContextMenuStrip = menu, Visible = true };
             tray.DoubleClick += (s, e) => ShowPopup();
         }
@@ -223,7 +224,8 @@ namespace Leaf
             sourceRevision++;
             RememberPlacement();
             if (Current != null) {
-                Current.Draft = Ui.Get<TextBox>(Popup, "QuestionInput").Text; SaveCurrent();
+                Current.Draft = Ui.Get<TextBox>(Popup, "QuestionInput").Text;
+                var pendingSave = SaveCurrentAsync();
             }
             if (outsideClick != null) outsideClick.Dispose();
             Popup.Hide();
@@ -353,7 +355,8 @@ namespace Leaf
         }
         public void OpenRecord(TranslationRecord record)
         {
-            CancelRequests(); demo = false; Current = record; DisplayRecord(); ShowPopup();
+            CancelRequests(); demo = false; Current = record; currentHistoryEpoch = Store.HistoryEpoch;
+            DisplayRecord(); ShowPopup();
         }
         public void Forget(string id)
         {
@@ -361,11 +364,38 @@ namespace Leaf
                 CancelRequests(); Current = null; DisplayRecord();
             }
         }
-        private void SaveCurrent()
+        public async Task WaitForPersistenceAsync()
         {
-            if (Current == null || demo) return;
-            try { Store.Save(Current); if (historyWindow != null) historyWindow.Refresh(); }
-            catch (UserError error) { Log.Event("history_save_failed", error); ShowError(error.Message, null); }
+            Task pending;
+            do {
+                pending = lastSettingsTask;
+                if (pending != null) { try { await pending.ConfigureAwait(true); } catch { } }
+                await Store.FlushAsync().ConfigureAwait(true);
+                await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            } while (!ReferenceEquals(pending, lastSettingsTask));
+        }
+        public async Task SaveCurrentAsync()
+        {
+            var record = Current;
+            if (record == null || demo) return;
+            try {
+                await Store.SaveAsync(record, currentHistoryEpoch).ConfigureAwait(true);
+                if (historyWindow != null) historyWindow.Refresh();
+            } catch (UserError error) {
+                Log.Event("history_save_failed", error);
+                ShowError(error.Message, RetryPersistence);
+            }
+        }
+        private async void RetryPersistence()
+        {
+            try {
+                await Store.RetryFailedWritesAsync();
+                await Store.FlushAsync();
+                if (historyWindow != null) historyWindow.Refresh();
+            } catch (UserError error) {
+                Log.Event("history_save_failed", error);
+                ShowError(error.Message, RetryPersistence);
+            }
         }
         private void CancelRequests()
         {
@@ -383,7 +413,36 @@ namespace Leaf
             Ui.Get<Button>(Popup, "AskButton").IsEnabled = Current != null && Current.Completed;
             Ui.Visible(Ui.Get<Button>(Popup, "AskButton"), Current != null && Ui.Get<Grid>(Popup, "SourceEditor").Visibility != Visibility.Visible && Ui.Get<Border>(Popup, "InputPanel").Visibility != Visibility.Visible);
         }
-        public void Exit() { exiting = true; Dispose(); Application.Current.Shutdown(); }
+        public void Exit() { var pendingExit = ExitAsync(); }
+        public async Task ExitAsync()
+        {
+            if (exiting) return;
+            exiting = true;
+            RememberPlacement();
+            if (Current != null && !demo) Current.Draft = Ui.Get<TextBox>(Popup, "QuestionInput").Text;
+            try {
+                await SaveCurrentAsync();
+                await Store.FlushAsync();
+            } catch (UserError error) {
+                exiting = false;
+                Log.Event("exit_flush_failed", error);
+                ShowError(error.Message, RetryExit);
+                return;
+            }
+            Dispose();
+            if (Application.Current != null) Application.Current.Shutdown();
+        }
+        private async void RetryExit()
+        {
+            try {
+                await Store.RetryFailedWritesAsync();
+                await Store.FlushAsync();
+                Exit();
+            } catch (UserError error) {
+                Log.Event("exit_flush_failed", error);
+                ShowError(error.Message, RetryExit);
+            }
+        }
         public void Dispose()
         {
             if (disposed) return;

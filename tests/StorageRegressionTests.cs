@@ -2,11 +2,13 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Diagnostics;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Threading;
 using Leaf;
 
 // Isolated fault-injection checks for settings/history commits. Never touches user data:
@@ -28,6 +30,10 @@ public static class StorageRegressionTests
         await CredentialAndPatchScenarios(folder);
         await QueueScenarios();
         await StructureScenarios(folder);
+        await ByteLimitRegression(folder);
+        await HistoryScenarios(folder);
+        await HistoryBarrierScenarios(folder);
+        await HistoryRetryScenarios(folder);
         return assertions - start;
     }
     // WPF-side checks; must run inside the ApplicationTests application/dispatcher.
@@ -35,7 +41,27 @@ public static class StorageRegressionTests
     {
         int start = assertions;
         await UiRecoveryAndCredentials(folder);
+        await UiHeartbeat(folder);
+        await UiHistoryWindow(folder);
         return assertions - start;
+    }
+    private static async Task UiHistoryWindow(string folder)
+    {
+        string directory = NewDirectory(folder, "ui-history");
+        var store = new LocalStore(directory);
+        await store.SaveAsync(Completed("ui history source", store.Settings), store.HistoryEpoch);
+        await store.FlushAsync();
+        using (var shell = new AppShell(store, false, new LlmClient())) {
+            var window = new HistoryWindow(shell);
+            Check(Ui.Get<ListBox>(window.Window, "HistoryList").Items.Count == 1,
+                "UI: the history window lists the saved record");
+            Ui.Get<Button>(window.Window, "DeleteHistory").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            await shell.WaitForPersistenceAsync();
+            Check(store.History("").Count == 0 && new LocalStore(directory).History("").Count == 0,
+                "UI: deleting from history waits for the store before updating memory and disk");
+            window.Window.Close();
+            await shell.WaitForSettingsAsync();
+        }
     }
     private static string NewDirectory(string folder, string name)
     {
@@ -332,6 +358,232 @@ public static class StorageRegressionTests
             "Acknowledged failures let Flush succeed without losing later work");
     }
 
+    private static TranslationRecord Completed(string source, Settings context)
+    {
+        var record = TranslationRecord.Create(source, "剪贴板", context);
+        record.Translation = "译文 " + source; record.Completed = true;
+        return record;
+    }
+    private static async Task HistoryScenarios(string folder)
+    {
+        var settings = Settings.Defaults();
+        var payload = HistorySnapshots.Encode(new List<TranslationRecord> {
+            Completed("plain english", settings),
+            Completed("中文字符", settings),
+            Completed("emoji 😀 tail", settings)
+        }, 10);
+        Check(payload.Utf8Bytes == Encoding.UTF8.GetByteCount(payload.Json),
+            "Encode reports the real UTF-8 byte count");
+        Check(payload.Utf8Bytes > payload.Json.Length, "UTF-8 byte counting exceeds UTF-16 length for non-ASCII content");
+        Check(payload.Json.Contains("😀") && payload.Records.Count == 3,
+            "Encode keeps emoji and every record inside the limit");
+
+        string onceDirectory = NewDirectory(folder, "encode-once");
+        var onceStore = new LocalStore(onceDirectory);
+        long before = HistorySnapshots.EncodeCalls;
+        await onceStore.SaveAsync(Completed("linear once", onceStore.Settings), onceStore.HistoryEpoch);
+        await onceStore.FlushAsync();
+        Check(HistorySnapshots.EncodeCalls - before == 1, "Each history save encodes the candidate list exactly once");
+
+        string bigDirectory = NewDirectory(folder, "history-200");
+        var bigStore = new LocalStore(bigDirectory);
+        var bigSettings = Json.Copy(bigStore.Settings); bigSettings.HistoryLimit = 1000;
+        await bigStore.SaveSettingsAsync(SettingsUpdate.Full(bigSettings));
+        var recordSet = new List<TranslationRecord>();
+        for (int i = 0; i < 200; i++) recordSet.Add(LongRecord(i));
+        var saveWatch = Stopwatch.StartNew();
+        foreach (var record in recordSet) await bigStore.SaveAsync(record, bigStore.HistoryEpoch);
+        await bigStore.FlushAsync();
+        saveWatch.Stop();
+        Console.WriteLine("MEASURE history-200 sequential saves: " + saveWatch.ElapsedMilliseconds + " ms");
+        var ordered = bigStore.History("");
+        Check(ordered.Count > 20 && ordered.Count <= 200, "A 200-record sample stays inside the retention bounds");
+        Check(ordered.Select(r => r.Id).Distinct().Count() == ordered.Count, "Ordered history has no duplicate ids");
+        Check(!ordered.Skip(1).Where((r, i) => r.UpdatedUtcTicks > ordered[i].UpdatedUtcTicks).Any(),
+            "History is ordered by the newest update time");
+        long historyLength = new FileInfo(Path.Combine(bigDirectory, "history.json")).Length;
+        Check(historyLength <= HistorySnapshots.SoftLimit, "A 200-record history file obeys the UTF-8 soft limit");
+        HistorySnapshots.ResetEncodeCalls();
+        var thousand = new List<TranslationRecord>();
+        for (int i = 0; i < 1000; i++) thousand.Add(LongRecord(100000 + i));
+        var encodeWatch = Stopwatch.StartNew();
+        var linear = HistorySnapshots.Encode(thousand, 1000);
+        encodeWatch.Stop();
+        Console.WriteLine("MEASURE history-1000 encode: " + encodeWatch.ElapsedMilliseconds + " ms for " +
+            linear.Utf8Bytes + " bytes in " + linear.Records.Count + " records");
+        Check(HistorySnapshots.EncodeCalls == 1, "A 1000-record trim serializes the list once");
+        Check(linear.Records.Count >= 1 && linear.Utf8Bytes <= HistorySnapshots.SoftLimit && linear.Utf8Bytes == Encoding.UTF8.GetByteCount(linear.Json),
+            "The 1000-record encode caps at the soft limit with honest byte counts");
+    }
+    private static TranslationRecord LongRecord(int index)
+    {
+        var record = TranslationRecord.Create(index.ToString() + new string('a', 2000), "剪贴板", Settings.Defaults());
+        record.Completed = true; record.Translation = new string('中', 2000);
+        for (int i = 0; i < 24; i++) record.Chat.Add(new ChatTurn {
+            Role = i % 2 == 0 ? "user" : "assistant", Content = new string('字', 600), Topic = "原句"
+        });
+        return record;
+    }
+    private static async Task HistoryBarrierScenarios(string folder)
+    {
+        string deleteDirectory = NewDirectory(folder, "barrier-delete");
+        var deleteStore = new LocalStore(deleteDirectory);
+        var deleted = Completed("barrier A", deleteStore.Settings);
+        await deleteStore.SaveAsync(deleted, deleteStore.HistoryEpoch);
+        await deleteStore.FlushAsync();
+        await deleteStore.DeleteAsync(deleted.Id);
+        await deleteStore.SaveAsync(deleted, deleteStore.HistoryEpoch);
+        await deleteStore.FlushAsync();
+        Check(deleteStore.History("").All(r => r.Id != deleted.Id), "A late save cannot resurrect a deleted record");
+        Check(new LocalStore(deleteDirectory).History("").Count == 0, "The delete barrier is persisted across restart");
+
+        string clearDirectory = NewDirectory(folder, "barrier-clear");
+        var clearStore = new LocalStore(clearDirectory);
+        var cleared = Completed("clear A", clearStore.Settings);
+        await clearStore.SaveAsync(cleared, clearStore.HistoryEpoch);
+        await clearStore.FlushAsync();
+        await clearStore.ClearAsync();
+        var fresh = Completed("clear B", clearStore.Settings);
+        await clearStore.SaveAsync(fresh, clearStore.HistoryEpoch);
+        await clearStore.FlushAsync();
+        var afterClear = clearStore.History("");
+        Check(afterClear.Count == 1 && afterClear[0].Id == fresh.Id,
+            "After a clear only the new epoch's successful record remains");
+
+        string disabledDirectory = NewDirectory(folder, "barrier-disabled");
+        var disabledStore = new LocalStore(disabledDirectory);
+        var beforeDisable = Completed("before disable", disabledStore.Settings);
+        await disabledStore.SaveAsync(beforeDisable, disabledStore.HistoryEpoch);
+        await disabledStore.FlushAsync();
+        long oldEpoch = disabledStore.HistoryEpoch;
+        var disabled = Json.Copy(disabledStore.Settings); disabled.HistoryEnabled = false;
+        await disabledStore.SaveSettingsAsync(SettingsUpdate.Preferences(disabled));
+        var enabled = Json.Copy(disabledStore.Settings); enabled.HistoryEnabled = true;
+        await disabledStore.SaveSettingsAsync(SettingsUpdate.Preferences(enabled));
+        var late = Completed("late after re-enable", disabledStore.Settings);
+        await disabledStore.SaveAsync(late, oldEpoch);
+        await disabledStore.FlushAsync();
+        Check(new LocalStore(disabledDirectory).History("").Count == 0,
+            "Re-enabling history cannot revive a snapshot captured before it was disabled");
+        var freshAfterEnable = Completed("fresh after re-enable", disabledStore.Settings);
+        await disabledStore.SaveAsync(freshAfterEnable, disabledStore.HistoryEpoch);
+        await disabledStore.FlushAsync();
+        var restarted = new LocalStore(disabledDirectory).History("");
+        Check(restarted.Count == 1 && restarted[0].Id == freshAfterEnable.Id,
+            "Only new successful results persist after history is re-enabled");
+
+        string snapshotDirectory = NewDirectory(folder, "snapshot-isolation");
+        var snapshotStore = new LocalStore(snapshotDirectory);
+        var queued = TranslationRecord.Create("snapshot source", "剪贴板", snapshotStore.Settings);
+        queued.Translation = "original translation"; queued.Completed = true;
+        var save = snapshotStore.SaveAsync(queued, snapshotStore.HistoryEpoch);
+        queued.Translation = "edited translation"; queued.Draft = "edited draft";
+        queued.Chat.Add(new ChatTurn { Role = "user", Content = "later question" });
+        queued.Context.Scene = "later scene";
+        queued.Context.Placement = new WindowPlacement { X = 99, Y = 99 };
+        queued.Context.Presets.Add(new LearningPreset { Name = "later preset" });
+        await save; await snapshotStore.FlushAsync();
+        var saved = snapshotStore.History("snapshot source").Single();
+        Check(saved.Translation == "original translation" && saved.Draft == "" && saved.Chat.Count == 0,
+            "A queued snapshot ignores later translation, draft and chat edits");
+        Check(saved.Context.Scene == "通用" && saved.Context.Placement == null && saved.Context.Presets.Count == 0,
+            "A snapshot keeps only the learning context and drops presets and placement");
+        saved.Translation = "mutated copy";
+        saved.Chat.Add(new ChatTurn { Role = "user", Content = "injected" });
+        saved.Context.Scene = "mutated scene";
+        var defensive = snapshotStore.History("snapshot source").Single();
+        Check(defensive.Translation == "original translation" && defensive.Chat.Count == 0 && defensive.Context.Scene == "通用",
+            "History and Find readers receive defensive copies");
+    }
+    private static async Task HistoryRetryScenarios(string folder)
+    {
+        string retryDirectory = NewDirectory(folder, "retry-save");
+        var files = new FaultingFiles();
+        var retryStore = new LocalStore(retryDirectory, files);
+        var seed = Completed("retry seed", retryStore.Settings);
+        await retryStore.SaveAsync(seed, retryStore.HistoryEpoch);
+        await retryStore.FlushAsync();
+        var failedRecord = Completed("retry A", retryStore.Settings);
+        files.MatchingCalls = 0; files.FailOperation = "Replace"; files.FailAt = 1;
+        bool failedSave = false;
+        try { await retryStore.SaveAsync(failedRecord, retryStore.HistoryEpoch); }
+        catch (UserError error) { failedSave = error.Code == "storage"; }
+        var laterRecord = Completed("retry B", retryStore.Settings);
+        await retryStore.SaveAsync(laterRecord, retryStore.HistoryEpoch);
+        bool unresolved = false;
+        try { await retryStore.FlushAsync(); } catch (UserError) { unresolved = true; }
+        Check(failedSave && unresolved, "A failed save stays reported even after a later save succeeds");
+        Check(retryStore.History("").Count == 2, "The failed save keeps its in-memory snapshot while the later save persists");
+        await retryStore.RetryFailedWritesAsync();
+        await retryStore.FlushAsync();
+        var persisted = new LocalStore(retryDirectory).History("");
+        Check(persisted.Count == 3 && persisted.Any(r => r.Id == failedRecord.Id) && persisted.Any(r => r.Id == laterRecord.Id),
+            "RetryFailedWritesAsync replays the kept snapshot without losing later work");
+        Check(retryStore.History("").Count == 3, "A successful retry publishes the recovered records to memory");
+
+        string deleteDirectory = NewDirectory(folder, "retry-delete");
+        var deleteFiles = new FaultingFiles();
+        var deleteStore = new LocalStore(deleteDirectory, deleteFiles);
+        var deleteRecord = Completed("delete barrier", deleteStore.Settings);
+        await deleteStore.SaveAsync(deleteRecord, deleteStore.HistoryEpoch);
+        await deleteStore.FlushAsync();
+        deleteFiles.MatchingCalls = 0; deleteFiles.FailOperation = "Replace"; deleteFiles.FailAt = 1;
+        bool deleteFailed = false;
+        try { await deleteStore.DeleteAsync(deleteRecord.Id); }
+        catch (UserError error) { deleteFailed = error.Code == "storage"; }
+        Check(deleteFailed && deleteStore.History("").Count == 1, "A failed delete keeps the in-memory barrier and record");
+        Check(new LocalStore(deleteDirectory).History("").Count == 1, "A failed delete still shows the old disk record");
+        await deleteStore.RetryFailedWritesAsync();
+        await deleteStore.FlushAsync();
+        Check(deleteStore.History("").Count == 0 && new LocalStore(deleteDirectory).History("").Count == 0,
+            "A retried delete removes the record only after it succeeds");
+
+        string oversizeDirectory = NewDirectory(folder, "oversize");
+        var oversizeStore = new LocalStore(oversizeDirectory);
+        var huge = TranslationRecord.Create("huge single record", "剪贴板", oversizeStore.Settings);
+        huge.Translation = new string('a', 34000000); huge.Completed = true;
+        bool oversize = false;
+        try { await oversizeStore.SaveAsync(huge, oversizeStore.HistoryEpoch); }
+        catch (UserError error) { oversize = error.Code == "length"; }
+        Check(oversize, "A single record above the 32 MiB hard limit is refused before writing");
+        string oversizePath = Path.Combine(oversizeDirectory, "history.json");
+        Check(!File.Exists(oversizePath) || new FileInfo(oversizePath).Length < HistorySnapshots.HardLimit,
+            "A refused oversized record cannot leave unreadable data on disk");
+    }
+    private static async Task ByteLimitRegression(string folder)
+    {
+        string directory = NewDirectory(folder, "byte-limit");
+        var store = new LocalStore(directory);
+        var settings = Json.Copy(store.Settings); settings.HistoryLimit = 1000;
+        await store.SaveSettingsAsync(SettingsUpdate.Full(settings));
+        for (int i = 0; i < 6; i++) {
+            var record = TranslationRecord.Create("large source " + i, "剪贴板", store.Settings);
+            record.Source = new string('文', 300000) + " " + i;
+            record.Translation = new string('中', 300000);
+            record.Completed = true;
+            store.Save(record);
+        }
+        long length = new FileInfo(Path.Combine(directory, "history.json")).Length;
+        Check(length <= 4194304, "History trimming counts UTF-8 bytes, not UTF-16 characters");
+        Check(store.History("").Count <= 4, "Byte-limited history keeps only records that fit the soft limit");
+    }
+    private static async Task UiHeartbeat(string folder)
+    {
+        string directory = NewDirectory(folder, "ui-heartbeat");
+        var files = new FaultingFiles { DelayWritesMs = 160 };
+        var store = new LocalStore(directory, files);
+        var record = TranslationRecord.Create("heartbeat source", "剪贴板", store.Settings);
+        record.Translation = "heartbeat translation"; record.Completed = true;
+        int beats = 0;
+        var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(20) };
+        timer.Tick += (s, e) => beats++;
+        timer.Start();
+        try {
+            await store.SaveAsync(record, store.HistoryEpoch);
+            await store.FlushAsync();
+        } finally { timer.Stop(); }
+        Check(beats > 0, "UI dispatcher continues during long history persistence");
+    }
     private static Task StructureScenarios(string folder)
     {
         string nullProvider = NewDirectory(folder, "null-provider");
