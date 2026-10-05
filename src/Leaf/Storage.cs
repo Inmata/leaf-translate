@@ -2,49 +2,102 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading.Tasks;
 
 namespace Leaf
 {
     public sealed class LocalStore
     {
+        private const long ReadLimit = 33554432;
         private readonly string folder;
-        public string Folder { get { return folder; } }
+        private readonly IStoreFiles files;
+        private readonly StoreQueue queue = new StoreQueue();
         private readonly object sync = new object();
         private List<TranslationRecord> records;
-        public Settings Settings { get; private set; }
+        private Settings settings;
+        public Settings Settings { get { lock (sync) return settings; } }
         public string Warning { get; private set; }
-        public LocalStore(string directory)
+        public bool RecoveryBlocked { get; private set; }
+        public string Folder { get { return folder; } }
+
+        public LocalStore(string directory) : this(directory, new PhysicalStoreFiles()) { }
+
+        public LocalStore(string directory, IStoreFiles files)
         {
-            folder = directory; Directory.CreateDirectory(folder);
-            Settings = Read<Settings>("settings.json") ?? Leaf.Settings.Defaults(); Settings.Normalize();
-            records = Read<List<TranslationRecord>>("history.json") ?? new List<TranslationRecord>();
-            records = records.Where(r => r != null && r.Completed && r.Context != null && r.Source != null).ToList();
-            foreach (var record in records) {
-                record.Context.Normalize();
-                if (record.Cards == null) record.Cards = new Dictionary<string, WordCard>();
-                if (record.Chat == null) record.Chat = new List<ChatTurn>();
-            }
-            if (!Settings.HistoryEnabled) records.Clear();
-            Trim();
+            folder = directory; this.files = files;
+            Directory.CreateDirectory(folder);
+            var recovery = new AtomicFileBatch(folder, files);
+            try { recovery.Recover(); } catch { RecoveryBlocked = true; }
+            if (recovery.RecoveryBlocked) RecoveryBlocked = true;
+            settings = ReadSettings() ?? Settings.Defaults();
+            records = ReadHistory() ?? new List<TranslationRecord>();
+            if (!settings.HistoryEnabled) records.Clear();
         }
+
+        public Task SaveSettingsAsync(SettingsUpdate update)
+        {
+            return CommitSettingsAsync(update, null, null);
+        }
+
+        public Task CommitSettingsAsync(SettingsUpdate update, Action<Settings, Settings> applyExternal, Action<Settings, Settings> rollbackExternal)
+        {
+            if (update == null) throw new ArgumentNullException("update");
+            return queue.Enqueue(() => {
+                Settings latest; List<TranslationRecord> currentRecords;
+                lock (sync) { latest = settings; currentRecords = records; }
+                var candidate = update.Build(latest);
+                var payloads = new Dictionary<string, string>();
+                payloads[AtomicFileBatch.SettingsName] = Json.Write(candidate);
+                List<TranslationRecord> candidateRecords = null;
+                if (!candidate.HistoryEnabled) {
+                    candidateRecords = new List<TranslationRecord>();
+                    payloads[AtomicFileBatch.HistoryName] = Json.Write(candidateRecords);
+                } else if (candidate.HistoryLimit != latest.HistoryLimit) {
+                    candidateRecords = currentRecords.OrderByDescending(r => r.UpdatedUtcTicks)
+                        .Take(candidate.HistoryLimit).ToList();
+                    payloads[AtomicFileBatch.HistoryName] = Json.Write(candidateRecords);
+                }
+                var batch = new AtomicFileBatch(folder, files);
+                try {
+                    batch.Commit(payloads,
+                        applyExternal == null ? (Action)null : () => applyExternal(latest, candidate),
+                        rollbackExternal == null ? (Action)null : () => rollbackExternal(latest, candidate),
+                        () => {
+                            lock (sync) {
+                                settings = candidate;
+                                if (candidateRecords != null) records = candidateRecords;
+                            }
+                        });
+                } finally {
+                    if (batch.RecoveryBlocked) RecoveryBlocked = true;
+                }
+            });
+        }
+
+        // Compatibility wrapper for imperative tests; the UI never calls a synchronous queue wait.
         public void SaveSettings(Settings settings)
         {
-            lock (sync) {
-                settings.Normalize(); Write("settings.json", settings); Settings = settings;
-                if (!Settings.HistoryEnabled) records.Clear();
-                Trim(); Write("history.json", records);
-            }
+            SaveSettingsAsync(SettingsUpdate.Full(settings)).GetAwaiter().GetResult();
         }
+
+        public Task SavePlacementAsync(WindowPlacement placement)
+        {
+            return SaveSettingsAsync(SettingsUpdate.Placement(placement));
+        }
+
         public void SavePlacement(WindowPlacement placement)
         {
-            lock (sync) {
-                var next = Json.Copy(Settings); next.Placement = placement;
-                Write("settings.json", next); Settings = next;
-            }
+            SavePlacementAsync(placement).GetAwaiter().GetResult();
         }
-        public TranslationRecord Find(string key) { lock (sync) return records.FirstOrDefault(r => r.CacheKey == key); }
+
+        public Task FlushAsync() { return queue.FlushAsync(); }
+
+        public TranslationRecord Find(string key)
+        {
+            lock (sync) return records.FirstOrDefault(r => r.CacheKey == key);
+        }
+
         public List<TranslationRecord> History(string query)
         {
             lock (sync) {
@@ -54,119 +107,111 @@ namespace Leaf
                     .OrderByDescending(r => r.UpdatedUtcTicks).ToList();
             }
         }
+
         public void Save(TranslationRecord record)
         {
-            if (!record.Completed) return;
+            if (record == null || !record.Completed) return;
             lock (sync) {
-                if (!Settings.HistoryEnabled) return;
-                records.RemoveAll(r => r.Id == record.Id || r.CacheKey == record.CacheKey);
-                record.UpdatedUtcTicks = DateTime.UtcNow.Ticks; records.Insert(0, record);
-                Trim(); Write("history.json", records);
+                if (!settings.HistoryEnabled) return;
+                var candidate = records.Where(r => r.Id != record.Id && r.CacheKey != record.CacheKey).ToList();
+                record.UpdatedUtcTicks = DateTime.UtcNow.Ticks;
+                candidate.Insert(0, record);
+                candidate = TrimRecords(candidate, settings.HistoryLimit);
+                CommitHistory(candidate);
+                records = candidate;
             }
         }
-        public void Delete(string id) { lock (sync) { records.RemoveAll(r => r.Id == id); Write("history.json", records); } }
-        public void Clear() { lock (sync) { records.Clear(); Write("history.json", records); } }
-        private void Trim()
+
+        public void Delete(string id)
         {
-            records = records.OrderByDescending(r => r.UpdatedUtcTicks).Take(Settings.HistoryLimit).ToList();
-            while (records.Count > 1 && Json.Write(records).Length > 4194304) records.RemoveAt(records.Count - 1);
+            lock (sync) {
+                var candidate = records.Where(r => r.Id != id).ToList();
+                CommitHistory(candidate);
+                records = candidate;
+            }
         }
-        private T Read<T>(string name) where T : class
+
+        public void Clear()
         {
-            string path = Path.Combine(folder, name);
-            if (!File.Exists(path)) return null;
+            lock (sync) {
+                var candidate = new List<TranslationRecord>();
+                CommitHistory(candidate);
+                records = candidate;
+            }
+        }
+
+        private void CommitHistory(List<TranslationRecord> candidate)
+        {
+            var payloads = new Dictionary<string, string> {
+                { AtomicFileBatch.HistoryName, Json.Write(candidate) }
+            };
+            var batch = new AtomicFileBatch(folder, files);
+            try { batch.Commit(payloads, null, null, null); }
+            finally { if (batch.RecoveryBlocked) RecoveryBlocked = true; }
+        }
+
+        private static List<TranslationRecord> TrimRecords(List<TranslationRecord> candidate, int limit)
+        {
+            var trimmed = candidate.OrderByDescending(r => r.UpdatedUtcTicks).Take(limit).ToList();
+            while (trimmed.Count > 1 && Json.Write(trimmed).Length > 4194304) trimmed.RemoveAt(trimmed.Count - 1);
+            return trimmed;
+        }
+
+        private Settings ReadSettings()
+        {
+            string path = Path.Combine(folder, AtomicFileBatch.SettingsName);
+            if (!files.Exists(path)) return null;
             try {
-                if (new FileInfo(path).Length > 33554432) throw new InvalidDataException();
-                string payload = File.ReadAllText(path, Encoding.UTF8);
-                var result = Json.Read<T>(payload);
-                var settings = result as Settings;
-                if (settings != null && settings.Placement == null) {
+                if (files.Length(path) > ReadLimit) throw new InvalidDataException();
+                string payload = files.Read(path);
+                var parsed = Json.Read<Settings>(payload);
+                if (parsed == null) throw new InvalidDataException();
+                if (parsed.Placement == null) {
                     var legacy = Json.Read<LegacyPlacement>(payload);
                     if (legacy.Positions != null && legacy.Positions.Count > 0) {
                         var position = legacy.Positions.FirstOrDefault(p => p.Key == legacy.Monitor);
                         if (position.Value == null) position = legacy.Positions.First();
-                        settings.Placement = new WindowPlacement { X = position.Value.X, Y = position.Value.Y,
+                        parsed.Placement = new WindowPlacement { X = position.Value.X, Y = position.Value.Y,
                             Width = 456, Height = 620, Screen = position.Key };
                     }
                 }
-                return result;
+                parsed.Normalize();
+                return parsed;
             } catch {
-                try { File.Move(path, path + ".corrupt-" + DateTime.UtcNow.ToString("yyyyMMddHHmmss")); } catch { }
-                Warning = "一份本地数据无法读取，已尽量保留备份。请检查设置。"; return null;
+                BackupFile(path, AtomicFileBatch.SettingsName);
+                Warning = "一份本地数据无法读取，已尽量保留备份。请检查设置。";
+                return null;
             }
         }
+
+        private List<TranslationRecord> ReadHistory()
+        {
+            string path = Path.Combine(folder, AtomicFileBatch.HistoryName);
+            if (!files.Exists(path)) return new List<TranslationRecord>();
+            try {
+                if (files.Length(path) > ReadLimit) throw new InvalidDataException();
+                var parsed = Json.Read<List<TranslationRecord>>(files.Read(path));
+                if (parsed == null) return new List<TranslationRecord>();
+                return parsed.Where(r => r != null).ToList();
+            } catch {
+                BackupFile(path, AtomicFileBatch.HistoryName);
+                Warning = "一份本地数据无法读取，已尽量保留备份。请检查设置。";
+                return new List<TranslationRecord>();
+            }
+        }
+
+        private void BackupFile(string path, string name)
+        {
+            try {
+                files.Copy(path, Path.Combine(folder,
+                    name + ".corrupt-" + DateTime.UtcNow.ToString("yyyyMMddHHmmss")), false);
+            } catch { }
+        }
+
         private sealed class LegacyPlacement
         {
             public string Monitor { get; set; }
             public Dictionary<string, PointSetting> Positions { get; set; }
-        }
-        private void Write(string name, object value)
-        {
-            string target = Path.Combine(folder, name), temporary = target + ".tmp";
-            try {
-                File.WriteAllText(temporary, Json.Write(value), new UTF8Encoding(false));
-                if (File.Exists(target)) File.Replace(temporary, target, null); else File.Move(temporary, target);
-            } catch {
-                try { if (File.Exists(temporary)) File.Delete(temporary); } catch { }
-                throw new UserError("storage", "无法保存本地数据。请检查磁盘空间或目录权限。");
-            }
-        }
-    }
-    public static class Credentials
-    {
-        private const int Generic = 1;
-        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-        private struct Credential {
-            public int Flags; public int Type; public string TargetName; public string Comment;
-            public System.Runtime.InteropServices.ComTypes.FILETIME LastWritten;
-            public int CredentialBlobSize; public IntPtr CredentialBlob; public int Persist;
-            public int AttributeCount; public IntPtr Attributes; public string TargetAlias; public string UserName;
-        }
-        [DllImport("advapi32.dll", EntryPoint = "CredWriteW", CharSet = CharSet.Unicode, SetLastError = true)]
-        private static extern bool CredWrite(ref Credential credential, int flags);
-        [DllImport("advapi32.dll", EntryPoint = "CredReadW", CharSet = CharSet.Unicode, SetLastError = true)]
-        private static extern bool CredRead(string target, int type, int flags, out IntPtr credential);
-        [DllImport("advapi32.dll", EntryPoint = "CredDeleteW", CharSet = CharSet.Unicode, SetLastError = true)]
-        private static extern bool CredDelete(string target, int type, int flags);
-        [DllImport("advapi32.dll")] private static extern void CredFree(IntPtr credential);
-        private static string Target(string provider) { return "LeafTranslate/" + provider; }
-        public static string Read(string provider)
-        {
-            IntPtr pointer;
-            if (!CredRead(Target(provider), Generic, 0, out pointer)) {
-                if (Marshal.GetLastWin32Error() == 1168) return "";
-                throw new UserError("credentials", "无法读取 Windows 中的已存密钥，请检查系统权限或重新保存密钥。");
-            }
-            try {
-                var credential = (Credential)Marshal.PtrToStructure(pointer, typeof(Credential));
-                if (credential.CredentialBlobSize == 0) return "";
-                byte[] bytes = new byte[credential.CredentialBlobSize];
-                Marshal.Copy(credential.CredentialBlob, bytes, 0, bytes.Length);
-                return Encoding.Unicode.GetString(bytes);
-            } finally { CredFree(pointer); }
-        }
-        public static void Save(string provider, string key)
-        {
-            if (string.IsNullOrWhiteSpace(key)) return;
-            byte[] bytes = Encoding.Unicode.GetBytes(key.Trim());
-            if (bytes.Length > 2560) throw new UserError("key", "密钥过长，请检查填写内容。");
-            IntPtr pointer = Marshal.AllocHGlobal(bytes.Length);
-            try {
-                Marshal.Copy(bytes, 0, pointer, bytes.Length);
-                var credential = new Credential { Type = Generic, TargetName = Target(provider), UserName = "Leaf",
-                    CredentialBlob = pointer, CredentialBlobSize = bytes.Length, Persist = 2 };
-                if (!CredWrite(ref credential, 0)) throw new UserError("credentials", "无法保存密钥到 Windows 凭据管理器。");
-            } finally {
-                for (int i = 0; i < bytes.Length; i++) Marshal.WriteByte(pointer, i, 0);
-                Marshal.FreeHGlobal(pointer); Array.Clear(bytes, 0, bytes.Length);
-            }
-            if (Read(provider) != key.Trim())
-                throw new UserError("credentials", "密钥写入后未能重新读取，请重新保存。");
-        }
-        public static void Delete(string provider)
-        {
-            if (!CredDelete(Target(provider), Generic, 0) && Marshal.GetLastWin32Error() != 1168)
-                throw new UserError("credentials", "无法删除已保存的密钥。");
         }
     }
 }

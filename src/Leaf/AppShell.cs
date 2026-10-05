@@ -21,6 +21,10 @@ namespace Leaf
         public Window Popup { get; private set; }
         public bool NativeEnabled { get; private set; }
         internal Func<ProviderProfile, string> CredentialReader;
+        private readonly ICredentialProfiles credentialProfiles;
+        private readonly bool migrateLegacyCredentials;
+        private bool credentialMigrationDone;
+        private Task lastSettingsTask = Task.FromResult(0);
         public TranslationRecord Current { get; private set; }
         private readonly RequestGate generation = new RequestGate();
         private readonly RequestGate wordGeneration = new RequestGate();
@@ -43,16 +47,20 @@ namespace Leaf
         private Action retry;
         private const int HotkeyId = 0x4C46;
 
-        public AppShell(LocalStore store, bool native) : this(store, native, new LlmClient()) { }
-        public AppShell(LocalStore store, bool native, LlmClient client)
+        public AppShell(LocalStore store, bool native) : this(store, native, new LlmClient(), null) { }
+        public AppShell(LocalStore store, bool native, LlmClient client) : this(store, native, client, null) { }
+        public AppShell(LocalStore store, bool native, LlmClient client, ICredentialProfiles credentials)
         {
             Store = store; NativeEnabled = native; Client = client;
+            if (credentials != null) credentialProfiles = credentials;
+            else if (native) { credentialProfiles = new WindowsCredentialProfiles(); migrateLegacyCredentials = true; }
             Log = client.Log ?? new DiagnosticLog(System.IO.Path.Combine(store.Folder, "logs")); Client.Log = Log;
             Popup = Ui.Load("Popup"); InitializePopup();
         }
         public void Start(bool background, bool demonstration)
         {
             demo = demonstration;
+            EnsureCredentialMigration();
             handle = new WindowInteropHelper(Popup).EnsureHandle();
             HwndSource.FromHwnd(handle).AddHook(Messages);
             outsideClick = new OutsideClick(() => Popup.Dispatcher.BeginInvoke(new Action(() => {
@@ -62,7 +70,7 @@ namespace Leaf
             try { RegisterShortcut(Store.Settings.Shortcut); }
             catch (UserError error) { Log.Event("shortcut_register_failed", error); ShowError(error.Message, OpenSettings); }
             if (demo) { PopulateDemo(); ShowPopup(); }
-            else if (!background && (Credentials.Read(Store.Settings.ProviderId).Length == 0 || string.IsNullOrWhiteSpace(Store.Settings.Provider.Model))) OpenSettings();
+            else if (!background && (ReadCredential(Store.Settings.Provider).Length == 0 || string.IsNullOrWhiteSpace(Store.Settings.Provider.Model))) OpenSettings();
             else if (!background) ShowPopup();
             if (!string.IsNullOrEmpty(Store.Warning)) {
                 tray.ShowBalloonTip(5000, "Leaf", Store.Warning, Forms.ToolTipIcon.Warning);
@@ -79,11 +87,12 @@ namespace Leaf
             var menu = new Forms.ContextMenuStrip();
             menu.Items.Add("显示浮窗", null, (s, e) => ShowPopup());
             clipboardMenu = new Forms.ToolStripMenuItem("剪贴板模式") { Checked = Store.Settings.ClipboardMode };
-            clipboardMenu.Click += (s, e) => {
+            clipboardMenu.Click += async (s, e) => {
                 try {
-                    var settings = Json.Copy(Store.Settings); settings.ClipboardMode = !settings.ClipboardMode;
-                    Store.SaveSettings(settings); clipboardMenu.Checked = settings.ClipboardMode;
-                    tray.ShowBalloonTip(2500, "Leaf", settings.ClipboardMode ? "快捷键读取剪贴板，请先复制文字。" : "快捷键尝试读取当前选中文字。", Forms.ToolTipIcon.Info);
+                    var next = Json.Copy(Store.Settings); next.ClipboardMode = !next.ClipboardMode;
+                    await Store.SaveSettingsAsync(SettingsUpdate.Preferences(next));
+                    clipboardMenu.Checked = next.ClipboardMode;
+                    tray.ShowBalloonTip(2500, "Leaf", next.ClipboardMode ? "快捷键读取剪贴板，请先复制文字。" : "快捷键尝试读取当前选中文字。", Forms.ToolTipIcon.Info);
                 } catch (UserError error) { ShowError(error.Message, null); }
             };
             menu.Items.Add(clipboardMenu); menu.Items.Add(new Forms.ToolStripSeparator());
@@ -202,7 +211,11 @@ namespace Leaf
             if (!NativeEnabled || restoringPlacement || !placementInitialized || Popup.WindowState == WindowState.Minimized) return;
             var placement = Native.CapturePlacement(Popup);
             if (placement == null || placement.Width <= 0 || placement.Height <= 0 || Json.Write(placement) == Json.Write(Store.Settings.Placement)) return;
-            try { Store.SavePlacement(placement); }
+            SavePlacementObserved(placement);
+        }
+        private async void SavePlacementObserved(WindowPlacement placement)
+        {
+            try { await Store.SavePlacementAsync(placement); }
             catch (UserError error) { Log.Event("placement_save_failed", error); ShowError(error.Message, null); }
         }
         public void HidePopup()
@@ -217,6 +230,7 @@ namespace Leaf
         }
         public void OpenSettings()
         {
+            EnsureCredentialMigration();
             HidePopup();
             if (settingsWindow != null) { settingsWindow.Window.Activate(); return; }
             settingsWindow = new SettingsWindow(this);
@@ -231,34 +245,111 @@ namespace Leaf
             historyWindow.Window.Closed += (s, e) => historyWindow = null;
             historyWindow.Window.Show(); historyWindow.Window.Activate();
         }
-        public void ApplySettings(Settings settings, Dictionary<string, string> keys, HashSet<string> deleted)
+        public Task ApplySettingsAsync(SettingsUpdate update, Dictionary<string, string> keys, HashSet<string> deleted)
         {
+            if (update == null) throw new ArgumentNullException("update");
+            EnsureCredentialMigration();
             var previous = Json.Copy(Store.Settings);
-            var previousKeys = new Dictionary<string, string>();
-            RegisterShortcut(settings.Shortcut);
-            try {
-                if (NativeEnabled) {
-                    foreach (string id in keys.Keys.Concat(deleted).Distinct()) previousKeys[id] = Credentials.Read(id);
-                    foreach (string id in deleted) Credentials.Delete(id);
-                    foreach (var key in keys) Credentials.Save(key.Key, key.Value);
-                    if (settings.AutoStart != previous.AutoStart) Native.AutoStart(settings.AutoStart);
-                }
-                Store.SaveSettings(Json.Copy(settings));
-            } catch {
-                RegisterShortcut(previous.Shortcut);
-                if (NativeEnabled) {
-                    foreach (var key in previousKeys) {
-                        try { if (key.Value.Length == 0) Credentials.Delete(key.Key); else Credentials.Save(key.Key, key.Value); } catch { }
+            var changedKeys = keys == null ? new Dictionary<string, string>() : new Dictionary<string, string>(keys);
+            var removedKeys = deleted == null ? new HashSet<string>() : new HashSet<string>(deleted);
+            Task task = ApplySettingsCoreAsync(update, changedKeys, removedKeys, previous);
+            lastSettingsTask = task;
+            return task;
+        }
+        public async Task WaitForSettingsAsync()
+        {
+            Task pending;
+            do {
+                pending = lastSettingsTask;
+                if (pending != null) await pending.ConfigureAwait(true);
+                await Store.FlushAsync().ConfigureAwait(true);
+                await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            } while (!ReferenceEquals(pending, lastSettingsTask));
+        }
+        private async Task ApplySettingsCoreAsync(SettingsUpdate update, Dictionary<string, string> keys, HashSet<string> deleted, Settings previous)
+        {
+            var keyUndo = new List<Action>();
+            var replaced = new List<KeyValuePair<ProviderProfile, ProviderProfile>>();
+            Action<Settings, Settings> applyExternal = (committed, candidate) => {
+                keyUndo.Clear(); replaced.Clear();
+                if (credentialProfiles != null) {
+                    foreach (string id in keys.Keys.Concat(deleted).Distinct().ToArray()) {
+                        var oldProfile = committed.Providers.FirstOrDefault(p => p.Id == id);
+                        var newProfile = candidate.Providers.FirstOrDefault(p => p.Id == id);
+                        string oldKey = ""; bool hadOld = false;
+                        if (oldProfile != null) {
+                            try { oldKey = credentialProfiles.Read(oldProfile); hadOld = oldKey.Length > 0; }
+                            catch (Exception error) {
+                                throw new UserError("credentials", error is UserError ? ((UserError)error).Message : "无法读取旧密钥，已取消本次配置。");
+                            }
+                        }
+                        var capturedOld = oldProfile; var capturedNew = newProfile;
+                        string capturedKey = oldKey; bool capturedHad = hadOld;
+                        keyUndo.Add(() => {
+                            bool same = false;
+                            try { same = capturedOld != null && capturedNew != null && Credentials.ScopedId(capturedOld) == Credentials.ScopedId(capturedNew); } catch { }
+                            if (!same && capturedNew != null) { try { credentialProfiles.Delete(capturedNew); } catch { } }
+                            if (capturedOld != null) {
+                                try { if (capturedHad) credentialProfiles.Save(capturedOld, capturedKey); else credentialProfiles.Delete(capturedOld); } catch { }
+                            }
+                        });
+                        if (deleted.Contains(id) && newProfile != null) credentialProfiles.Delete(newProfile);
+                        string pending;
+                        if (newProfile != null && keys.TryGetValue(id, out pending)) credentialProfiles.Save(newProfile, pending);
+                        if (oldProfile != null && newProfile != null) replaced.Add(new KeyValuePair<ProviderProfile, ProviderProfile>(oldProfile, newProfile));
                     }
-                    try { if (settings.AutoStart != previous.AutoStart) Native.AutoStart(previous.AutoStart); } catch { }
                 }
-                throw;
-            }
-            if (Json.Write(previous.Provider) != Json.Write(settings.Provider) || previous.ProviderId != settings.ProviderId || keys.Count > 0 || deleted.Count > 0) CancelRequests();
-            if (!settings.HistoryEnabled) Forget(null);
-            if (clipboardMenu != null) { clipboardMenu.Checked = settings.ClipboardMode; tray.Text = "Leaf · " + settings.Shortcut; }
+                if (NativeEnabled && candidate.AutoStart != committed.AutoStart)
+                    OnDispatcher(() => Native.AutoStart(candidate.AutoStart));
+                if (NativeEnabled && candidate.Shortcut != committed.Shortcut)
+                    OnDispatcher(() => RegisterShortcut(candidate.Shortcut));
+            };
+            Action<Settings, Settings> rollbackExternal = (committed, candidate) => {
+                for (int i = keyUndo.Count - 1; i >= 0; i--) { try { keyUndo[i](); } catch { } }
+                if (NativeEnabled && candidate.AutoStart != committed.AutoStart) {
+                    try { OnDispatcher(() => Native.AutoStart(committed.AutoStart)); } catch { }
+                }
+                if (NativeEnabled && candidate.Shortcut != committed.Shortcut) {
+                    try { OnDispatcher(() => RegisterShortcut(committed.Shortcut)); } catch { }
+                }
+            };
+            await Store.CommitSettingsAsync(update, applyExternal, rollbackExternal).ConfigureAwait(true);
+            if (credentialProfiles != null) CleanupReplacedCredentials(replaced, deleted);
+            if (Store.Settings.ProviderId != previous.ProviderId || Json.Write(Store.Settings.Provider) != Json.Write(previous.Provider) || keys.Count > 0 || deleted.Count > 0) CancelRequests();
+            if (!Store.Settings.HistoryEnabled) Forget(null);
+            if (clipboardMenu != null) { clipboardMenu.Checked = Store.Settings.ClipboardMode; tray.Text = "Leaf · " + Store.Settings.Shortcut; }
             if (historyWindow != null) historyWindow.Refresh();
             Log.Event("settings_saved", null);
+        }
+        private void CleanupReplacedCredentials(List<KeyValuePair<ProviderProfile, ProviderProfile>> replaced, HashSet<string> deleted)
+        {
+            foreach (var pair in replaced) {
+                string oldScoped, newScoped;
+                try { oldScoped = Credentials.ScopedId(pair.Key); newScoped = Credentials.ScopedId(pair.Value); } catch { continue; }
+                if (oldScoped == newScoped) continue;
+                string newKey = "";
+                try { newKey = credentialProfiles.Read(pair.Value); } catch { }
+                if (deleted.Contains(pair.Value.Id) || newKey.Length > 0) {
+                    try { credentialProfiles.Delete(pair.Key); } catch { }
+                }
+            }
+        }
+        internal string ReadCredential(ProviderProfile profile)
+        {
+            if (profile == null) return "";
+            if (CredentialReader != null) return CredentialReader(profile);
+            return credentialProfiles != null ? credentialProfiles.Read(profile) : "";
+        }
+        private void EnsureCredentialMigration()
+        {
+            if (!migrateLegacyCredentials || credentialMigrationDone) return;
+            credentialMigrationDone = true;
+            try { Credentials.MigrateLegacyProfiles(Store.Settings.Providers); }
+            catch (Exception error) { Log.Event("credential_migration_failed", error); }
+        }
+        private void OnDispatcher(Action action)
+        {
+            if (Popup.Dispatcher.CheckAccess()) action(); else Popup.Dispatcher.Invoke(action);
         }
         public void OpenRecord(TranslationRecord record)
         {

@@ -305,7 +305,19 @@ namespace Leaf
             Ui.Visible(Ui.Get<Button>(Popup, "RetryButton"), retryAction != null);
         }
         private void ClearError() { retry = null; Ui.Visible(Ui.Get<Border>(Popup, "ErrorPanel"), false); }
-        private string KeyFor(ProviderProfile provider) { return CredentialReader != null ? CredentialReader(provider) : NativeEnabled ? Credentials.Read(provider.Id) : "test-key"; }
+        private string KeyFor(ProviderProfile provider)
+        {
+            if (CredentialReader != null) return CredentialReader(provider);
+            if (!NativeEnabled || credentialProfiles == null) return "test-key";
+            return credentialProfiles.Read(provider);
+        }
+        private bool BlockedByRecovery()
+        {
+            if (!Store.RecoveryBlocked) return false;
+            ShowError("上次保存没有完成，请重新应用配置后重试。", OpenSettings);
+            ShowPopup();
+            return true;
+        }
 
         public async Task TranslateAsync(string text, string sourceKind, bool force)
         {
@@ -318,6 +330,7 @@ namespace Leaf
                 var cached = Store.Find(key);
                 if (cached != null) { OpenRecord(cached); return; }
             }
+            if (BlockedByRecovery()) return;
             CancelRequests();
             Current = TranslationRecord.Create(text, sourceKind, Store.Settings);
             var record = Current; long version = generation.Next();
@@ -376,6 +389,7 @@ namespace Leaf
             if (demo) {
                 selectedCard = DemoCard(word.Text); record.Cards[word.Key] = selectedCard; DrawCard(selectedCard); return;
             }
+            if (BlockedByRecovery()) return;
             wordCancellation = new CancellationTokenSource(); var cancellation = wordCancellation;
             wordBusy = true; Busy();
             try {
@@ -437,6 +451,7 @@ namespace Leaf
             string question = input.Text.Trim();
             if (question.Length == 0) return;
             if (demo) { ShowError("这是演示内容。配置 API 后可进行真实追问。", OpenSettings); return; }
+            if (BlockedByRecovery()) return;
             string topic = selectedWord == null ? "原句" : selectedWord.Text;
             var record = Current; var card = selectedCard;
             var provider = Json.Copy(Store.Settings.Provider);

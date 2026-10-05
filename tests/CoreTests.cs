@@ -50,6 +50,7 @@ public static class CoreTests
         try {
             if (args.Contains("--native")) return WindowsNativeTests.Run(folder);
             Domain(); Storage(folder); Transport().GetAwaiter().GetResult(); Diagnostics(folder).GetAwaiter().GetResult();
+            assertions += StorageRegressionTests.Run(Path.Combine(folder, "storage-regression")).GetAwaiter().GetResult();
             assertions += ApplicationTests.Run(Path.Combine(folder, "app"));
             Console.WriteLine("SUCCESS: " + assertions + " assertions"); return 0;
         } catch (Exception error) { Console.Error.WriteLine(error); return 1; }
