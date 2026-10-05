@@ -145,21 +145,33 @@ public static class WindowsNativeTests
                     Ui.Get<TextBox>(shell.Popup, "SourceInput").SelectedText == shell.Current.Source,
                     "Explicit direct input focuses the editor and selects the original for replacement");
                 // Keyboard entry into a word and the collapse behaviour, which offscreen
-                // rendering cannot prove. Verified on a real desktop.
+                // rendering cannot prove. What runs here is focus and activation on a real
+                // window: the desktop matrix still has to confirm the real Tab order and the
+                // cross-application foreground, so this is not claimed as done on a desktop.
                 shell.OpenRecord(shell.Current); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
                 var words = WordLinks(shell.Popup);
                 Check(words.Count > 0 && words.All(x => x.Focusable && x.ToolTip != null),
-                    "Original words are reachable by keyboard in a real window");
+                    "Original words are focusable and explain themselves in a real window");
                 var word = words[0];
                 word.Focus(); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
-                Check(word.IsKeyboardFocused, "A word takes keyboard focus when the user asks for it");
+                Check(word.IsKeyboardFocused, "A word takes keyboard focus, which is the state Tab moves to");
                 int beforeLookup = transport.Calls;
                 word.RaiseEvent(new RoutedEventArgs(System.Windows.Documents.Hyperlink.ClickEvent));
                 await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
-                Check(transport.Calls > beforeLookup, "Activating a focused word starts its explanation");
-                IntPtr beforeHide = Native.GetForegroundWindow();
+                Check(transport.Calls > beforeLookup, "Activating the focused word starts its explanation");
+                // An external window owns the foreground, so the collapse check never compares
+                // Leaf with Leaf's own handle.
+                var foreign = new Window {
+                    Title = "Leaf focus fixture", Width = 240, Height = 120, Left = 16, Top = 16, ShowInTaskbar = false
+                };
+                foreign.Show(); foreign.Activate(); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                IntPtr foreignHandle = new WindowInteropHelper(foreign).Handle;
+                shell.ShowPopup(); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                Check(Native.GetForegroundWindow() == foreignHandle,
+                    "Showing the popup leaves the foreground to the other window that owns it");
                 shell.HidePopup(); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
-                Check(Native.GetForegroundWindow() == beforeHide, "Collapsing the popup leaves the foreground application alone");
+                Check(Native.GetForegroundWindow() == foreignHandle, "Collapsing the popup leaves the foreground application alone");
+                foreign.Close(); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
                 if (!OpenClipboard(new WindowInteropHelper(shell.Popup).Handle)) throw new Exception("Could not reserve clipboard for the isolated contention check.");
                 try {
                     var copy = Native.CopyTextAsync("Clipboard contention fixture");
