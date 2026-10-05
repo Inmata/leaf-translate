@@ -171,19 +171,21 @@ namespace Leaf
                 return;
             }
             if (result.Status == CaptureStatus.Failed) {
-                PrepareManualInput(result.Reason, invocation.ClipboardMode);
+                PrepareManualInput(result.Reason, invocation.ClipboardMode, invocation.FocusInputOnShortcut);
                 ShowError(CaptureMessages.For(result.Reason), () => { var retried = InvokeShortcutAsync(); });
                 return;
             }
             // Empty and Unavailable both prepare input; neither is a confirmed failure.
-            PrepareManualInput(result.Reason, invocation.ClipboardMode);
+            PrepareManualInput(result.Reason, invocation.ClipboardMode, invocation.FocusInputOnShortcut);
         }
         // Leaf itself is in front, so there is no foreign selection to read. An editor the
-        // user has not committed to stays untouched; otherwise the current result comes back.
+        // user has not committed to stays untouched; otherwise the current result comes back,
+        // and with no result at all the manual input is prepared so the shortcut still works.
         private void HandleLeafSelectionShortcut(bool directInput)
         {
-            if (Current == null || !HasPendingDraft()) { RestoreCurrentPresentation(directInput); return; }
-            ShowPopup(); BeginSourceEdit(directInput);
+            if (Current == null) { PrepareManualInput(CaptureReason.None, false, directInput); return; }
+            if (HasPendingDraft()) { ShowPopup(); BeginSourceEdit(directInput); return; }
+            RestoreCurrentPresentation(directInput);
         }
         // A cleared editor is a draft action, not a new session; an unchanged prefill is not a draft.
         private bool HasPendingDraft()
@@ -195,10 +197,12 @@ namespace Leaf
             return input.Text != Current.Source;
         }
         // Keeps whatever the user already has: the conversation, its drafts and any
-        // uncommitted edit. Only the input surface is prepared.
-        private void PrepareManualInput(CaptureReason reason, bool clipboardMode)
+        // uncommitted edit. Only the input surface is prepared, and the direct-input
+        // preference passed in is the one this invocation snapshotted.
+        private void PrepareManualInput(CaptureReason reason, bool clipboardMode, bool directInput)
         {
-            bool inconclusive = reason != CaptureReason.Desktop && reason != CaptureReason.EmptySelection;
+            bool inconclusive = reason != CaptureReason.Desktop && reason != CaptureReason.EmptySelection &&
+                reason != CaptureReason.None;
             var badge = Ui.Get<TextBlock>(Popup, "SourceBadge");
             string mode = clipboardMode ? "剪贴板模式" : "选中模式";
             if (Current == null) badge.Text = inconclusive ? "未取得选区 · " + mode : mode;
@@ -206,7 +210,7 @@ namespace Leaf
             ShowPopup();
             if (Ui.Get<Grid>(Popup, "SourceEditor").Visibility == Visibility.Visible &&
                 Ui.Get<TextBox>(Popup, "SourceInput").Text.Length > 0) { Busy(); return; }
-            BeginSourceEdit(Store.Settings.FocusInputOnShortcut);
+            BeginSourceEdit(directInput);
         }
         // Abandons an acquisition whose result the user has already made irrelevant.
         private void CancelCapture()

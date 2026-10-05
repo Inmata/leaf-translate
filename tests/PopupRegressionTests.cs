@@ -33,6 +33,8 @@ internal static class PopupRegressionTests
         await SameSourceRecovery(Path.Combine(folder, "restore"));
         await InFlightReuse(Path.Combine(folder, "inflight"));
         await LeafForegroundShortcut(Path.Combine(folder, "leaf-front"));
+        await LeafForegroundWithoutResult(Path.Combine(folder, "leaf-front-empty"));
+        await InvocationSnapshotPreference(Path.Combine(folder, "snapshot-preference"));
         await DraftRetention(Path.Combine(folder, "draft"));
         await StopAndRetryWord(Path.Combine(folder, "stop-word"));
         await StopAndRetryFollowup(Path.Combine(folder, "stop-chat"));
@@ -267,6 +269,71 @@ internal static class PopupRegressionTests
             Check(probe.ClipboardCalls == 1 && probe.AutomationCalls == 0 && shell.Current.Source == "fresh clipboard fixture",
                 "Clipboard mode in front of Leaf still reads this invocation's clipboard");
             Check(!ReferenceEquals(shell.Current, record), "Clipboard mode starts its own conversation instead of recovering");
+        }
+    }
+
+    // Leaf itself in front with nothing to restore: the shortcut must still prepare the
+    // manual input the user asked for instead of doing nothing at all.
+    private static async Task LeafForegroundWithoutResult(string folder)
+    {
+        var probe = new FakeSelectionProbe();
+        probe.Target.IsLeaf = true;
+        using (var shell = new AppShell(ConfiguredStore(folder), false, new LlmClient(new FixtureHandler()))) {
+            shell.Selection = new SelectionAcquirer(probe);
+            Check(shell.Current == null, "A fresh shell has no result to recover");
+            // A reading page without a result has its editor collapsed.
+            Ui.Visible(Ui.Get<RichTextBox>(shell.Popup, "SourceText"), true);
+            Ui.Visible(Ui.Get<Grid>(shell.Popup, "SourceEditor"), false);
+            await shell.InvokeShortcutAsync();
+            Check(Ui.Get<Grid>(shell.Popup, "SourceEditor").Visibility == Visibility.Visible &&
+                Ui.Get<TextBox>(shell.Popup, "SourceInput").Text.Length == 0,
+                "A shortcut in front of Leaf with no result prepares the empty manual input");
+            Check(probe.AutomationCalls == 0 && probe.CopyCalls == 0 && probe.ClipboardCalls == 0,
+                "Preparing manual input in front of Leaf reads no selection at all");
+
+            // The same shortcut keeps whatever the user has already typed.
+            Ui.Visible(Ui.Get<Grid>(shell.Popup, "SourceEditor"), true);
+            Ui.Get<TextBox>(shell.Popup, "SourceInput").Text = "an uncommitted draft";
+            await shell.InvokeShortcutAsync();
+            Check(Ui.Get<TextBox>(shell.Popup, "SourceInput").Text == "an uncommitted draft" &&
+                shell.Current == null,
+                "A shortcut with no result never discards an uncommitted draft");
+
+            // The direct-input preference decides whether that prepared editor takes focus.
+            var direct = Json.Copy(shell.Store.Settings); direct.FocusInputOnShortcut = true; shell.Store.SaveSettings(direct);
+            Ui.Visible(Ui.Get<RichTextBox>(shell.Popup, "SourceText"), true);
+            Ui.Visible(Ui.Get<Grid>(shell.Popup, "SourceEditor"), false);
+            Ui.Get<TextBox>(shell.Popup, "SourceInput").Clear();
+            await shell.InvokeShortcutAsync();
+            Check(Ui.Get<Grid>(shell.Popup, "SourceEditor").Visibility == Visibility.Visible &&
+                Ui.Get<TextBox>(shell.Popup, "SourceInput").SelectedText.Length == 0,
+                "The direct-input preference still prepares the editor when there is no result");
+        }
+    }
+
+    // A capture applies the preferences it snapshotted when it started, not the ones that
+    // happen to be saved by the time it returns.
+    private static async Task InvocationSnapshotPreference(string folder)
+    {
+        var probe = new FakeSelectionProbe();
+        var handler = new FixtureHandler();
+        using (var shell = new AppShell(ConfiguredStore(folder), false, new LlmClient(handler))) {
+            shell.Selection = new SelectionAcquirer(probe);
+            await shell.TranslateAsync("A snapshot preference sentence.", "选中文字", false);
+            var record = shell.Current;
+            var quiet = Json.Copy(shell.Store.Settings); quiet.FocusInputOnShortcut = false; shell.Store.SaveSettings(quiet);
+            probe.AutomationPending = new TaskCompletionSource<SelectionCaptureResult>();
+            var pending = shell.InvokeShortcutAsync();
+            // The user changes the preference while the shortcut is still acquiring.
+            var changed = Json.Copy(shell.Store.Settings); changed.FocusInputOnShortcut = true; shell.Store.SaveSettings(changed);
+            probe.AutomationPending.TrySetResult(SelectionCaptureResult.NoText(CaptureStatus.Unavailable, CaptureReason.UnsupportedPattern));
+            await pending;
+            Check(Ui.Get<Grid>(shell.Popup, "SourceEditor").Visibility == Visibility.Visible &&
+                Ui.Get<TextBox>(shell.Popup, "SourceInput").SelectedText.Length == 0,
+                "A capture uses the direct-input preference it snapshotted, not one changed while it ran");
+            Check(ReferenceEquals(shell.Current, record),
+                "Preparing input for an inconclusive capture keeps the conversation");
+            Check(handler.Calls == 1, "An inconclusive capture adds no API call");
         }
     }
 
