@@ -88,7 +88,9 @@ namespace Leaf
             if (status == CaptureStatus.Text) throw new ArgumentException("status");
             return new SelectionCaptureResult { Status = status, Reason = reason, Text = "", Steps = new List<CaptureStep>() };
         }
-        internal static SelectionCaptureResult Create(CaptureStatus status, CaptureReason reason, string text, List<CaptureStep> steps)
+        // The probe-facing factory: same contract as Success/NoText but it carries the
+        // stages the probe recorded, so a fixture can produce real metadata.
+        public static SelectionCaptureResult Create(CaptureStatus status, CaptureReason reason, string text, List<CaptureStep> steps)
         {
             if (status != CaptureStatus.Text) text = "";
             return new SelectionCaptureResult {
@@ -154,19 +156,29 @@ namespace Leaf
 
         public async Task<SelectionCaptureResult> CaptureAsync(CaptureTarget target, bool clipboardMode, string shortcut, CancellationToken cancellation)
         {
-            try { return await CaptureCoreAsync(target, clipboardMode, shortcut, cancellation); }
-            catch (OperationCanceledException) { return SelectionCaptureResult.NoText(CaptureStatus.Cancelled, CaptureReason.Cancelled); }
-            catch (Exception) { return SelectionCaptureResult.NoText(CaptureStatus.Failed, CaptureReason.SystemFailure); }
+            // The stage list is owned here so every exit still reports what was already
+            // known: a cancelled or thrown worker must not reduce the diagnosis to nothing.
+            var steps = new List<CaptureStep>();
+            try { return await CaptureCoreAsync(target, clipboardMode, shortcut, cancellation, steps); }
+            catch (OperationCanceledException) {
+                return SelectionCaptureResult.Create(CaptureStatus.Cancelled, CaptureReason.Cancelled, "", steps);
+            } catch (Exception error) {
+                // Only the HResult is kept; the message never becomes free text in the log.
+                steps.Add(new CaptureStep { Stage = "result", Reason = CaptureReason.SystemFailure, HResult = error.HResult });
+                return SelectionCaptureResult.Create(CaptureStatus.Failed, CaptureReason.SystemFailure, "", steps);
+            }
         }
 
-        private async Task<SelectionCaptureResult> CaptureCoreAsync(CaptureTarget target, bool clipboardMode, string shortcut, CancellationToken cancellation)
+        private async Task<SelectionCaptureResult> CaptureCoreAsync(CaptureTarget target, bool clipboardMode, string shortcut,
+            CancellationToken cancellation, List<CaptureStep> steps)
         {
             cancellation.ThrowIfCancellationRequested();
             HotkeySpec.Parse(shortcut); // Rejects free text before it could reach diagnostics.
-            var steps = new List<CaptureStep>();
             var watch = Stopwatch.StartNew();
+            long mark = 0;
             bool current = probe.IsCurrent(target);
-            steps.Add(new CaptureStep { Stage = "snapshot", Reason = CaptureReason.None, ForegroundSame = current, ElapsedMs = watch.ElapsedMilliseconds });
+            mark = watch.ElapsedMilliseconds;
+            steps.Add(new CaptureStep { Stage = "snapshot", Reason = CaptureReason.None, ForegroundSame = current, ElapsedMs = mark });
 
             if (clipboardMode) {
                 var fromClipboard = await probe.ReadClipboardAsync(target, cancellation);
@@ -192,12 +204,14 @@ namespace Leaf
                     var result = await automation;
                     bool concluded = result != null &&
                         (result.Status == CaptureStatus.Text || result.Status == CaptureStatus.Empty || result.Status == CaptureStatus.Cancelled);
-                    if (result != null && (result.Steps == null || result.Steps.Count == 0))
-                        steps.Add(new CaptureStep {
-                            Stage = "uia", Reason = result.Reason, PatternSupported = concluded,
-                            ForegroundSame = true, ElapsedMs = automationWatch.ElapsedMilliseconds
-                        });
-                    if (concluded) return Adopt(result, steps);
+                    // The probe owns the UIA stage detail: keep it either way, so an
+                    // inconclusive automation answer is still diagnosable after a copy.
+                    if (result != null && result.Steps != null && result.Steps.Count > 0) Merge(steps, result.Steps);
+                    else steps.Add(new CaptureStep {
+                        Stage = "uia", Reason = result == null ? CaptureReason.SystemFailure : result.Reason,
+                        PatternSupported = concluded, ForegroundSame = true, ElapsedMs = automationWatch.ElapsedMilliseconds
+                    });
+                    if (concluded) return SelectionCaptureResult.Create(result.Status, result.Reason, result.Text, new List<CaptureStep>(steps));
                 } else {
                     // The worker keeps its own lifetime; revoke its token and observe its fault.
                     deadline.Cancel(); Abandon(automation);
@@ -205,7 +219,8 @@ namespace Leaf
                 }
                 cancellation.ThrowIfCancellationRequested();
                 if (!probe.IsCurrent(target)) {
-                    steps.Add(new CaptureStep { Stage = "copy_wait", Reason = CaptureReason.ForegroundChanged, ForegroundSame = false, ElapsedMs = watch.ElapsedMilliseconds });
+                    long now = watch.ElapsedMilliseconds;
+                    steps.Add(new CaptureStep { Stage = "copy_wait", Reason = CaptureReason.ForegroundChanged, ForegroundSame = false, ElapsedMs = now - mark });
                     return SelectionCaptureResult.Create(CaptureStatus.Unavailable, CaptureReason.ForegroundChanged, "", steps);
                 }
                 var copied = await probe.CopySelectionAsync(target, cancellation);
@@ -213,11 +228,17 @@ namespace Leaf
             }
         }
 
+        private static void Merge(List<CaptureStep> target, List<CaptureStep> extra)
+        {
+            if (extra == null) return;
+            foreach (var step in extra) if (step != null) target.Add(step);
+        }
+
         private static SelectionCaptureResult Adopt(SelectionCaptureResult result, List<CaptureStep> steps)
         {
             if (result == null)
                 return SelectionCaptureResult.Create(CaptureStatus.Failed, CaptureReason.SystemFailure, "", new List<CaptureStep>(steps));
-            if (result.Steps != null) foreach (var step in result.Steps) if (step != null) steps.Add(step);
+            Merge(steps, result.Steps);
             return SelectionCaptureResult.Create(result.Status, result.Reason, result.Text, new List<CaptureStep>(steps));
         }
 

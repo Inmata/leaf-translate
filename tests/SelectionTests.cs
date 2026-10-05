@@ -115,9 +115,65 @@ internal static class SelectionTests
         Check(invalid.Status == CaptureStatus.Failed && probe.AutomationCalls == 0 && probe.CopyCalls == 0,
             "An unvalidated shortcut never reaches capture or the log");
 
+        await StagesRetained(reader, probe);
         await Diagnostics(reader, probe);
         CopyStateMachine();
         return count + assertions;
+    }
+
+    private static CaptureStep Step(SelectionCaptureResult result, string stage)
+    {
+        if (result == null || result.Steps == null) return null;
+        return result.Steps.FirstOrDefault(s => s != null && s.Stage == stage);
+    }
+
+    // The probe's own stage detail must survive every exit: a copy fallback that succeeds,
+    // one that finds nothing, a cancelled worker and a thrown system failure. Losing it is
+    // what made the reported Codeg failures undiagnosable.
+    private static async Task StagesRetained(SelectionAcquirer reader, FakeSelectionProbe probe)
+    {
+        probe.Current = true; probe.AutomationPending = null;
+        Func<List<CaptureStep>> uiaSteps = () => new List<CaptureStep> {
+            new CaptureStep { Stage = "uia", Reason = CaptureReason.UnsupportedPattern, CandidateCount = 7,
+                ControlTypeId = 50004, PatternSupported = false, ForegroundSame = true, ElapsedMs = 13 }
+        };
+        probe.Automation = SelectionCaptureResult.Create(CaptureStatus.Unavailable, CaptureReason.UnsupportedPattern, "", uiaSteps());
+        probe.Copy = SelectionCaptureResult.Success("fresh copy");
+        var carried = await reader.CaptureAsync(probe.Snapshot(), false, "Ctrl+Alt+T", CancellationToken.None);
+        Check(carried.Status == CaptureStatus.Text && carried.Text == "fresh copy",
+            "A copied fallback still reports its fresh text");
+        Check(Step(carried, "uia") != null && Step(carried, "uia").CandidateCount == 7 &&
+            Step(carried, "uia").ControlTypeId == 50004 && Step(carried, "uia").ElapsedMs == 13 &&
+            Step(carried, "uia").Reason == CaptureReason.UnsupportedPattern,
+            "A successful copy fallback keeps the UIA stage's candidate count, control type and elapsed time");
+        Check(Step(carried, "snapshot") != null, "The snapshot stage is kept beside the UIA stage");
+
+        probe.Automation = SelectionCaptureResult.Create(CaptureStatus.Unavailable, CaptureReason.UnsupportedPattern, "", uiaSteps());
+        probe.Copy = SelectionCaptureResult.NoText(CaptureStatus.Unavailable, CaptureReason.CopyNoUpdate);
+        var carriedEmpty = await reader.CaptureAsync(probe.Snapshot(), false, "Ctrl+Alt+T", CancellationToken.None);
+        Check(carriedEmpty.Status == CaptureStatus.Unavailable &&
+            Step(carriedEmpty, "uia") != null && Step(carriedEmpty, "uia").CandidateCount == 7,
+            "A copy that finds nothing still reports why automation could not conclude");
+
+        probe.Automation = SelectionCaptureResult.Create(CaptureStatus.Unavailable, CaptureReason.AutomationBusy, "",
+            new List<CaptureStep> { new CaptureStep { Stage = "uia", Reason = CaptureReason.AutomationBusy, ForegroundSame = true } });
+        probe.CopyThrows = new OperationCanceledException();
+        var cancelledStages = await reader.CaptureAsync(probe.Snapshot(), false, "Ctrl+Alt+T", CancellationToken.None);
+        Check(cancelledStages.Status == CaptureStatus.Cancelled && Step(cancelledStages, "snapshot") != null &&
+            Step(cancelledStages, "uia") != null && Step(cancelledStages, "uia").Reason == CaptureReason.AutomationBusy,
+            "A cancelled capture keeps the stages it had already recorded");
+
+        var fixtureError = new InvalidOperationException("fixture failure text");
+        probe.CopyThrows = fixtureError;
+        var failedStages = await reader.CaptureAsync(probe.Snapshot(), false, "Ctrl+Alt+T", CancellationToken.None);
+        Check(failedStages.Status == CaptureStatus.Failed && failedStages.Reason == CaptureReason.SystemFailure &&
+            Step(failedStages, "snapshot") != null && Step(failedStages, "result") != null &&
+            Step(failedStages, "result").HResult == fixtureError.HResult && failedStages.Text == "",
+            "A system failure keeps the recorded stages and reports only its HResult");
+        Check(Json.Write(new { steps = failedStages.Steps }) != null &&
+            !Json.Write(new { steps = failedStages.Steps }).Contains("fixture failure text"),
+            "Stages never carry the exception message as free text");
+        probe.CopyThrows = null;
     }
 
     // Reading the old clipboard, trusting another process's copy or restoring over a
@@ -192,6 +248,7 @@ internal sealed class FakeSelectionProbe : ISelectionProbe
     public SelectionCaptureResult Clipboard = SelectionCaptureResult.Success("clipboard fixture");
     public TaskCompletionSource<SelectionCaptureResult> AutomationPending;
     public CancellationToken AutomationToken;
+    public Exception AutomationThrows, CopyThrows, ClipboardThrows;
     public bool Current = true;
     public int AutomationCalls, CopyCalls, ClipboardCalls;
     public CaptureTarget Snapshot() { return Target; }
@@ -199,16 +256,19 @@ internal sealed class FakeSelectionProbe : ISelectionProbe
     public Task<SelectionCaptureResult> ReadAutomationAsync(CaptureTarget target, CancellationToken cancellation)
     {
         AutomationCalls++; AutomationToken = cancellation;
+        if (AutomationThrows != null) throw AutomationThrows;
         return AutomationPending == null ? Task.FromResult(Automation) : AutomationPending.Task;
     }
     public Task<SelectionCaptureResult> CopySelectionAsync(CaptureTarget target, CancellationToken cancellation)
     {
         cancellation.ThrowIfCancellationRequested();
-        CopyCalls++; return Task.FromResult(Copy);
+        CopyCalls++; if (CopyThrows != null) throw CopyThrows;
+        return Task.FromResult(Copy);
     }
     public Task<SelectionCaptureResult> ReadClipboardAsync(CaptureTarget target, CancellationToken cancellation)
     {
         cancellation.ThrowIfCancellationRequested();
-        ClipboardCalls++; return Task.FromResult(Clipboard);
+        ClipboardCalls++; if (ClipboardThrows != null) throw ClipboardThrows;
+        return Task.FromResult(Clipboard);
     }
 }
