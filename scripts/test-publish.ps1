@@ -160,6 +160,34 @@ try {
     $mirrorsAfter = @(Get-ChildItem -LiteralPath (Join-Path $projectRoot 'work') -Directory -Filter 'publish-*' -ErrorAction SilentlyContinue).Count
     Assert-Check ($mirrorsAfter -eq $mirrorsBefore) 'publish -CheckOnly created no checkout'
 
+    $fixtureId = Split-Path -Leaf $fixtureRoot
+    $retentionSmoke = Join-Path $fixtureRoot 'retention\smoke'
+    $retentionResults = Join-Path $fixtureRoot 'retention\results'
+    New-Item -ItemType Directory -Force -Path $retentionSmoke | Out-Null
+    Set-Content -LiteralPath (Join-Path $retentionSmoke 'data') -Value 'poison'
+    Set-Content -LiteralPath (Join-Path $retentionSmoke 'popup.png') -Value 'existing-image'
+    $relativeBuild = 'work/publish-tests/' + $fixtureId + '/retention/build'
+    $relativeSmoke = 'work/publish-tests/' + $fixtureId + '/retention/smoke'
+    $relativeResults = 'work/publish-tests/' + $fixtureId + '/retention/results'
+    $savedPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $retentionOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'test.ps1') -OutputDirectory $relativeBuild -ResultsDirectory $relativeResults -SmokeDirectory $relativeSmoke 2>&1
+    $retentionExit = $LASTEXITCODE
+    $ErrorActionPreference = $savedPreference
+    Assert-Check ($retentionExit -ne 0) 'A failing UI smoke run reports failure'
+    Assert-Check (Test-Path -LiteralPath (Join-Path $retentionResults 'ui-smoke.exitcode')) 'Failing UI smoke saves its exit code'
+    $savedSmokeExit = (Get-Content -LiteralPath (Join-Path $retentionResults 'ui-smoke.exitcode') -Raw).Trim()
+    Assert-Check ($savedSmokeExit -ne '0' -and $savedSmokeExit -ne '') 'Saved UI smoke exit code is the real failure'
+    Assert-Check (Test-Path -LiteralPath (Join-Path $retentionResults 'ui-smoke-result.json')) 'Failing UI smoke keeps result.json'
+    $savedResult = [IO.File]::ReadAllText((Join-Path $retentionResults 'ui-smoke-result.json'))
+    Assert-Check ($savedResult -match '"success"\s*:\s*false') 'Saved result.json records the failure'
+    $savedTestsExit = (Get-Content -LiteralPath (Join-Path $retentionResults 'tests.exitcode') -Raw).Trim()
+    Assert-Check ($savedTestsExit -eq '0') 'Core test exit code is preserved separately'
+    $savedTestsText = [IO.File]::ReadAllText((Join-Path $retentionResults 'tests.txt'))
+    Assert-Check ($savedTestsText -match 'SUCCESS: \d+ assertions') 'Core test output is written to disk'
+    Assert-Check (Test-Path -LiteralPath (Join-Path $retentionSmoke 'popup.png')) 'An existing smoke PNG survives the failure'
+    Assert-Check (Test-Path -LiteralPath (Join-Path $retentionResults 'ui-smoke.stdout.txt')) 'Failing smoke process output is captured'
+
     $templatePath = Join-Path $projectRoot 'src\Leaf\app.manifest'
     [xml]$manifestTemplate = Get-Content -LiteralPath $templatePath -Raw
     $templateIdentity = $manifestTemplate.assembly.assemblyIdentity
@@ -259,6 +287,14 @@ try {
     Assert-Check $packageRejected 'package rejects an explicit version that differs from the constant'
     Assert-Check (-not (Test-Path -LiteralPath (Join-Path $projectRoot 'dist\Leaf-v9.9.9-windows.zip'))) 'Rejected packaging wrote no archive'
     Assert-Check (-not (Test-Path -LiteralPath (Join-Path $projectRoot 'bin\package-v9.9.9'))) 'Rejected packaging did not build a mismatched bundle'
+
+    $savedPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $badPublishOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'publish.ps1') -CheckOnly -Version '9.9.9' 2>&1
+    $badPublishExit = $LASTEXITCODE
+    $ErrorActionPreference = $savedPreference
+    Assert-Check ($badPublishExit -ne 0) 'publish rejects an explicit version that differs from the constant'
+    Assert-Check (($badPublishOutput -join "`n") -match 'does not match') 'publish reports the version mismatch'
 
     Write-Output ('SUCCESS: ' + $script:checks + ' publication checks')
 } finally {
