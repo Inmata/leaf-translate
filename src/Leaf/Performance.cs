@@ -162,7 +162,9 @@ namespace Leaf
             for (int i = 0; i < sampleCount; i++) records.Add(LongRecord(i, store.Settings));
             var watch = Stopwatch.StartNew();
             var gaps = new List<long>(); var gapWatch = Stopwatch.StartNew(); long lastBeat = 0;
-            var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(20) };
+            // Normal priority so the 20 ms heartbeat is observed even when the real work only
+            // lasts a few tens of milliseconds; Background ticks would lose to the resumption.
+            var timer = new DispatcherTimer(DispatcherPriority.Normal) { Interval = TimeSpan.FromMilliseconds(20) };
             timer.Tick += (s, e) => { long now = gapWatch.ElapsedMilliseconds; gaps.Add(now - lastBeat); lastBeat = now; };
             timer.Start();
             HistorySnapshots.HistoryPayload encoded = null;

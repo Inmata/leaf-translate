@@ -882,7 +882,7 @@ public static class StorageRegressionTests
         var record = TranslationRecord.Create("heartbeat source", "剪贴板", store.Settings);
         record.Translation = "heartbeat translation"; record.Completed = true;
         int beats = 0;
-        var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(20) };
+        var timer = new DispatcherTimer(DispatcherPriority.Normal) { Interval = TimeSpan.FromMilliseconds(20) };
         timer.Tick += (s, e) => beats++;
         timer.Start();
         try {
