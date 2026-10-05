@@ -35,6 +35,7 @@ public static class StorageRegressionTests
         await FailedDisableBarrierScenarios(folder);
         await ClearBoundaryScenarios(folder);
         await ExplicitRecoveryEvidenceScenarios(folder);
+        await BackupCleanupScenarios(folder);
         await StructureScenarios(folder);
         await ByteLimitRegression(folder);
         await HistoryScenarios(folder);
@@ -727,6 +728,39 @@ public static class StorageRegressionTests
         Check(!corruptStore.NeedsExplicitRecovery, "A completed explicit recovery replaces the unreadable marker");
         Check(!new LocalStore(corrupt).NeedsExplicitRecovery,
             "A restart after the explicit recovery is clean");
+    }
+
+    // Enumerating or deleting the sensitive history backups must fail loudly and stay
+    // retryable instead of letting clear/disable report success while quarantine copies remain.
+    private static async Task BackupCleanupScenarios(string folder)
+    {
+        string directory = NewDirectory(folder, "backup-cleanup");
+        var files = new TargetedFaultingFiles();
+        var store = new LocalStore(directory, files);
+        var seeded = Completed("backup cleanup seed", store.Settings);
+        await store.SaveAsync(seeded, store.HistoryEpoch);
+        await store.FlushAsync();
+        string corrupt = Path.Combine(directory, "history.json.corrupt-fixture");
+        string quarantine = Path.Combine(directory, "history.json.quarantine-fixture");
+        File.WriteAllText(corrupt, "sensitive fixture backup");
+        File.WriteAllText(quarantine, "sensitive fixture quarantine");
+        files.Fail = (operation, path) => operation == "Delete" &&
+            (Path.GetFileName(path).StartsWith("history.json.corrupt-", StringComparison.Ordinal) ||
+             Path.GetFileName(path).StartsWith("history.json.quarantine-", StringComparison.Ordinal));
+        bool clearFailed = false;
+        try { await store.ClearAsync(); } catch (UserError error) { clearFailed = error.Code == "storage"; }
+        Check(clearFailed, "A backup deletion fault makes the clear report failure");
+        Check(store.History("").Count == 0, "The clear still removes the records from memory");
+        Check(File.Exists(corrupt) && File.Exists(quarantine), "Sensitive backups stay until their cleanup succeeds");
+        var fresh = Completed("backup cleanup fresh", store.Settings);
+        await store.SaveAsync(fresh, store.HistoryEpoch);
+        files.Fail = null;
+        await store.RetryFailedWritesAsync();
+        await store.FlushAsync();
+        Check(!File.Exists(corrupt) && !File.Exists(quarantine), "Retrying the clear removes the sensitive backups");
+        var reloaded = new LocalStore(directory).History("");
+        Check(reloaded.Count == 1 && reloaded[0].Id == fresh.Id,
+            "The retried backup cleanup does not delete the later-epoch record");
     }
 
     private static async Task CredentialAndPatchScenarios(string folder)

@@ -387,13 +387,21 @@ namespace Leaf
         {
             return DateTime.UtcNow.ToString("yyyyMMddHHmmssfff") + "-" + Guid.NewGuid().ToString("N");
         }
+        // Sensitive quarantine/corrupt copies must not survive a clear or history-disable while
+        // that operation reports success; cleanup failures stay visible and retryable.
         private void DeleteHistoryBackups()
         {
-            try {
-                foreach (string pattern in new[] { "history.json.corrupt-*", "history.json.quarantine-*" })
-                    foreach (string path in Directory.GetFiles(folder, pattern))
-                        try { files.Delete(path); } catch { }
-            } catch { }
+            bool failed = false;
+            foreach (string pattern in new[] { "history.json.corrupt-*", "history.json.quarantine-*" }) {
+                string[] paths;
+                try { paths = Directory.GetFiles(folder, pattern); }
+                catch { failed = true; continue; }
+                foreach (string path in paths) {
+                    try { files.Delete(path); }
+                    catch { failed = true; }
+                }
+            }
+            if (failed) throw new UserError("storage", "无法清理历史备份，请检查目录权限后重试。");
         }
 
         private sealed class LegacyPlacement
