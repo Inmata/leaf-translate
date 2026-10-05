@@ -39,6 +39,10 @@ internal static class PopupRegressionTests
         await StopAndRetryWord(Path.Combine(folder, "stop-word"));
         await StopAndRetryFollowup(Path.Combine(folder, "stop-chat"));
         await StopAndRetryParallel(Path.Combine(folder, "stop-both"));
+        await StopAndRetryTranslation(Path.Combine(folder, "stop-translation"));
+        await RetryUsesLatestProvider(Path.Combine(folder, "retry-provider"));
+        await CachedRestoreKeepsWordCard(Path.Combine(folder, "cached-card"));
+        await FailedFollowupRetriesOriginalQuestion(Path.Combine(folder, "failed-followup"));
         return assertions;
     }
 
@@ -171,6 +175,129 @@ internal static class PopupRegressionTests
                 "Both retried operations complete in the same conversation");
         }
     }
+    // Stopping a translation retries that translation and nothing else.
+    private static async Task StopAndRetryTranslation(string folder)
+    {
+        var handler = new ControlledHandler();
+        using (var shell = new AppShell(ConfiguredStore(folder), false, new LlmClient(handler))) {
+            var translation = shell.TranslateAsync("A stopped translation sentence.", "选中文字", false);
+            Check(handler.Requests.Count == 1 && !handler.Requests[0].Cancellation.IsCancellationRequested,
+                "The translation is in flight with its own cancellation");
+            Click(shell.Popup, "CancelButton");
+            Check(handler.Requests[0].Cancellation.IsCancellationRequested, "Stopping cancels the translation");
+            Check(Ui.Get<Grid>(shell.Popup, "BusyPanel").Visibility == Visibility.Collapsed,
+                "Stopping clears the translation's busy state");
+            Click(shell.Popup, "RetryButton");
+            Check(handler.Requests.Count == 2, "Retrying a stopped translation issues exactly one new request");
+            Check(handler.Requests[1].Body.Contains("source_text") && !handler.Requests[1].Body.Contains("selected_text"),
+                "Retry repeats the translation instead of becoming a word lookup");
+            handler.ReplyStream(0, "迟到的译文");
+            await translation;
+            handler.ReplyStream(1, "重试的译文");
+            await Until(() => shell.Current != null && shell.Current.Completed);
+            Check(shell.Current.Source == "A stopped translation sentence." && shell.Current.Translation == "重试的译文",
+                "The retried translation completes the same sentence");
+        }
+    }
+
+    // A retry reads the configuration saved when it runs, not one captured earlier.
+    private static async Task RetryUsesLatestProvider(string folder)
+    {
+        var handler = new ControlledHandler();
+        using (var shell = new AppShell(ConfiguredStore(folder), false, new LlmClient(handler))) {
+            var translation = shell.TranslateAsync("A provider retry sentence.", "选中文字", false);
+            handler.ReplyStream(0, "夹具译文");
+            await translation;
+            var record = shell.Current;
+            var word = TextTools.Pieces(record.Source).First(p => p.IsWord);
+            var lookup = shell.SelectWordAsync(word, false);
+            Click(shell.Popup, "CancelButton");
+            Check(handler.Requests[1].Cancellation.IsCancellationRequested, "Stopping cancels the word lookup");
+            var moved = Json.Copy(shell.Store.Settings);
+            moved.Provider.BaseUrl = "https://retry.example/v1/chat/completions";
+            moved.Provider.Model = "retry-model";
+            shell.Store.SaveSettings(moved);
+            Click(shell.Popup, "RetryButton");
+            Check(handler.Requests.Count == 3, "The retry is sent after the saved configuration changed");
+            Check(handler.Requests[2].Uri.Host == "retry.example" && handler.Requests[2].Body.Contains("retry-model"),
+                "A retry reads the newest saved endpoint and model instead of a captured one");
+            handler.ReplyJson(1, new { meaning = "过期词义", sections = new object[0] });
+            await lookup;
+            handler.ReplyJson(2, new { meaning = "新词义", sections = new object[0] });
+            await Until(() => record.Cards.Count > 0);
+            Check(record.Cards.Values.Any(c => c.meaning == "新词义"), "The retried lookup lands in the conversation");
+        }
+    }
+
+    // Recovering a cached result keeps the word card and its highlight, not only the text.
+    private static async Task CachedRestoreKeepsWordCard(string folder)
+    {
+        var handler = new FixtureHandler();
+        using (var shell = new AppShell(ConfiguredStore(folder), false, new LlmClient(handler))) {
+            await shell.TranslateAsync("A cached card sentence.", "选中文字", false);
+            var record = shell.Current;
+            var word = TextTools.Pieces(record.Source).First(p => p.IsWord);
+            await shell.SelectWordAsync(word, false);
+            Check(Ui.Get<Border>(shell.Popup, "WordPanel").Visibility == Visibility.Visible &&
+                Ui.Get<TextBlock>(shell.Popup, "WordTitle").Text == word.Text,
+                "The word card is on screen before recovery");
+            Check(WordLink(shell.Popup, word.Text) != null && WordLink(shell.Popup, word.Text).Background != null,
+                "The selected word is highlighted before recovery");
+            shell.BeginSourceEdit(false);
+            Ui.Get<TextBox>(shell.Popup, "SourceInput").Clear();
+            int calls = handler.Calls;
+            await shell.TranslateAsync(record.Source, "选中文字", false);
+            Check(handler.Calls == calls && ReferenceEquals(shell.Current, record),
+                "Recovering the same text makes no API call");
+            Check(Ui.Get<Border>(shell.Popup, "WordPanel").Visibility == Visibility.Visible &&
+                Ui.Get<TextBlock>(shell.Popup, "WordTitle").Text == word.Text &&
+                Ui.Get<TextBlock>(shell.Popup, "WordMeaning").Text == "夹具词义",
+                "Recovery keeps the word card instead of rebuilding the record");
+            Check(WordLink(shell.Popup, word.Text) != null && WordLink(shell.Popup, word.Text).Background != null,
+                "Recovery keeps the highlight on the selected word");
+            Check(Ui.Get<TextBlock>(shell.Popup, "TopicLabel").Text.Contains(word.Text),
+                "Recovery keeps the follow-up topic on the selected word");
+        }
+    }
+
+    // A follow-up that failed is retried with its own question, not with a later draft.
+    private static async Task FailedFollowupRetriesOriginalQuestion(string folder)
+    {
+        var handler = new ControlledHandler();
+        using (var shell = new AppShell(ConfiguredStore(folder), false, new LlmClient(handler))) {
+            var translation = shell.TranslateAsync("A failing follow-up sentence.", "选中文字", false);
+            handler.ReplyStream(0, "夹具译文");
+            await translation;
+            var record = shell.Current;
+            Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text = "original failing question";
+            var chat = shell.SendChatAsync();
+            handler.ReplyError(1, HttpStatusCode.InternalServerError);
+            await chat;
+            Check(Ui.Get<Border>(shell.Popup, "ErrorPanel").Visibility == Visibility.Visible &&
+                Ui.Get<Button>(shell.Popup, "RetryButton").Visibility == Visibility.Visible,
+                "A failed follow-up offers its retry entry");
+            Check(record.Chat.Count == 0, "A failed follow-up adds nothing to the conversation");
+            Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text = "edited afterwards";
+            Click(shell.Popup, "RetryButton");
+            Check(handler.Requests.Count == 3 && handler.Requests[2].Body.Contains("original failing question") &&
+                !handler.Requests[2].Body.Contains("edited afterwards"),
+                "Retrying a failed follow-up repeats the original question instead of the edited input");
+            Check(Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text == "edited afterwards",
+                "The edited draft survives the retry");
+            handler.ReplyStream(2, "重试的回答");
+            await Until(() => record.Chat.Count == 2);
+            Check(record.Chat[1].Content == "重试的回答", "The retried follow-up lands in the conversation");
+        }
+    }
+
+    private static System.Windows.Documents.Hyperlink WordLink(Window popup, string text)
+    {
+        foreach (var block in Ui.Get<RichTextBox>(popup, "SourceText").Document.Blocks.OfType<Paragraph>())
+            foreach (var inline in block.Inlines.OfType<System.Windows.Documents.Hyperlink>())
+                if (new TextRange(inline.ContentStart, inline.ContentEnd).Text == text) return inline;
+        return null;
+    }
+
     private static async Task Until(Func<bool> condition)
     {
         for (int i = 0; i < 300 && !condition(); i++) await Task.Delay(10);
@@ -416,6 +543,12 @@ internal static class PopupRegressionTests
         }
         public void ReplyStream(int index, string text) { Requests[index].Completion.TrySetResult(StreamReply(text)); }
         public void ReplyJson(int index, object card) { Requests[index].Completion.TrySetResult(JsonReply(card)); }
+        public void ReplyError(int index, HttpStatusCode status)
+        {
+            Requests[index].Completion.TrySetResult(new HttpResponseMessage(status) {
+                Content = new StringContent("{\"error\":{\"message\":\"fixture failure\"}}", Encoding.UTF8, "application/json")
+            });
+        }
     }
     private sealed class FixtureHandler : HttpMessageHandler
     {

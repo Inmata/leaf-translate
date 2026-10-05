@@ -3,6 +3,9 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Net.Http;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 
@@ -159,6 +162,64 @@ namespace Leaf
             popup.Width = 456; popup.Height = 620; shell.UpdatePopupTypography();
             checks.Add("All popup states render at 456x620 and 360x380 across 96/120/144/192 DPI with exact output pixels");
         }
+        // A real stop and its retry: the application's own StopForRetry drives the busy panel,
+        // the retry entry and the restored state, so the rendered images are not painted by
+        // the renderer. The fixture transport answers nothing, so no request ever leaves.
+        private static void StopState(AppShell shell, PendingTransport transport, string folder, List<string> checks)
+        {
+            var popup = shell.Popup;
+            popup.Width = 456; popup.Height = 620; shell.UpdatePopupTypography();
+            // A request needs a configured model; the fixture transport answers it, so this
+            // stays offline while giving the shell one real operation in flight.
+            var configured = Json.Copy(shell.Store.Settings);
+            configured.Provider.Model = "fixture-model";
+            shell.Store.SaveSettings(configured);
+            shell.TranslateAsync("A stopped state fixture sentence.", "选中文字", false);
+            Layout(popup);
+            Check(Ui.Get<Grid>(popup, "BusyPanel").Visibility == Visibility.Visible &&
+                Ui.Get<Button>(popup, "RetryButton").Visibility == Visibility.Collapsed,
+                "A running translation shows the busy panel and no retry entry", checks);
+            Capture(popup, folder, "running", checks);
+
+            shell.StopForRetry();
+            Layout(popup);
+            Check(Ui.Get<Grid>(popup, "BusyPanel").Visibility == Visibility.Collapsed &&
+                Ui.Get<Border>(popup, "ErrorPanel").Visibility == Visibility.Visible &&
+                Ui.Get<Button>(popup, "RetryButton").Visibility == Visibility.Visible,
+                "A real stop clears the busy panel and offers its retry entry", checks);
+            Check(Ui.Get<TextBlock>(popup, "ErrorText").Text.Contains("已停止"),
+                "A real stop says it stopped instead of failing silently", checks);
+            Check(Ui.Get<Border>(popup, "InputPanel").Visibility == Visibility.Collapsed,
+                "A real stop neither pins nor expands the follow-up input", checks);
+            Capture(popup, folder, "stopped", checks);
+
+            int before = transport.Requests;
+            Ui.Get<Button>(popup, "RetryButton").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Check(transport.Requests == before + 1,
+                "The rendered retry entry repeats the stopped translation exactly once", checks);
+            Layout(popup);
+            Check(Ui.Get<Grid>(popup, "BusyPanel").Visibility == Visibility.Visible &&
+                Ui.Get<Border>(popup, "ErrorPanel").Visibility == Visibility.Collapsed,
+                "A retried translation returns to the busy panel with no error left behind", checks);
+            Capture(popup, folder, "restarted", checks);
+
+            shell.StopForRetry();
+            Check(Ui.Get<Grid>(popup, "BusyPanel").Visibility == Visibility.Collapsed,
+                "Stopping the retried translation clears its busy state again", checks);
+        }
+        // Answers nothing and never reaches the network: it keeps one operation in flight so
+        // the stop and retry states come from application state.
+        private sealed class PendingTransport : HttpMessageHandler
+        {
+            public int Requests;
+            protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellation)
+            {
+                Requests++;
+                var pending = new TaskCompletionSource<HttpResponseMessage>();
+                cancellation.Register(() => pending.TrySetCanceled());
+                return pending.Task;
+            }
+        }
         private static string Capture(Window window, string folder, string name, List<string> checks)
         {
             string first = null;
@@ -203,7 +264,8 @@ namespace Leaf
                 var application = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown }; Ui.InitializeTheme();
                 var store = new LocalStore(Path.Combine(folder, "data"));
                 store.Clear(); store.SaveSettings(Settings.Defaults());
-                using (var shell = new AppShell(store, false)) {
+                var transport = new PendingTransport();
+                using (var shell = new AppShell(store, false, new LlmClient(transport))) {
                     shell.PopulateDemo();
                     Check(Ui.Get<Border>(shell.Popup, "InputPanel").Visibility == Visibility.Collapsed, "Input is hidden before Ask", checks);
                     Check(Ui.Get<Border>(shell.Popup, "WordPanel").Visibility == Visibility.Visible, "Word card is visible for the selected occurrence", checks);
@@ -285,6 +347,7 @@ namespace Leaf
                     Ui.Get<TextBox>(history.Window, "HistorySearch").Clear();
                     Ui.Render(history.Window, Path.Combine(folder, "history.png"));
                     history.Window.Close();
+                    StopState(shell, transport, folder, checks);
                     shell.Forget(null);
                     Check(Ui.Get<Grid>(shell.Popup, "SourceEditor").Visibility == Visibility.Visible, "Empty popup is ready for manual input", checks);
                     Ui.Render(shell.Popup, Path.Combine(folder, "popup-input.png"));
