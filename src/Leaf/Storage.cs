@@ -19,9 +19,17 @@ namespace Leaf
         private long historyEpoch = 1;
         private readonly HashSet<string> tombstones = new HashSet<string>(StringComparer.Ordinal);
         private readonly List<FailedWrite> failedWrites = new List<FailedWrite>();
+        private readonly List<long> failedSettingsIds = new List<long>();
         public Settings Settings { get { lock (sync) return settings; } }
         public string Warning { get; private set; }
         public bool RecoveryBlocked { get; private set; }
+        // Files were rolled back, but an applied credential/hotkey could not be; a later
+        // explicit settings reapply is required before requests may run again.
+        public bool ExternalRollbackPending { get; private set; }
+        public bool NeedsExplicitRecovery
+        {
+            get { return RecoveryBlocked || ExternalRollbackPending; }
+        }
         public string Folder { get { return folder; } }
         public long HistoryEpoch { get { lock (sync) return historyEpoch; } }
 
@@ -40,8 +48,9 @@ namespace Leaf
             folder = directory; this.files = files;
             Directory.CreateDirectory(folder);
             var recovery = new AtomicFileBatch(folder, files);
-            try { recovery.Recover(); } catch { RecoveryBlocked = true; }
+            try { recovery.Recover(false); } catch { RecoveryBlocked = true; }
             if (recovery.RecoveryBlocked) RecoveryBlocked = true;
+            ExternalRollbackPending = recovery.ExternalRollbackPending;
             settings = ReadSettings() ?? Settings.Defaults();
             records = ReadHistory() ?? new List<TranslationRecord>();
             if (!settings.HistoryEnabled) records.Clear();
@@ -54,46 +63,77 @@ namespace Leaf
 
         public Task CommitSettingsAsync(SettingsUpdate update, Action<Settings, Settings> applyExternal, Action<Settings, Settings> rollbackExternal)
         {
+            return CommitSettingsAsync(update, applyExternal, rollbackExternal, false, null);
+        }
+
+        // resolveExternalPending is passed only by an explicit user reapply; it is the only
+        // way to clear a pending external rollback or quarantine an unreadable marker.
+        public Task CommitSettingsAsync(SettingsUpdate update, Action<Settings, Settings> applyExternal,
+            Action<Settings, Settings> rollbackExternal, bool resolveExternalPending, Action afterCommit)
+        {
             if (update == null) throw new ArgumentNullException("update");
-            return queue.Enqueue(() => {
-                Settings latest; List<TranslationRecord> currentRecords;
-                lock (sync) { latest = settings; currentRecords = records; }
-                var candidate = update.Build(latest);
-                var payloads = new Dictionary<string, string>();
-                payloads[AtomicFileBatch.SettingsName] = Json.Write(candidate);
-                List<TranslationRecord> candidateRecords = null;
-                if (!candidate.HistoryEnabled && latest.HistoryEnabled) {
-                    // Turning history off is a barrier: every snapshot captured before this
-                    // point is invalid even if the user re-enables history later.
-                    lock (sync) { historyEpoch++; tombstones.Clear(); failedWrites.Clear(); }
-                }
-                if (!candidate.HistoryEnabled) {
-                    candidateRecords = new List<TranslationRecord>();
-                    payloads[AtomicFileBatch.HistoryName] =
-                        HistorySnapshots.Encode(candidateRecords, candidate.HistoryLimit).Json;
-                } else if (candidate.HistoryLimit != latest.HistoryLimit) {
-                    var limited = currentRecords.OrderByDescending(r => r.UpdatedUtcTicks)
-                        .Take(candidate.HistoryLimit).ToList();
-                    var encoded = HistorySnapshots.Encode(limited, candidate.HistoryLimit);
-                    candidateRecords = encoded.Records;
-                    payloads[AtomicFileBatch.HistoryName] = encoded.Json;
-                }
-                var batch = new AtomicFileBatch(folder, files);
+            return queue.Enqueue(queueId => {
                 try {
-                    batch.Commit(payloads,
-                        applyExternal == null ? (Action)null : () => applyExternal(latest, candidate),
-                        rollbackExternal == null ? (Action)null : () => rollbackExternal(latest, candidate),
-                        () => {
-                            lock (sync) {
-                                settings = candidate;
-                                if (candidateRecords != null) records = candidateRecords;
-                            }
-                            if (candidateRecords != null && !candidate.HistoryEnabled) DeleteHistoryBackups();
-                        });
-                } finally {
-                    if (batch.RecoveryBlocked) RecoveryBlocked = true;
+                    Settings latest; List<TranslationRecord> currentRecords;
+                    lock (sync) { latest = settings; currentRecords = records; }
+                    var candidate = update.Build(latest);
+                    var payloads = new Dictionary<string, string>();
+                    payloads[AtomicFileBatch.SettingsName] = Json.Write(candidate);
+                    List<TranslationRecord> candidateRecords = null;
+                    bool disableBarrier = !candidate.HistoryEnabled && latest.HistoryEnabled;
+                    if (!candidate.HistoryEnabled) {
+                        candidateRecords = new List<TranslationRecord>();
+                        payloads[AtomicFileBatch.HistoryName] =
+                            HistorySnapshots.Encode(candidateRecords, candidate.HistoryLimit).Json;
+                    } else if (candidate.HistoryLimit != latest.HistoryLimit) {
+                        var limited = currentRecords.OrderByDescending(r => r.UpdatedUtcTicks)
+                            .Take(candidate.HistoryLimit).ToList();
+                        var encoded = HistorySnapshots.Encode(limited, candidate.HistoryLimit);
+                        candidateRecords = encoded.Records;
+                        payloads[AtomicFileBatch.HistoryName] = encoded.Json;
+                    }
+                    List<FailedWrite> obsolete = null;
+                    var batch = new AtomicFileBatch(folder, files);
+                    try {
+                        batch.Commit(payloads,
+                            applyExternal == null ? (Action)null : () => applyExternal(latest, candidate),
+                            rollbackExternal == null ? (Action)null : () => rollbackExternal(latest, candidate),
+                            () => {
+                                lock (sync) {
+                                    settings = candidate;
+                                    if (candidateRecords != null) records = candidateRecords;
+                                    if (disableBarrier) {
+                                        // Turning history off is a barrier: every snapshot captured
+                                        // before this point is invalid even if it is enabled later.
+                                        historyEpoch++; tombstones.Clear();
+                                        obsolete = failedWrites.ToList(); failedWrites.Clear();
+                                    }
+                                }
+                                if (candidateRecords != null && !candidate.HistoryEnabled) DeleteHistoryBackups();
+                                if (obsolete != null) AcknowledgeHistoryFailures(obsolete);
+                                if (afterCommit != null) afterCommit();
+                            }, resolveExternalPending);
+                        lock (sync) { RecoveryBlocked = false; ExternalRollbackPending = false; }
+                    } finally {
+                        if (batch.RecoveryBlocked) RecoveryBlocked = true;
+                        if (batch.ExternalRollbackPending) ExternalRollbackPending = true;
+                    }
+                } catch (Exception) {
+                    lock (sync) failedSettingsIds.Add(queueId);
+                    throw;
+                }
+                // A successful settings commit fully supersedes every earlier settings
+                // failure; history failures keep their own operation identity and are not touched.
+                lock (sync) {
+                    foreach (long id in failedSettingsIds) queue.AcknowledgeFailure(id);
+                    failedSettingsIds.Clear();
                 }
             });
+        }
+
+        private void AcknowledgeHistoryFailures(List<FailedWrite> items)
+        {
+            foreach (var item in items) queue.AcknowledgeFailure(item.QueueId);
         }
 
         // Compatibility wrapper for imperative tests; the UI never calls a synchronous queue wait.
@@ -162,20 +202,29 @@ namespace Leaf
         public Task DeleteAsync(string id)
         {
             if (string.IsNullOrEmpty(id)) return Task.FromResult(0);
-            long epoch;
+            long epoch; List<FailedWrite> resolved;
             lock (sync) {
                 tombstones.Add(id);
+                resolved = failedWrites.Where(item => item.Id == id).ToList();
                 failedWrites.RemoveAll(item => item.Id == id);
                 epoch = historyEpoch;
             }
+            // A failed write for this id is permanently superseded by the delete tombstone.
+            AcknowledgeHistoryFailures(resolved);
             return EnqueueHistory(() => DeleteCore(id), id, epoch);
         }
 
         public void Clear() { ClearAsync().GetAwaiter().GetResult(); }
         public Task ClearAsync()
         {
-            lock (sync) { historyEpoch++; tombstones.Clear(); failedWrites.Clear(); }
-            return EnqueueHistory(ClearCore, null, HistoryEpoch);
+            HashSet<string> clearedIds; long epoch; List<FailedWrite> resolved;
+            lock (sync) {
+                epoch = ++historyEpoch; tombstones.Clear();
+                resolved = failedWrites.ToList(); failedWrites.Clear();
+                clearedIds = new HashSet<string>(records.Select(r => r.Id), StringComparer.Ordinal);
+            }
+            AcknowledgeHistoryFailures(resolved);
+            return EnqueueHistory(() => ClearCore(clearedIds), null, epoch);
         }
 
         private Task EnqueueHistory(Action action, string id, long epoch)
@@ -218,9 +267,16 @@ namespace Leaf
             }
             CommitHistoryPayload(HistorySnapshots.Encode(candidate, limit));
         }
-        private void ClearCore()
+        // A replayed clear removes exactly the records that existed when it was requested, so
+        // later successful saves in the same epoch are not wiped by a late retry.
+        private void ClearCore(HashSet<string> clearedIds)
         {
-            CommitHistoryPayload(HistorySnapshots.Encode(new List<TranslationRecord>(), Settings.HistoryLimit));
+            List<TranslationRecord> candidate; int limit;
+            lock (sync) {
+                candidate = records.Where(r => !clearedIds.Contains(r.Id)).ToList();
+                limit = settings.HistoryLimit;
+            }
+            CommitHistoryPayload(HistorySnapshots.Encode(candidate, limit));
             DeleteHistoryBackups();
         }
         private void CommitHistoryPayload(HistorySnapshots.HistoryPayload payload)
@@ -230,9 +286,11 @@ namespace Leaf
             };
             var batch = new AtomicFileBatch(folder, files);
             try {
-                batch.Commit(payloads, null, null, () => { lock (sync) records = payload.Records; });
+                batch.Commit(payloads, null, null, () => { lock (sync) records = payload.Records; }, false);
+                RecoveryBlocked = false;
             } finally {
                 if (batch.RecoveryBlocked) RecoveryBlocked = true;
+                if (batch.ExternalRollbackPending) ExternalRollbackPending = true;
             }
         }
 

@@ -30,7 +30,7 @@ namespace Leaf
         private readonly RequestGate generation = new RequestGate();
         private readonly RequestGate wordGeneration = new RequestGate();
         private CancellationTokenSource mainCancellation, wordCancellation, chatCancellation;
-        private bool translating, wordBusy, chatBusy, captureBusy, pinned, exiting, demo, disposed;
+        private bool translating, wordBusy, chatBusy, captureBusy, pinned, exiting, demo, disposed, flushedForExit;
         public bool Pinned { get { return pinned; } }
         private IntPtr handle;
         private string registeredShortcut;
@@ -148,7 +148,7 @@ namespace Leaf
         }
         private async void CaptureAndTranslate()
         {
-            if (captureBusy || shortcutRecording) return;
+            if (exiting || captureBusy || shortcutRecording) return;
             uint foregroundProcess; Native.GetWindowThreadProcessId(Native.GetForegroundWindow(), out foregroundProcess);
             if (foregroundProcess == (uint)Process.GetCurrentProcess().Id) {
                 ShowPopup(); BeginSourceEdit(Store.Settings.FocusInputOnShortcut); return;
@@ -206,16 +206,21 @@ namespace Leaf
             }
             placementTimer.Stop(); placementTimer.Start();
         }
+        private WindowPlacement CapturePlacementToSave()
+        {
+            if (!NativeEnabled || restoringPlacement || !placementInitialized || Popup.WindowState == WindowState.Minimized) return null;
+            var placement = Native.CapturePlacement(Popup);
+            if (placement == null || placement.Width <= 0 || placement.Height <= 0 || Json.Write(placement) == Json.Write(Store.Settings.Placement)) return null;
+            return placement;
+        }
         private void RememberPlacement()
         {
             if (placementTimer != null) placementTimer.Stop();
-            if (!NativeEnabled || restoringPlacement || !placementInitialized || Popup.WindowState == WindowState.Minimized) return;
-            var placement = Native.CapturePlacement(Popup);
-            if (placement == null || placement.Width <= 0 || placement.Height <= 0 || Json.Write(placement) == Json.Write(Store.Settings.Placement)) return;
-            SavePlacementObserved(placement);
+            SavePlacementObserved(CapturePlacementToSave());
         }
         private async void SavePlacementObserved(WindowPlacement placement)
         {
+            if (placement == null) return;
             try { await Store.SavePlacementAsync(placement); }
             catch (UserError error) { Log.Event("placement_save_failed", error); ShowError(error.Message, null); }
         }
@@ -249,12 +254,19 @@ namespace Leaf
         }
         public Task ApplySettingsAsync(SettingsUpdate update, Dictionary<string, string> keys, HashSet<string> deleted)
         {
+            return ApplySettingsAsync(update, keys, deleted, false);
+        }
+
+        // explicitApply is set only by the settings Save button: it resolves a pending external
+        // rollback or an unreadable transaction marker, and is never implied by an auto-save.
+        public Task ApplySettingsAsync(SettingsUpdate update, Dictionary<string, string> keys, HashSet<string> deleted, bool explicitApply)
+        {
             if (update == null) throw new ArgumentNullException("update");
             EnsureCredentialMigration();
             var previous = Json.Copy(Store.Settings);
             var changedKeys = keys == null ? new Dictionary<string, string>() : new Dictionary<string, string>(keys);
             var removedKeys = deleted == null ? new HashSet<string>() : new HashSet<string>(deleted);
-            Task task = ApplySettingsCoreAsync(update, changedKeys, removedKeys, previous);
+            Task task = ApplySettingsCoreAsync(update, changedKeys, removedKeys, previous, explicitApply);
             lastSettingsTask = task;
             return task;
         }
@@ -268,60 +280,93 @@ namespace Leaf
                 await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
             } while (!ReferenceEquals(pending, lastSettingsTask));
         }
-        private async Task ApplySettingsCoreAsync(SettingsUpdate update, Dictionary<string, string> keys, HashSet<string> deleted, Settings previous)
+        private async Task ApplySettingsCoreAsync(SettingsUpdate update, Dictionary<string, string> keys, HashSet<string> deleted, Settings previous, bool explicitApply)
         {
             var keyUndo = new List<Action>();
             var replaced = new List<KeyValuePair<ProviderProfile, ProviderProfile>>();
             Action<Settings, Settings> applyExternal = (committed, candidate) => {
                 keyUndo.Clear(); replaced.Clear();
+                var failures = new List<string>();
                 if (credentialProfiles != null) {
+                    // Capture the original value of every scope this change can touch before any
+                    // write, including a key that may already exist at the new endpoint.
                     foreach (string id in keys.Keys.Concat(deleted).Distinct().ToArray()) {
                         var oldProfile = committed.Providers.FirstOrDefault(p => p.Id == id);
                         var newProfile = candidate.Providers.FirstOrDefault(p => p.Id == id);
-                        string oldKey = ""; bool hadOld = false;
-                        if (oldProfile != null) {
-                            try { oldKey = credentialProfiles.Read(oldProfile); hadOld = oldKey.Length > 0; }
-                            catch (Exception error) {
-                                throw new UserError("credentials", error is UserError ? ((UserError)error).Message : "无法读取旧密钥，已取消本次配置。");
-                            }
-                        }
+                        string oldKey = "", newOriginalKey = "";
+                        if (oldProfile != null) oldKey = ReadCredentialOrThrow(oldProfile, "旧");
+                        if (newProfile != null && !SameCredentialScope(oldProfile, newProfile))
+                            newOriginalKey = ReadCredentialOrThrow(newProfile, "当前");
                         var capturedOld = oldProfile; var capturedNew = newProfile;
-                        string capturedKey = oldKey; bool capturedHad = hadOld;
+                        string capturedOldKey = oldKey, capturedNewKey = newOriginalKey;
                         keyUndo.Add(() => {
-                            bool same = false;
-                            try { same = capturedOld != null && capturedNew != null && Credentials.ScopedId(capturedOld) == Credentials.ScopedId(capturedNew); } catch { }
-                            if (!same && capturedNew != null) { try { credentialProfiles.Delete(capturedNew); } catch { } }
-                            if (capturedOld != null) {
-                                try { if (capturedHad) credentialProfiles.Save(capturedOld, capturedKey); else credentialProfiles.Delete(capturedOld); } catch { }
-                            }
+                            var problems = new List<string>();
+                            try { RestoreCredential(capturedNew, capturedNewKey); } catch { problems.Add("新地址"); }
+                            if (!SameCredentialScope(capturedOld, capturedNew))
+                                try { RestoreCredential(capturedOld, capturedOldKey); } catch { problems.Add("旧地址"); }
+                            if (problems.Count > 0) throw new UserError("credentials", "未能恢复密钥作用域。");
                         });
-                        if (deleted.Contains(id) && newProfile != null) credentialProfiles.Delete(newProfile);
+                        if (deleted.Contains(id) && newProfile != null) {
+                            try { credentialProfiles.Delete(newProfile); } catch { failures.Add("删除密钥"); }
+                        }
                         string pending;
-                        if (newProfile != null && keys.TryGetValue(id, out pending)) credentialProfiles.Save(newProfile, pending);
-                        if (oldProfile != null && newProfile != null) replaced.Add(new KeyValuePair<ProviderProfile, ProviderProfile>(oldProfile, newProfile));
+                        if (newProfile != null && keys.TryGetValue(id, out pending)) {
+                            try { credentialProfiles.Save(newProfile, pending); } catch { failures.Add("保存密钥"); }
+                        }
+                        if (oldProfile != null && newProfile != null)
+                            replaced.Add(new KeyValuePair<ProviderProfile, ProviderProfile>(oldProfile, newProfile));
                     }
                 }
-                if (NativeEnabled && candidate.AutoStart != committed.AutoStart)
-                    OnDispatcher(() => Native.AutoStart(candidate.AutoStart));
-                if (NativeEnabled && candidate.Shortcut != committed.Shortcut)
-                    OnDispatcher(() => RegisterShortcut(candidate.Shortcut));
-            };
-            Action<Settings, Settings> rollbackExternal = (committed, candidate) => {
-                for (int i = keyUndo.Count - 1; i >= 0; i--) { try { keyUndo[i](); } catch { } }
                 if (NativeEnabled && candidate.AutoStart != committed.AutoStart) {
-                    try { OnDispatcher(() => Native.AutoStart(committed.AutoStart)); } catch { }
+                    try { OnDispatcher(() => Native.AutoStart(candidate.AutoStart)); } catch { failures.Add("开机启动"); }
                 }
                 if (NativeEnabled && candidate.Shortcut != committed.Shortcut) {
-                    try { OnDispatcher(() => RegisterShortcut(committed.Shortcut)); } catch { }
+                    try { OnDispatcher(() => RegisterShortcut(candidate.Shortcut)); } catch { failures.Add("快捷键"); }
                 }
+                if (failures.Count > 0)
+                    throw new UserError("storage", "部分设置未能应用（" + string.Join("、", failures.ToArray()) + "），正在恢复原状态。");
             };
-            await Store.CommitSettingsAsync(update, applyExternal, rollbackExternal).ConfigureAwait(true);
-            if (credentialProfiles != null) CleanupReplacedCredentials(replaced, deleted);
+            Action<Settings, Settings> rollbackExternal = (committed, candidate) => {
+                // Every rollback item is attempted even when an earlier one fails; the
+                // aggregate failure reaches the transaction so it is never reported as restored.
+                var problems = new List<string>();
+                for (int i = keyUndo.Count - 1; i >= 0; i--) {
+                    try { keyUndo[i](); } catch { problems.Add("密钥"); }
+                }
+                if (NativeEnabled && candidate.AutoStart != committed.AutoStart) {
+                    try { OnDispatcher(() => Native.AutoStart(committed.AutoStart)); } catch { problems.Add("开机启动"); }
+                }
+                if (NativeEnabled && candidate.Shortcut != committed.Shortcut) {
+                    try { OnDispatcher(() => RegisterShortcut(committed.Shortcut)); } catch { problems.Add("快捷键"); }
+                }
+                if (problems.Count > 0)
+                    throw new UserError("storage", "未能恢复先前的密钥或系统设置，请重新应用配置。");
+            };
+            await Store.CommitSettingsAsync(update, applyExternal, rollbackExternal, explicitApply,
+                () => { if (credentialProfiles != null) CleanupReplacedCredentials(replaced, deleted); }).ConfigureAwait(true);
             if (Store.Settings.ProviderId != previous.ProviderId || Json.Write(Store.Settings.Provider) != Json.Write(previous.Provider) || keys.Count > 0 || deleted.Count > 0) CancelRequests();
             if (!Store.Settings.HistoryEnabled) Forget(null);
             if (clipboardMenu != null) { clipboardMenu.Checked = Store.Settings.ClipboardMode; tray.Text = "Leaf · " + Store.Settings.Shortcut; }
             if (historyWindow != null) historyWindow.Refresh();
             Log.Event("settings_saved", null);
+        }
+        private static bool SameCredentialScope(ProviderProfile oldProfile, ProviderProfile newProfile)
+        {
+            if (oldProfile == null || newProfile == null) return false;
+            try { return Credentials.ScopedId(oldProfile) == Credentials.ScopedId(newProfile); } catch { return false; }
+        }
+        private string ReadCredentialOrThrow(ProviderProfile profile, string label)
+        {
+            try { return credentialProfiles.Read(profile); }
+            catch (Exception error) {
+                throw new UserError("credentials", error is UserError ? ((UserError)error).Message : "无法读取" + label + "密钥，已取消本次配置。");
+            }
+        }
+        private void RestoreCredential(ProviderProfile profile, string originalKey)
+        {
+            if (profile == null) return;
+            if (originalKey.Length > 0) credentialProfiles.Save(profile, originalKey);
+            else credentialProfiles.Delete(profile);
         }
         private void CleanupReplacedCredentials(List<KeyValuePair<ProviderProfile, ProviderProfile>> replaced, HashSet<string> deleted)
         {
@@ -413,46 +458,74 @@ namespace Leaf
             Ui.Get<Button>(Popup, "AskButton").IsEnabled = Current != null && Current.Completed;
             Ui.Visible(Ui.Get<Button>(Popup, "AskButton"), Current != null && Ui.Get<Grid>(Popup, "SourceEditor").Visibility != Visibility.Visible && Ui.Get<Border>(Popup, "InputPanel").Visibility != Visibility.Visible);
         }
-        public void Exit() { var pendingExit = ExitAsync(); }
+        public bool IsExiting { get { return exiting; } }
+        public void Exit()
+        {
+            var pendingExit = ExitAsync();
+            pendingExit.ContinueWith(task => {
+                var failure = task.Exception;
+                if (failure != null) Log.Event("exit_failed", failure.GetBaseException());
+            }, TaskScheduler.Default);
+        }
+        // Unified exit: refuse new work, cancel what is active, flush pending settings edits
+        // and the final snapshot/placement, wait for the ordered queue, then release resources.
+        // A failed flush keeps the app alive with a real retry; it never pretends to be saved.
         public async Task ExitAsync()
         {
             if (exiting) return;
             exiting = true;
-            RememberPlacement();
+            CancelRequests();
             if (Current != null && !demo) Current.Draft = Ui.Get<TextBox>(Popup, "QuestionInput").Text;
+            var placement = CapturePlacementToSave();
             try {
-                await SaveCurrentAsync();
-                await Store.FlushAsync();
-            } catch (UserError error) {
+                if (settingsWindow != null) {
+                    bool flushed = await settingsWindow.FlushPendingAsync().ConfigureAwait(true);
+                    if (!flushed) throw new UserError("storage", "设置尚未保存完成，请在设置窗口修正提示后重试退出。");
+                }
+                if (placement != null) await Store.SavePlacementAsync(placement).ConfigureAwait(true);
+                if (Current != null && !demo) await SaveCurrentOrThrowAsync().ConfigureAwait(true);
+                await WaitForSettingsAsync().ConfigureAwait(true);
+            } catch (Exception error) {
                 exiting = false;
                 Log.Event("exit_flush_failed", error);
-                ShowError(error.Message, RetryExit);
+                ShowError(error is UserError ? error.Message : "退出前保存失败，应用仍保持打开。", RetryExit);
+                ShowPopup();
                 return;
             }
+            flushedForExit = true;
             Dispose();
             if (Application.Current != null) Application.Current.Shutdown();
         }
         private async void RetryExit()
         {
-            try {
-                await Store.RetryFailedWritesAsync();
-                await Store.FlushAsync();
-                Exit();
-            } catch (UserError error) {
-                Log.Event("exit_flush_failed", error);
-                ShowError(error.Message, RetryExit);
-            }
+            if (exiting || disposed) return;
+            try { await Store.RetryFailedWritesAsync().ConfigureAwait(true); }
+            catch (Exception error) { Log.Event("exit_flush_failed", error); }
+            await ExitAsync().ConfigureAwait(true);
+        }
+        private async Task SaveCurrentOrThrowAsync()
+        {
+            var record = Current;
+            if (record == null || demo) return;
+            await Store.SaveAsync(record, currentHistoryEpoch).ConfigureAwait(true);
         }
         public void Dispose()
         {
             if (disposed) return;
-            RememberPlacement();
+            bool alreadyFlushed = flushedForExit;
+            flushedForExit = false;
             disposed = true;
             if (copyFeedback != null) copyFeedback.Stop();
             Log.Event("app_exit", null);
-            if (Current != null && !demo) {
-                Current.Draft = Ui.Get<TextBox>(Popup, "QuestionInput").Text;
-                try { Store.Save(Current); } catch { }
+            // The fallback path must never block the UI thread on the ordered queue and must
+            // not start a save after a fully flushed exit already finished.
+            if (!alreadyFlushed) {
+                var placement = CapturePlacementToSave();
+                if (placement != null) Observe(Store.SavePlacementAsync(placement), "placement_save_failed");
+                if (Current != null && !demo) {
+                    Current.Draft = Ui.Get<TextBox>(Popup, "QuestionInput").Text;
+                    Observe(Store.SaveAsync(Current, currentHistoryEpoch), "history_save_failed");
+                }
             }
             CancelRequests();
             if (outsideClick != null) outsideClick.Dispose();
@@ -466,9 +539,17 @@ namespace Leaf
             if (chatCancellation != null) { chatCancellation.Dispose(); chatCancellation = null; }
             Client.Dispose();
             exiting = true;
-            if (settingsWindow != null) settingsWindow.Window.Close();
+            if (settingsWindow != null) settingsWindow.CloseForExit();
             if (historyWindow != null) historyWindow.Window.Close();
             Popup.Close();
+        }
+        private void Observe(Task task, string eventName)
+        {
+            if (task == null) return;
+            task.ContinueWith(finished => {
+                var failure = finished.Exception;
+                if (failure != null) Log.Event(eventName, failure.GetBaseException());
+            }, TaskScheduler.Default);
         }
     }
 }

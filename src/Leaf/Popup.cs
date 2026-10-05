@@ -191,6 +191,7 @@ namespace Leaf
         }
         public async Task SubmitSourceAsync()
         {
+            if (exiting) return;
             sourceRevision++;
             string text = Ui.Get<TextBox>(Popup, "SourceInput").Text;
             if (string.IsNullOrWhiteSpace(text)) return;
@@ -313,7 +314,7 @@ namespace Leaf
         }
         private bool BlockedByRecovery()
         {
-            if (!Store.RecoveryBlocked) return false;
+            if (!Store.NeedsExplicitRecovery) return false;
             ShowError("上次保存没有完成，请重新应用配置后重试。", OpenSettings);
             ShowPopup();
             return true;
@@ -321,6 +322,7 @@ namespace Leaf
 
         public async Task TranslateAsync(string text, string sourceKind, bool force)
         {
+            if (exiting) return;
             try { text = TextTools.ValidateInput(text); }
             catch (UserError error) { ShowError(error.Message, null); ShowPopup(); return; }
             if (demo) { demo = false; Current = null; }
@@ -369,6 +371,7 @@ namespace Leaf
 
         public async Task SelectWordAsync(TextPiece word, bool force)
         {
+            if (exiting) return;
             if (Current == null || !Current.Completed || word.Length > 300) return;
             if (word.Start < 0 || word.Start + word.Length > Current.Source.Length || Current.Source.Substring(word.Start, word.Length) != word.Text) return;
             if (selectedWord != null && selectedWord.Key == word.Key && wordBusy && !force) return;
@@ -447,6 +450,7 @@ namespace Leaf
         }
         public async Task SendChatAsync()
         {
+            if (exiting) return;
             if (Current == null || !Current.Completed || chatBusy) return;
             var input = Ui.Get<TextBox>(Popup, "QuestionInput");
             string question = input.Text.Trim();

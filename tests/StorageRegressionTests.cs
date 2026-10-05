@@ -27,13 +27,16 @@ public static class StorageRegressionTests
         await SettingsCommitFailures(folder);
         await FileFaultMatrix(folder);
         await TransactionRecovery(folder);
+        await TransactionIntegrity(folder);
         await CredentialAndPatchScenarios(folder);
         await QueueScenarios();
+        await QueueResolutionScenarios(folder);
         await StructureScenarios(folder);
         await ByteLimitRegression(folder);
         await HistoryScenarios(folder);
         await HistoryBarrierScenarios(folder);
         await HistoryRetryScenarios(folder);
+        await ExitScenarioChecks(folder);
         return assertions - start;
     }
     // WPF-side checks; must run inside the ApplicationTests application/dispatcher.
@@ -41,6 +44,7 @@ public static class StorageRegressionTests
     {
         int start = assertions;
         await UiRecoveryAndCredentials(folder);
+        await UiExternalRollbackIntegrity(folder);
         await UiHeartbeat(folder);
         await UiHistoryWindow(folder);
         return assertions - start;
@@ -92,7 +96,8 @@ public static class StorageRegressionTests
         return Directory.GetFiles(directory).All(path =>
             !path.EndsWith(".new", StringComparison.Ordinal) &&
             !path.EndsWith(".old", StringComparison.Ordinal) &&
-            Path.GetFileName(path) != AtomicFileBatch.MarkerName);
+            Path.GetFileName(path) != AtomicFileBatch.MarkerName &&
+            Path.GetFileName(path) != AtomicFileBatch.MarkerName + ".tmp");
     }
 
     private static async Task SettingsCommitFailures(string folder)
@@ -131,6 +136,72 @@ public static class StorageRegressionTests
         await FileFault(folder, "completion-marker", "Write", 4, true);
         await RollbackFailureKeepsMarker(folder);
         await PersistentFaultDoesNotFakeSuccess(folder);
+        await ExhaustiveFileFaultMatrix(folder);
+    }
+
+    // Traces one clean commit and then repeats it with a fault at every traced operation.
+    // The interrupted variant performs the operation (or a partial write) before throwing so
+    // crash semantics are covered instead of only a throw-before-write shortcut.
+    private static async Task ExhaustiveFileFaultMatrix(string folder)
+    {
+        string traceDirectory = NewDirectory(folder, "matrix-trace");
+        var seed = FixtureSettings("fixture", "https://old-api.invalid/v1", "fixture-model");
+        seed.HistoryLimit = 180;
+        await SeedStore(traceDirectory, seed);
+        var traceFiles = new TracingStoreFiles();
+        var traceStore = new LocalStore(traceDirectory, traceFiles);
+        var traceNext = Json.Copy(traceStore.Settings);
+        traceNext.Provider.BaseUrl = "https://new-api.invalid/v1";
+        traceNext.HistoryLimit = 181; traceNext.TargetLanguage = "日本語";
+        await traceStore.CommitSettingsAsync(SettingsUpdate.Full(traceNext), null, null);
+        var trace = traceFiles.Operations.ToList();
+        Check(trace.Count >= 12, "The fault trace enumerates every staging, marker and swap operation");
+        Check(trace.Any(op => op.StartsWith("Write ", StringComparison.Ordinal) && op.EndsWith(AtomicFileBatch.MarkerName + ".tmp", StringComparison.Ordinal)),
+            "The trace includes the atomic marker preparation");
+        Check(trace.Any(op => op.StartsWith("Move ", StringComparison.Ordinal) || op.StartsWith("Replace ", StringComparison.Ordinal)),
+            "The trace includes the marker publication");
+
+        for (int position = 1; position <= trace.Count; position++) {
+            string[] parts = trace[position - 1].Split(' ');
+            string operation = parts[0];
+            int match = trace.Take(position).Count(op => op.StartsWith(operation + " ", StringComparison.Ordinal));
+            await FaultAtPosition(folder, position, operation, match, false);
+            await FaultAtPosition(folder, position, operation, match, true);
+        }
+    }
+
+    private static async Task FaultAtPosition(string folder, int position, string operation, int match, bool interrupted)
+    {
+        string directory = NewDirectory(folder, interrupted ? "matrix-interrupted" : "matrix-before");
+        var seed = FixtureSettings("fixture", "https://old-api.invalid/v1", "fixture-model");
+        seed.HistoryLimit = 180;
+        await SeedStore(directory, seed);
+        var files = new TracingStoreFiles {
+            FailOperation = operation, FailAt = match, Interrupted = interrupted
+        };
+        var store = new LocalStore(directory, files);
+        var next = Json.Copy(store.Settings);
+        next.Provider.BaseUrl = "https://new-api.invalid/v1";
+        next.HistoryLimit = 181; next.TargetLanguage = "日本語";
+        bool applied = false, rolledBack = false, succeeded = false;
+        try {
+            await store.CommitSettingsAsync(SettingsUpdate.Full(next),
+                (oldSettings, candidateSettings) => applied = true,
+                (oldSettings, candidateSettings) => rolledBack = true);
+            succeeded = true;
+        } catch (UserError) { }
+        var reloaded = new LocalStore(directory);
+        bool newState = reloaded.Settings.Provider.BaseUrl == "https://new-api.invalid/v1";
+        string label = "matrix " + (interrupted ? "interrupted" : "before") + " #" + position + " (" + operation + ")";
+        Check(reloaded.Settings.TargetLanguage == (newState ? "日本語" : "中文"), label + ": the settings candidate is applied as a whole");
+        Check(succeeded == newState, label + ": the reloaded settings agree with the commit result");
+        Check(reloaded.Settings.HistoryLimit == (newState ? 181 : 180), label + ": settings and history stay in one commit group");
+        Check(reloaded.History("fixture source").Count == 1, label + ": the seeded record survives the fault");
+        Check(!reloaded.RecoveryBlocked, label + ": a transient fault never leaves startup recovery blocked");
+        Check(rolledBack == !succeeded, label + ": external rollback runs exactly for failed commits");
+        Check(!succeeded || applied, label + ": a successful commit applied its external effects");
+        Check(store.Settings.Provider.BaseUrl == reloaded.Settings.Provider.BaseUrl,
+            label + ": the in-memory state matches the persisted state");
     }
     private static async Task FileFault(string folder, string name, string operation, int at, bool expectsApplied)
     {
@@ -167,7 +238,9 @@ public static class StorageRegressionTests
         string directory = NewDirectory(folder, "rollback-failure");
         var settings = FixtureSettings("fixture", "https://old-api.invalid/v1", "fixture-model");
         await SeedStore(directory, settings);
-        var files = new PersistentFaultingFiles { FailOperation = "Replace" };
+        // The fixture only starts failing after the prepared marker is durable, so the
+        // commit stages normally but the rollback cannot restore the old target.
+        var files = new RollbackFaultFiles();
         var store = new LocalStore(directory, files);
         var next = Json.Copy(store.Settings);
         next.Provider.BaseUrl = "https://new-api.invalid/v1";
@@ -259,6 +332,216 @@ public static class StorageRegressionTests
         Check(store.RecoveryBlocked, "A marker outside the fixed file whitelist blocks instead of writing outside the store");
         Check(File.Exists(Path.Combine(directory, AtomicFileBatch.MarkerName)), "A refused marker is preserved for inspection");
         return Task.FromResult(0);
+    }
+
+    // Recovery must refuse to claim success without evidence: a corrupt marker, duplicate
+    // targets or a missing backup keeps every recovery artifact for a later healthy retry.
+    private static async Task TransactionIntegrity(string folder)
+    {
+        var settings = FixtureSettings("fixture", "https://old-api.invalid/v1", "fixture-model");
+        var next = Json.Copy(settings); next.TargetLanguage = "日本語";
+
+        string corrupt = NewDirectory(folder, "corrupt-marker");
+        await SeedStore(corrupt, settings);
+        File.WriteAllText(Path.Combine(corrupt, "settings.json.new"), Json.Write(next));
+        File.WriteAllText(Path.Combine(corrupt, "settings.json.old"), "previous backup");
+        File.WriteAllText(Path.Combine(corrupt, AtomicFileBatch.MarkerName), "{not-json");
+        var corruptStore = new LocalStore(corrupt);
+        Check(corruptStore.RecoveryBlocked, "An unparseable transaction marker blocks recovery instead of guessing");
+        Check(File.Exists(Path.Combine(corrupt, AtomicFileBatch.MarkerName)) &&
+            File.ReadAllText(Path.Combine(corrupt, "settings.json.old")) == "previous backup",
+            "An unparseable marker keeps the marker and staging backups");
+
+        string invalidState = NewDirectory(folder, "invalid-state");
+        File.WriteAllText(Path.Combine(invalidState, "settings.json.old"), "previous backup");
+        File.WriteAllText(Path.Combine(invalidState, AtomicFileBatch.MarkerName), Json.Write(new {
+            State = "pending", Targets = new[] { new { Name = "settings.json", Existed = true } }
+        }));
+        var invalidStateStore = new LocalStore(invalidState);
+        Check(invalidStateStore.RecoveryBlocked && File.Exists(Path.Combine(invalidState, "settings.json.old")),
+            "An unknown marker state blocks recovery and keeps its backups");
+
+        string emptyTargets = NewDirectory(folder, "empty-targets");
+        File.WriteAllText(Path.Combine(emptyTargets, AtomicFileBatch.MarkerName), Json.Write(new {
+            State = "prepared", Targets = new object[0]
+        }));
+        var emptyStore = new LocalStore(emptyTargets);
+        Check(emptyStore.RecoveryBlocked && File.Exists(Path.Combine(emptyTargets, AtomicFileBatch.MarkerName)),
+            "An empty target list blocks recovery instead of discarding the marker");
+
+        string duplicate = NewDirectory(folder, "duplicate-targets");
+        File.WriteAllText(Path.Combine(duplicate, "settings.json.old"), "previous backup");
+        File.WriteAllText(Path.Combine(duplicate, AtomicFileBatch.MarkerName), Json.Write(new {
+            State = "prepared", Targets = new[] {
+                new { Name = "settings.json", Existed = true }, new { Name = "settings.json", Existed = true }
+            }
+        }));
+        var duplicateStore = new LocalStore(duplicate);
+        Check(duplicateStore.RecoveryBlocked && File.Exists(Path.Combine(duplicate, "settings.json.old")),
+            "Duplicate marker targets block recovery and keep the backups");
+
+        string missing = NewDirectory(folder, "missing-backup");
+        File.WriteAllText(Path.Combine(missing, "settings.json"), Json.Write(settings));
+        File.WriteAllText(Path.Combine(missing, "settings.json.new"), Json.Write(next));
+        File.WriteAllText(Path.Combine(missing, AtomicFileBatch.MarkerName), Json.Write(new {
+            State = "prepared", Targets = new[] { new { Name = "settings.json", Existed = true } }
+        }));
+        var missingStore = new LocalStore(missing);
+        Check(missingStore.RecoveryBlocked, "A prepared marker without its required backup is not treated as recovered");
+        Check(File.Exists(Path.Combine(missing, AtomicFileBatch.MarkerName)) &&
+            File.Exists(Path.Combine(missing, "settings.json.new")),
+            "A missing backup keeps the marker and staged candidate for a real retry");
+
+        string partial = NewDirectory(folder, "partial-marker-temp");
+        await SeedStore(partial, settings);
+        File.WriteAllText(Path.Combine(partial, "settings.json.new"), Json.Write(next));
+        File.Copy(Path.Combine(partial, "settings.json"), Path.Combine(partial, "settings.json.old"), true);
+        File.WriteAllText(Path.Combine(partial, AtomicFileBatch.MarkerName), Json.Write(new {
+            State = "prepared", Targets = new[] { new { Name = "settings.json", Existed = true } }
+        }));
+        File.WriteAllText(Path.Combine(partial, AtomicFileBatch.MarkerName + ".tmp"), "{\"State\":\"prep");
+        var partialStore = new LocalStore(partial);
+        Check(!partialStore.RecoveryBlocked && partialStore.Settings.TargetLanguage == "中文",
+            "A partial marker temp file cannot replace the durable marker during recovery");
+        Check(!File.Exists(Path.Combine(partial, AtomicFileBatch.MarkerName + ".tmp")), "Recovery removes a partial marker temp file");
+
+        string repeat = NewDirectory(folder, "repeatable-recovery");
+        await SeedStore(repeat, settings);
+        File.WriteAllText(Path.Combine(repeat, "settings.json.new"), Json.Write(next));
+        File.Copy(Path.Combine(repeat, "settings.json"), Path.Combine(repeat, "settings.json.old"), true);
+        File.WriteAllText(Path.Combine(repeat, AtomicFileBatch.MarkerName), Json.Write(new {
+            State = "prepared", Targets = new[] { new { Name = "settings.json", Existed = true } }
+        }));
+        var failingRestore = new FaultingFiles { FailOperation = "Copy", FailAt = 1 };
+        var blockedRestore = new LocalStore(repeat, failingRestore);
+        Check(blockedRestore.RecoveryBlocked, "A failed restore is reported instead of consuming the backup");
+        Check(File.Exists(Path.Combine(repeat, "settings.json.old")), "The old backup survives a failed restore attempt");
+        var healthyRestore = new LocalStore(repeat);
+        Check(!healthyRestore.RecoveryBlocked && healthyRestore.Settings.TargetLanguage == "中文" && DirectoryIsClean(repeat),
+            "A later healthy restart can still recover the same transaction");
+
+        string markerDelete = NewDirectory(folder, "marker-delete-fault");
+        await SeedStore(markerDelete, settings);
+        File.WriteAllText(Path.Combine(markerDelete, "settings.json.new"), Json.Write(next));
+        File.Copy(Path.Combine(markerDelete, "settings.json"), Path.Combine(markerDelete, "settings.json.old"), true);
+        File.WriteAllText(Path.Combine(markerDelete, AtomicFileBatch.MarkerName), Json.Write(new {
+            State = "prepared", Targets = new[] { new { Name = "settings.json", Existed = true } }
+        }));
+        var deleteFault = new TargetedFaultingFiles { Fail = (operation, path) =>
+            operation == "Delete" && Path.GetFileName(path) == AtomicFileBatch.MarkerName };
+        var blockedDelete = new LocalStore(markerDelete, deleteFault);
+        Check(blockedDelete.RecoveryBlocked, "A failed marker cleanup keeps the transaction blocked");
+        Check(File.Exists(Path.Combine(markerDelete, "settings.json.old")),
+            "Recovery keeps the old backup when the marker cannot be cleared");
+        var healthyDelete = new LocalStore(markerDelete);
+        Check(!healthyDelete.RecoveryBlocked && healthyDelete.Settings.TargetLanguage == "中文" && DirectoryIsClean(markerDelete),
+            "The transaction recovers correctly after the marker delete fault clears");
+
+        string blockNew = NewDirectory(folder, "block-new-commit");
+        await SeedStore(blockNew, settings);
+        File.WriteAllText(Path.Combine(blockNew, "settings.json.new"), "stale candidate");
+        File.WriteAllText(Path.Combine(blockNew, "settings.json.old"), "stale backup");
+        File.WriteAllText(Path.Combine(blockNew, AtomicFileBatch.MarkerName), "{corrupt");
+        var blockedStore = new LocalStore(blockNew);
+        bool refused = false;
+        try { await blockedStore.SaveSettingsAsync(SettingsUpdate.Preferences(Json.Copy(blockedStore.Settings))); }
+        catch (UserError) { refused = true; }
+        Check(refused, "A blocked store refuses new commits instead of overwriting recovery evidence");
+        Check(File.ReadAllText(Path.Combine(blockNew, AtomicFileBatch.MarkerName)) == "{corrupt" &&
+            File.ReadAllText(Path.Combine(blockNew, "settings.json.old")) == "stale backup",
+            "A refused commit cannot overwrite an unrecovered marker, .new or .old");
+    }
+
+    // Failed operations stay in the queue until their exact operation is replayed or made moot
+    // by an epoch/tombstone barrier. Unrelated successes must never clear them.
+    private static async Task QueueResolutionScenarios(string folder)
+    {
+        string settingsDir = NewDirectory(folder, "queue-settings-retry");
+        var settingsFiles = new FaultingFiles();
+        var settingsStore = new LocalStore(settingsDir, settingsFiles);
+        await settingsStore.SaveSettingsAsync(SettingsUpdate.Full(
+            FixtureSettings("fixture", "https://old-api.invalid/v1", "fixture-model")));
+        var changed = Json.Copy(settingsStore.Settings); changed.TargetLanguage = "日本語";
+        settingsFiles.MatchingCalls = 0; settingsFiles.FailOperation = "Replace"; settingsFiles.FailAt = 1;
+        bool settingsFailed = false;
+        try { await settingsStore.SaveSettingsAsync(SettingsUpdate.Preferences(changed)); }
+        catch (UserError) { settingsFailed = true; }
+        Check(settingsFailed, "A failed settings commit is reported before the explicit retry");
+        settingsFiles.FailAt = -1; settingsFiles.MatchingCalls = 0;
+        var retry = Json.Copy(settingsStore.Settings); retry.TargetLanguage = "日本語";
+        await settingsStore.SaveSettingsAsync(SettingsUpdate.Preferences(retry));
+        bool settingsFlushed = true;
+        try { await settingsStore.FlushAsync(); } catch (UserError) { settingsFlushed = false; }
+        Check(settingsFlushed, "A successful settings reapply acknowledges the older settings failure");
+        Check(new LocalStore(settingsDir).Settings.TargetLanguage == "日本語", "The successful settings retry is persisted");
+
+        string saveDelete = NewDirectory(folder, "queue-save-delete");
+        var saveDeleteFiles = new FaultingFiles();
+        var saveDeleteStore = new LocalStore(saveDelete, saveDeleteFiles);
+        var deleted = Completed("queue failed save", saveDeleteStore.Settings);
+        saveDeleteFiles.MatchingCalls = 0; saveDeleteFiles.FailOperation = "Replace"; saveDeleteFiles.FailAt = 1;
+        try { await saveDeleteStore.SaveAsync(deleted, saveDeleteStore.HistoryEpoch); } catch (UserError) { }
+        await saveDeleteStore.DeleteAsync(deleted.Id);
+        bool saveDeleteFlushed = true;
+        try { await saveDeleteStore.FlushAsync(); } catch (UserError) { saveDeleteFlushed = false; }
+        Check(saveDeleteFlushed, "Deleting a record resolves its own failed save");
+        Check(new LocalStore(saveDelete).History("").Count == 0, "The resolved failed save stays deleted");
+
+        string saveClear = NewDirectory(folder, "queue-save-clear");
+        var saveClearFiles = new FaultingFiles();
+        var saveClearStore = new LocalStore(saveClear, saveClearFiles);
+        var cleared = Completed("queue clear save", saveClearStore.Settings);
+        saveClearFiles.MatchingCalls = 0; saveClearFiles.FailOperation = "Replace"; saveClearFiles.FailAt = 1;
+        try { await saveClearStore.SaveAsync(cleared, saveClearStore.HistoryEpoch); } catch (UserError) { }
+        await saveClearStore.ClearAsync();
+        bool saveClearFlushed = true;
+        try { await saveClearStore.FlushAsync(); } catch (UserError) { saveClearFlushed = false; }
+        Check(saveClearFlushed, "Clearing history resolves a previous failed save");
+        Check(new LocalStore(saveClear).History("").Count == 0, "Clearing history after the failed save leaves it empty");
+
+        string saveDisable = NewDirectory(folder, "queue-save-disable");
+        var saveDisableFiles = new FaultingFiles();
+        var saveDisableStore = new LocalStore(saveDisable, saveDisableFiles);
+        var disabledRecord = Completed("queue disable save", saveDisableStore.Settings);
+        saveDisableFiles.MatchingCalls = 0; saveDisableFiles.FailOperation = "Replace"; saveDisableFiles.FailAt = 1;
+        try { await saveDisableStore.SaveAsync(disabledRecord, saveDisableStore.HistoryEpoch); } catch (UserError) { }
+        var disabled = Json.Copy(saveDisableStore.Settings); disabled.HistoryEnabled = false;
+        await saveDisableStore.SaveSettingsAsync(SettingsUpdate.Preferences(disabled));
+        bool disableFlushed = true;
+        try { await saveDisableStore.FlushAsync(); } catch (UserError) { disableFlushed = false; }
+        Check(disableFlushed, "Disabling history resolves a previous failed save");
+        Check(new LocalStore(saveDisable).History("").Count == 0, "Disabling history discards the failed snapshot");
+
+        string clearDir = NewDirectory(folder, "queue-clear-new-record");
+        var clearFiles = new FaultingFiles();
+        var clearStore = new LocalStore(clearDir, clearFiles);
+        var oldRecord = Completed("queue clear old", clearStore.Settings);
+        await clearStore.SaveAsync(oldRecord, clearStore.HistoryEpoch);
+        await clearStore.FlushAsync();
+        clearFiles.MatchingCalls = 0; clearFiles.FailOperation = "Replace"; clearFiles.FailAt = 1;
+        bool clearFailed = false;
+        try { await clearStore.ClearAsync(); } catch (UserError) { clearFailed = true; }
+        var newRecord = Completed("queue clear new", clearStore.Settings);
+        await clearStore.SaveAsync(newRecord, clearStore.HistoryEpoch);
+        await clearStore.RetryFailedWritesAsync();
+        await clearStore.FlushAsync();
+        var clearDisk = new LocalStore(clearDir).History("");
+        Check(clearFailed && clearDisk.Count == 1 && clearDisk[0].Id == newRecord.Id,
+            "Replaying a failed clear removes only the records it was meant to clear");
+
+        string deleteClear = NewDirectory(folder, "queue-delete-clear");
+        var deleteClearFiles = new FaultingFiles();
+        var deleteClearStore = new LocalStore(deleteClear, deleteClearFiles);
+        var deleteTarget = Completed("queue delete clear", deleteClearStore.Settings);
+        await deleteClearStore.SaveAsync(deleteTarget, deleteClearStore.HistoryEpoch);
+        await deleteClearStore.FlushAsync();
+        deleteClearFiles.MatchingCalls = 0; deleteClearFiles.FailOperation = "Replace"; deleteClearFiles.FailAt = 1;
+        try { await deleteClearStore.DeleteAsync(deleteTarget.Id); } catch (UserError) { }
+        await deleteClearStore.ClearAsync();
+        bool deleteClearFlushed = true;
+        try { await deleteClearStore.FlushAsync(); } catch (UserError) { deleteClearFlushed = false; }
+        Check(deleteClearFlushed, "A later successful clear confirms a failed delete instead of replaying it");
+        Check(new LocalStore(deleteClear).History("").Count == 0, "The cleared record cannot be resurrected by a retry");
     }
 
     private static async Task CredentialAndPatchScenarios(string folder)
@@ -681,9 +964,22 @@ public static class StorageRegressionTests
             "Structurally broken history records are dropped individually");
         Check(kept.First(r => r.Id == good.Id).CacheKey == CacheKeys.For("good source", baseContext),
             "A missing cache key is recomputed from the record context");
+        var goodLoaded = kept.First(r => r.Id == good.Id);
+        Check(goodLoaded.Context != null && goodLoaded.Context.Provider.BaseUrl == "https://old-api.invalid/v1" &&
+            goodLoaded.Context.Provider.Model == "fixture-model" && goodLoaded.Context.Learning.Count > 0,
+            "An old full history context keeps its provider and learning fields through recovery");
+        Check(goodLoaded.Source == "good source" && goodLoaded.Translation == "好" && goodLoaded.SourceKind == "剪贴板",
+            "Recovered history keeps the source, translation and source kind fields");
         Check(kept.First(r => r.Id == filtered.Id).Cards.Count == 1 &&
             kept.First(r => r.Id == filtered.Id).Cards.Values.Single().sections.Count == 1,
             "Null cards and null sections are filtered from loaded history");
+        var filteredLoaded = kept.First(r => r.Id == filtered.Id);
+        Check(filteredLoaded.Cards.Values.Single().meaning == "好的" &&
+            filteredLoaded.Cards.Values.Single().word == "good" &&
+            filteredLoaded.Cards.Values.Single().sections[0].content == "c",
+            "Recovered word cards keep their meaning and section fields");
+        Check(filteredLoaded.Chat.Count == 2 && filteredLoaded.Chat[0].Content == "q" && filteredLoaded.Chat[1].Content == "a",
+            "Recovered chat turns keep their role and content fields");
         Check(kept.First(r => r.Id == filtered.Id).Chat.Count == 2 &&
             kept.First(r => r.Id == filtered.Id).Chat[0].Role == "user" &&
             kept.First(r => r.Id == filtered.Id).Chat[1].Role == "assistant",
@@ -702,6 +998,67 @@ public static class StorageRegressionTests
         return Task.FromResult(0);
     }
 
+    // Real child-process exits: normal reload, late word/chat rejection, and a failed exit
+    // that stays alive and succeeds on the retry action. No second Application in-process.
+    private static async Task ExitScenarioChecks(string folder)
+    {
+        string executable = typeof(CoreTests).Assembly.Location;
+        string normal = NewDirectory(folder, "exit-normal");
+        string late = NewDirectory(folder, "exit-late");
+        string failing = NewDirectory(folder, "exit-fail");
+        await Task.Run(() => {
+            RunExitChild(executable, "normal", normal);
+            RunExitChild(executable, "late", late);
+            RunExitChild(executable, "fail", failing);
+        });
+
+        var normalStore = new LocalStore(Path.Combine(normal, "data"));
+        Check(normalStore.Settings.Scene == "书籍" && normalStore.Settings.SceneDetail == "Exit pending patch",
+            "A normal exit flushes the pending settings patch before shutdown");
+        Check(normalStore.Settings.Placement != null && normalStore.Settings.Placement.X == 77 &&
+            normalStore.Settings.Placement.Screen == "exit",
+            "A normal exit flushes a queued placement save before shutdown");
+        var normalHistory = normalStore.History("");
+        Check(normalHistory.Count == 1 && normalHistory[0].Draft == "exit normal draft" &&
+            normalHistory[0].Translation == "退出夹具译文",
+            "A normal exit persists the final draft and translation before shutdown");
+
+        var lateStore = new LocalStore(Path.Combine(late, "data"));
+        var lateHistory = lateStore.History("");
+        Check(lateHistory.Count == 1 && lateHistory[0].Translation == "迟到退出译文",
+            "The late-request exit persists exactly the exit snapshot");
+        Check(lateHistory[0].Cards.Count == 0 && lateHistory[0].Chat.Count == 0,
+            "Late word/chat completions cannot write after the exit started");
+
+        string alivePath = Path.Combine(failing, "alive.json");
+        Check(File.Exists(alivePath), "A failed exit writes its survival report");
+        string aliveReport = File.ReadAllText(alivePath);
+        Check(aliveReport.Contains("\"alive\":true") && aliveReport.Contains("\"retry_visible\":true"),
+            "A failed exit stays alive and offers a real retry");
+        var failStore = new LocalStore(Path.Combine(failing, "data"));
+        var failHistory = failStore.History("");
+        Check(failHistory.Count == 1 && failHistory[0].Draft == "exit fail draft" &&
+            failHistory[0].Translation == "退出夹具译文",
+            "The retried exit persists the snapshot after the fault clears");
+    }
+
+    private static void RunExitChild(string executable, string mode, string directory)
+    {
+        var info = new System.Diagnostics.ProcessStartInfo(executable,
+            "--exit-scenario " + mode + " \"" + directory + "\"") {
+            UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = Path.GetDirectoryName(executable)
+        };
+        using (var process = System.Diagnostics.Process.Start(info)) {
+            if (!process.WaitForExit(120000)) {
+                try { process.Kill(); } catch { }
+                throw new Exception("Exit scenario timed out: " + mode);
+            }
+            Check(process.ExitCode == 0, "The exit scenario " + mode + " child process succeeds");
+        }
+        string error = Path.Combine(directory, "error.txt");
+        if (File.Exists(error)) throw new Exception("Exit scenario " + mode + " failed: " + File.ReadAllText(error));
+    }
+
     private static async Task UiRecoveryAndCredentials(string folder)
     {
         string blockedDirectory = NewDirectory(folder, "ui-blocked");
@@ -713,7 +1070,7 @@ public static class StorageRegressionTests
         File.WriteAllText(Path.Combine(blockedDirectory, AtomicFileBatch.MarkerName), Json.Write(new {
             State = "prepared", Targets = new[] { new { Name = "settings.json", Existed = true } }
         }));
-        var blockedStore = new LocalStore(blockedDirectory, new PersistentFaultingFiles { FailOperation = "Replace" });
+        var blockedStore = new LocalStore(blockedDirectory, new PersistentFaultingFiles { FailOperation = "Copy" });
         Check(blockedStore.RecoveryBlocked, "UI: a failed recovery is surfaced as a blocked state");
         var handler = new CountingHandler();
         using (var shell = new AppShell(blockedStore, false, new LlmClient(handler))) {
@@ -752,6 +1109,94 @@ public static class StorageRegressionTests
             Check(fake.Read(committed) == "new-scope-key", "UI: a credential failure restores the previous key");
         }
     }
+    // External side effects must be captured before writing, restored completely on failure,
+    // aggregated honestly when rollback fails, and kept inside the ordered commit after success.
+    private static async Task UiExternalRollbackIntegrity(string folder)
+    {
+        string scopeDirectory = NewDirectory(folder, "ui-external-scope");
+        var scopeFiles = new FaultingFiles();
+        var scopeStore = new LocalStore(scopeDirectory, scopeFiles);
+        await scopeStore.SaveSettingsAsync(SettingsUpdate.Full(
+            FixtureSettings("fixture", "https://old-api.invalid/v1", "fixture-model")));
+        var scopeFake = new FakeCredentialProfiles();
+        var oldProfile = scopeStore.Settings.Provider;
+        scopeFake.Save(oldProfile, "old-key");
+        var newProfile = new ProviderProfile { Id = "fixture", Name = "Fixture", BaseUrl = "https://new-api.invalid/v1", Model = "fixture-model" };
+        scopeFake.Save(newProfile, "new-existing-key");
+        using (var shell = new AppShell(scopeStore, false, new LlmClient(), scopeFake)) {
+            scopeFiles.MatchingCalls = 0; scopeFiles.FailOperation = "Replace"; scopeFiles.FailAt = 1;
+            bool failed = false;
+            try {
+                await shell.ApplySettingsAsync(SettingsUpdate.Provider(newProfile),
+                    new Dictionary<string, string> { { "fixture", "user-new-key" } }, new HashSet<string>());
+            } catch (UserError) { failed = true; }
+            Check(failed, "UI: a file failure rejects the endpoint switch after credentials were staged");
+            Check(scopeFake.Read(oldProfile) == "old-key", "UI: external rollback restores the old endpoint key");
+            Check(scopeFake.Read(newProfile) == "new-existing-key",
+                "UI: external rollback restores a pre-existing key at the new endpoint");
+            Check(scopeStore.Settings.Provider.BaseUrl == "https://old-api.invalid/v1",
+                "UI: the failed switch keeps the committed endpoint");
+        }
+
+        string rollbackDirectory = NewDirectory(folder, "ui-external-rollback");
+        var rollbackFiles = new FaultingFiles();
+        var rollbackStore = new LocalStore(rollbackDirectory, rollbackFiles);
+        await rollbackStore.SaveSettingsAsync(SettingsUpdate.Full(
+            FixtureSettings("fixture", "https://old-api.invalid/v1", "fixture-model")));
+        var rollbackFake = new FakeCredentialProfiles();
+        var rollbackOld = rollbackStore.Settings.Provider;
+        rollbackFake.Save(rollbackOld, "rollback-old-key");
+        var rollbackNew = new ProviderProfile { Id = "fixture", Name = "Fixture", BaseUrl = "https://third-api.invalid/v1", Model = "fixture-model" };
+        using (var shell = new AppShell(rollbackStore, false, new LlmClient(), rollbackFake)) {
+            rollbackFake.FailDelete = id => id == Credentials.ScopedId(rollbackNew);
+            rollbackFiles.MatchingCalls = 0; rollbackFiles.FailOperation = "Replace"; rollbackFiles.FailAt = 1;
+            bool failed = false;
+            try {
+                await shell.ApplySettingsAsync(SettingsUpdate.Provider(rollbackNew),
+                    new Dictionary<string, string> { { "fixture", "rollback-new-key" } }, new HashSet<string>());
+            } catch (UserError) { failed = true; }
+            Check(failed, "UI: a rollback item failure is reported to the transaction");
+            Check(rollbackFake.Read(rollbackOld) == "rollback-old-key",
+                "UI: one failed rollback item does not skip restoring the old key");
+            Check(rollbackStore.ExternalRollbackPending && !rollbackStore.RecoveryBlocked,
+                "UI: an incomplete external rollback keeps explicit recovery pending");
+            var blockedHandler = new CountingHandler();
+            using (var blockedShell = new AppShell(rollbackStore, false, new LlmClient(blockedHandler), rollbackFake)) {
+                await blockedShell.TranslateAsync("Blocked external rollback", "剪贴板", false);
+                Check(blockedHandler.Calls == 0, "UI: a pending external rollback refuses new API requests");
+            }
+            rollbackFake.FailDelete = null;
+            rollbackFiles.FailAt = -1; rollbackFiles.MatchingCalls = 0;
+            await shell.ApplySettingsAsync(SettingsUpdate.Provider(rollbackNew),
+                new Dictionary<string, string> { { "fixture", "rollback-new-key" } }, new HashSet<string>(), true);
+            Check(!rollbackStore.NeedsExplicitRecovery, "UI: an explicit reapply clears the pending external rollback");
+            Check(rollbackFake.Read(rollbackNew) == "rollback-new-key" && rollbackFake.Read(rollbackOld) == "",
+                "UI: the explicit reapply applies the new key and cleans the replaced target");
+        }
+
+        string orderDirectory = NewDirectory(folder, "ui-cleanup-order");
+        var orderFiles = new FaultingFiles();
+        var orderStore = new LocalStore(orderDirectory, orderFiles);
+        await orderStore.SaveSettingsAsync(SettingsUpdate.Full(
+            FixtureSettings("fixture", "https://old-api.invalid/v1", "fixture-model")));
+        var orderFake = new FakeCredentialProfiles();
+        var orderOld = orderStore.Settings.Provider;
+        orderFake.Save(orderOld, "order-old-key");
+        using (var shell = new AppShell(orderStore, false, new LlmClient(), orderFake)) {
+            var endpointB = new ProviderProfile { Id = "fixture", Name = "Fixture", BaseUrl = "https://b-api.invalid/v1", Model = "fixture-model" };
+            var endpointC = new ProviderProfile { Id = "fixture", Name = "Fixture", BaseUrl = "https://c-api.invalid/v1", Model = "fixture-model" };
+            var first = shell.ApplySettingsAsync(SettingsUpdate.Provider(endpointB),
+                new Dictionary<string, string> { { "fixture", "b-key" } }, new HashSet<string>());
+            var second = orderStore.CommitSettingsAsync(SettingsUpdate.Provider(endpointC),
+                (committed, candidate) => orderFake.Save(candidate.Provider, "c-key"), null);
+            await Task.WhenAll(first, second);
+            int deleteIndex = orderFake.Log.FindIndex(entry => entry == "delete " + Credentials.ScopedId(orderOld));
+            int saveCIndex = orderFake.Log.FindIndex(entry => entry.StartsWith("save " + Credentials.ScopedId(endpointC), StringComparison.Ordinal));
+            Check(deleteIndex >= 0 && saveCIndex > deleteIndex,
+                "UI: cleanup of the replaced key stays inside the ordered settings commit");
+        }
+    }
+
     private sealed class CountingHandler : System.Net.Http.HttpMessageHandler
     {
         public int Calls;
@@ -792,6 +1237,113 @@ public static class StorageRegressionTests
         { Before("Replace"); inner.Replace(source, destination); }
         public void Delete(string path) { Before("Delete"); inner.Delete(path); }
     }
+    // Starts failing copies/deletes/replaces only after the prepared marker is durable, so a
+    // commit can be forced into a genuine rollback failure instead of a staging failure.
+    private sealed class RollbackFaultFiles : IStoreFiles
+    {
+        private readonly IStoreFiles inner = new PhysicalStoreFiles();
+        private bool armed;
+        private void Before(string operation)
+        {
+            if (armed && operation != "Write" && operation != "Move") throw new IOException("Rollback fixture failure");
+        }
+        public bool Exists(string path) { return inner.Exists(path); }
+        public long Length(string path) { return inner.Length(path); }
+        public string Read(string path) { Before("Read"); return inner.Read(path); }
+        public void Write(string path, string payload)
+        {
+            inner.Write(path, payload);
+            if (Path.GetFileName(path) == AtomicFileBatch.MarkerName + ".tmp") armed = true;
+        }
+        public void Copy(string source, string destination, bool overwrite)
+        { Before("Copy"); inner.Copy(source, destination, overwrite); }
+        public void Move(string source, string destination) { Before("Move"); inner.Move(source, destination); }
+        public void Replace(string source, string destination) { Before("Replace"); inner.Replace(source, destination); }
+        public void Delete(string path) { Before("Delete"); inner.Delete(path); }
+    }
+
+    // Records every file operation and can fail or interrupt any traced position.
+    private sealed class TracingStoreFiles : IStoreFiles
+    {
+        private readonly IStoreFiles inner = new PhysicalStoreFiles();
+        public readonly List<string> Operations = new List<string>();
+        public string FailOperation;
+        public int FailAt = -1;
+        public int MatchingCalls;
+        public bool Interrupted;
+        private bool ShouldFail(string operation)
+        {
+            if (operation != FailOperation) return false;
+            MatchingCalls++;
+            return MatchingCalls == FailAt;
+        }
+        public bool Exists(string path) { return inner.Exists(path); }
+        public long Length(string path) { return inner.Length(path); }
+        public string Read(string path) { return inner.Read(path); }
+        public void Write(string path, string payload)
+        {
+            Operations.Add("Write " + Path.GetFileName(path));
+            if (ShouldFail("Write")) {
+                if (Interrupted && payload.Length > 1) inner.Write(path, payload.Substring(0, payload.Length / 2));
+                throw new IOException("Matrix fixture failure");
+            }
+            inner.Write(path, payload);
+        }
+        public void Copy(string source, string destination, bool overwrite)
+        {
+            Operations.Add("Copy " + Path.GetFileName(destination));
+            if (ShouldFail("Copy")) {
+                if (Interrupted) inner.Copy(source, destination, overwrite);
+                throw new IOException("Matrix fixture failure");
+            }
+            inner.Copy(source, destination, overwrite);
+        }
+        public void Move(string source, string destination)
+        {
+            Operations.Add("Move " + Path.GetFileName(destination));
+            if (ShouldFail("Move")) {
+                if (Interrupted) inner.Move(source, destination);
+                throw new IOException("Matrix fixture failure");
+            }
+            inner.Move(source, destination);
+        }
+        public void Replace(string source, string destination)
+        {
+            Operations.Add("Replace " + Path.GetFileName(destination));
+            if (ShouldFail("Replace")) {
+                if (Interrupted) inner.Replace(source, destination);
+                throw new IOException("Matrix fixture failure");
+            }
+            inner.Replace(source, destination);
+        }
+        public void Delete(string path)
+        {
+            Operations.Add("Delete " + Path.GetFileName(path));
+            if (ShouldFail("Delete")) throw new IOException("Matrix fixture failure");
+            inner.Delete(path);
+        }
+    }
+
+    // Fails a chosen operation by path so recovery cleanup order can be tested precisely.
+    private sealed class TargetedFaultingFiles : IStoreFiles
+    {
+        private readonly IStoreFiles inner = new PhysicalStoreFiles();
+        public Func<string, string, bool> Fail;
+        private void Before(string operation, string path)
+        {
+            if (Fail != null && Fail(operation, path)) throw new IOException("Targeted fixture failure");
+        }
+        public bool Exists(string path) { return inner.Exists(path); }
+        public long Length(string path) { return inner.Length(path); }
+        public string Read(string path) { Before("Read", path); return inner.Read(path); }
+        public void Write(string path, string payload) { Before("Write", path); inner.Write(path, payload); }
+        public void Copy(string source, string destination, bool overwrite)
+        { Before("Copy", destination); inner.Copy(source, destination, overwrite); }
+        public void Move(string source, string destination) { Before("Move", destination); inner.Move(source, destination); }
+        public void Replace(string source, string destination) { Before("Replace", destination); inner.Replace(source, destination); }
+        public void Delete(string path) { Before("Delete", path); inner.Delete(path); }
+    }
+
     private sealed class PersistentFaultingFiles : IStoreFiles
     {
         private readonly IStoreFiles inner = new PhysicalStoreFiles();
@@ -815,16 +1367,29 @@ public static class StorageRegressionTests
     {
         private readonly Dictionary<string, string> keys = new Dictionary<string, string>();
         public bool FailNextSave;
+        public Func<string, bool> FailDelete;
+        public Func<string, bool> FailSave;
+        public readonly List<string> Log = new List<string>();
         public string Read(ProviderProfile profile)
         {
-            string key;
-            return keys.TryGetValue(Credentials.ScopedId(profile), out key) ? key : "";
+            string key; string id = Credentials.ScopedId(profile);
+            Log.Add("read " + id);
+            return keys.TryGetValue(id, out key) ? key : "";
         }
         public void Save(ProviderProfile profile, string key)
         {
+            string id = Credentials.ScopedId(profile);
+            Log.Add("save " + id + " " + key);
             if (FailNextSave) { FailNextSave = false; throw new UserError("credentials", "Fixture failure"); }
-            keys[Credentials.ScopedId(profile)] = key;
+            if (FailSave != null && FailSave(id)) throw new UserError("credentials", "Fixture save failure");
+            keys[id] = key;
         }
-        public void Delete(ProviderProfile profile) { keys.Remove(Credentials.ScopedId(profile)); }
+        public void Delete(ProviderProfile profile)
+        {
+            string id = Credentials.ScopedId(profile);
+            Log.Add("delete " + id);
+            if (FailDelete != null && FailDelete(id)) throw new UserError("credentials", "Fixture delete failure");
+            keys.Remove(id);
+        }
     }
 }

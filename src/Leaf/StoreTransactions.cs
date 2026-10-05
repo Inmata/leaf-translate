@@ -36,10 +36,13 @@ namespace Leaf
     }
 
     // Groups the fixed local files behind one recoverable transaction:
-    // stage *.new, back up *.old, write a prepared marker, apply external side effects,
-    // swap targets, write the committed marker, publish memory, then clean up.
-    // Only settings.json and history.json are accepted, so a tampered marker cannot
-    // redirect recovery outside the store directory.
+    // stage *.new, back up *.old, atomically write a prepared marker, apply external side
+    // effects, swap targets, atomically write the committed marker, publish memory, clean up.
+    // Recovery never claims success without evidence: a corrupt marker, duplicate targets or a
+    // missing backup keeps every artifact and blocks further commits. Restores copy from the
+    // backup (never consume it) so a crash during recovery can be retried from the same marker.
+    // Only settings.json and history.json are accepted, so a tampered marker cannot redirect
+    // recovery outside the store directory.
     public sealed class AtomicFileBatch
     {
         public const string SettingsName = "settings.json";
@@ -49,6 +52,9 @@ namespace Leaf
         private readonly string directory;
         private readonly IStoreFiles files;
         public bool RecoveryBlocked { get; private set; }
+        // True when files were restored but an applied external effect could not be rolled
+        // back; the app must not claim the old configuration is fully active again.
+        public bool ExternalRollbackPending { get; private set; }
 
         public AtomicFileBatch(string directory, IStoreFiles files)
         {
@@ -63,36 +69,52 @@ namespace Leaf
         private sealed class TransactionState
         {
             public string State { get; set; }
+            public bool ExternalApplied { get; set; }
             public List<TransactionTarget> Targets { get; set; }
         }
 
         public void Commit(Dictionary<string, string> payloads, Action applyExternal, Action rollbackExternal, Action publish)
         {
+            Commit(payloads, applyExternal, rollbackExternal, publish, false);
+        }
+
+        public void Commit(Dictionary<string, string> payloads, Action applyExternal, Action rollbackExternal, Action publish,
+            bool resolveExternalPending)
+        {
             if (payloads == null || payloads.Count == 0) throw new ArgumentException("payloads");
+            Recover(resolveExternalPending);
+            if (RecoveryBlocked)
+                throw new UserError("storage", "上一次保存尚未完全恢复，请重新应用配置后重试。");
+            if (ExternalRollbackPending)
+                throw new UserError("storage", "上次保存的外部设置未能恢复，请重新应用配置后重试。");
+
             string[] names = payloads.Keys.OrderBy(name => name == SettingsName ? 0 : 1).ToArray();
             foreach (string name in names) ValidateName(name);
-            var targets = new List<TransactionTarget>();
+            var targets = names.Select(name => new TransactionTarget {
+                Name = name, Existed = files.Exists(Path.Combine(directory, name))
+            }).ToList();
             var staged = new Dictionary<string, string>();
+            bool markedExternalApplied = applyExternal != null;
             bool committed = false;
             try {
-                foreach (string name in names) {
-                    string target = Path.Combine(directory, name);
+                foreach (var item in targets) {
+                    string target = Path.Combine(directory, item.Name);
                     string fresh = target + ".new", backup = target + ".old";
-                    files.Write(fresh, payloads[name]);
-                    bool existed = files.Exists(target);
-                    if (existed) files.Copy(target, backup, true);
+                    files.Write(fresh, payloads[item.Name]);
+                    if (item.Existed) files.Copy(target, backup, true);
                     else files.Delete(backup);
-                    staged[name] = fresh;
-                    targets.Add(new TransactionTarget { Name = name, Existed = existed });
+                    staged[item.Name] = fresh;
                 }
-                WriteMarker("prepared", targets);
+                // The prepared marker records whether external effects may have run. Writing it
+                // before applyExternal keeps recovery conservative if the process dies mid-apply.
+                WriteMarker("prepared", markedExternalApplied, targets);
                 if (applyExternal != null) applyExternal();
                 foreach (var item in targets) {
                     string target = Path.Combine(directory, item.Name);
-                    if (files.Exists(target)) files.Replace(staged[item.Name], target);
+                    if (item.Existed) files.Replace(staged[item.Name], target);
                     else files.Move(staged[item.Name], target);
                 }
-                WriteMarker("committed", targets);
+                WriteMarker("committed", true, targets);
                 committed = true;
                 if (publish != null) publish();
                 try { Cleanup(targets); } catch { }
@@ -102,63 +124,115 @@ namespace Leaf
                     if (error is UserError) throw;
                     throw new UserError("storage", "本地数据已保存，但清理未完成；下次启动会自动处理。");
                 }
-                bool filesRestored = TryRestore(targets);
-                bool externalRestored = true;
+                // Without a prepared marker no target was replaced, so there is nothing to
+                // restore from a backup and missing staging backups must not block recovery.
+                bool markerWritten = files.Exists(Path.Combine(directory, MarkerName));
+                bool filesRestored = markerWritten ? TryRestore(targets) : true;
+                bool externalRestored = !markedExternalApplied;
                 if (filesRestored && rollbackExternal != null) {
-                    try { rollbackExternal(); } catch { externalRestored = false; }
+                    try { rollbackExternal(); externalRestored = true; }
+                    catch { externalRestored = false; }
                 }
                 if (filesRestored && externalRestored) {
-                    try { Cleanup(targets); } catch { }
+                    RemoveMarkerOrBlock(targets);
+                } else if (filesRestored && !externalRestored) {
+                    // The files are old again; only the external effects are uncertain and need
+                    // an explicit reapply before requests may run.
+                    ExternalRollbackPending = true;
                 } else {
                     RecoveryBlocked = true;
+                    ExternalRollbackPending = markedExternalApplied;
                 }
-                if (RecoveryBlocked)
+                if (RecoveryBlocked || ExternalRollbackPending)
                     throw new UserError("storage", "本地保存失败，且未能完全恢复原状态。请重新应用配置后重试。");
                 if (error is UserError) throw;
                 throw new UserError("storage", "无法保存本地数据。请检查磁盘空间或目录权限。");
             }
         }
 
-        public void Recover()
+        public void Recover() { Recover(false); }
+
+        public void Recover(bool resolveExternalPending)
         {
             string marker = Path.Combine(directory, MarkerName);
             if (!files.Exists(marker)) { CleanupOrphans(); return; }
             TransactionState state = null;
             try { state = Json.Read<TransactionState>(files.Read(marker)); } catch { state = null; }
-            if (state == null || state.Targets == null || state.Targets.Count == 0 ||
-                (state.State != "prepared" && state.State != "committed")) {
-                TryDelete(marker); CleanupOrphans(); return;
+            if (!IsValidState(state)) { RefuseOrQuarantine(resolveExternalPending); return; }
+            if (state.State == "committed") { RemoveMarkerOrBlock(state.Targets); return; }
+            if (!TryRestore(state.Targets)) { RecoveryBlocked = true; return; }
+            if (state.ExternalApplied && !resolveExternalPending) {
+                // The files are back to the old state, but applied credentials/hotkeys may not
+                // be. Keep the marker as durable evidence and require an explicit reapply.
+                ExternalRollbackPending = true;
+                return;
             }
-            var targets = new List<TransactionTarget>();
-            foreach (var item in state.Targets) {
-                if (item == null || !IsAllowed(item.Name)) { RecoveryBlocked = true; return; }
-                targets.Add(item);
-            }
-            if (state.State == "committed") { Cleanup(targets); return; }
-            if (!TryRestore(targets)) { RecoveryBlocked = true; return; }
-            Cleanup(targets);
+            RemoveMarkerOrBlock(state.Targets);
         }
 
-        private void WriteMarker(string state, List<TransactionTarget> targets)
+        private void RefuseOrQuarantine(bool resolveExternalPending)
         {
-            files.Write(Path.Combine(directory, MarkerName),
-                Json.Write(new TransactionState { State = state, Targets = targets }));
+            if (!resolveExternalPending) { RecoveryBlocked = true; return; }
+            // An explicit settings reapply cannot use a structurally invalid marker; preserve
+            // its bytes for inspection, clear the staging area and let the user's new
+            // configuration replace it.
+            string marker = Path.Combine(directory, MarkerName);
+            try {
+                files.Copy(marker, marker + ".corrupt-" + DateTime.UtcNow.ToString("yyyyMMddHHmmssfff") +
+                    "-" + Guid.NewGuid().ToString("N"), false);
+            } catch {
+                RecoveryBlocked = true; return;
+            }
+            if (!TryDelete(marker)) { RecoveryBlocked = true; return; }
+            CleanupOrphans();
         }
+
+        private static bool IsValidState(TransactionState state)
+        {
+            if (state == null || state.Targets == null || state.Targets.Count == 0) return false;
+            if (state.State != "prepared" && state.State != "committed") return false;
+            var names = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var item in state.Targets) {
+                if (item == null || !IsAllowed(item.Name)) return false;
+                if (!names.Add(item.Name)) return false;
+            }
+            return true;
+        }
+
+        private void WriteMarker(string state, bool externalApplied, List<TransactionTarget> targets)
+        {
+            string marker = Path.Combine(directory, MarkerName), temporary = marker + ".tmp";
+            files.Write(temporary, Json.Write(new TransactionState {
+                State = state, ExternalApplied = externalApplied, Targets = targets
+            }));
+            if (files.Exists(marker)) files.Replace(temporary, marker);
+            else files.Move(temporary, marker);
+        }
+
+        // Restores each target by copying the backup over it; the backup is kept until the
+        // marker has been removed, so an interrupted recovery can always run again.
         private bool TryRestore(List<TransactionTarget> targets)
         {
             try {
                 foreach (var item in targets) {
                     string target = Path.Combine(directory, item.Name), backup = target + ".old";
                     if (item.Existed) {
-                        if (files.Exists(backup)) {
-                            if (files.Exists(target)) files.Replace(backup, target);
-                            else files.Move(backup, target);
-                        }
+                        if (!files.Exists(backup)) return false;
+                        files.Copy(backup, target, true);
                     } else files.Delete(target);
                 }
                 return true;
             } catch { return false; }
         }
+
+        private bool RemoveMarkerOrBlock(List<TransactionTarget> targets)
+        {
+            string marker = Path.Combine(directory, MarkerName);
+            if (!TryDelete(marker)) { RecoveryBlocked = true; return false; }
+            Cleanup(targets);
+            return true;
+        }
+
         private void Cleanup(List<TransactionTarget> targets)
         {
             foreach (var item in targets) {
@@ -166,17 +240,21 @@ namespace Leaf
                 TryDelete(target + ".new"); TryDelete(target + ".old");
             }
             TryDelete(Path.Combine(directory, MarkerName));
+            TryDelete(Path.Combine(directory, MarkerName + ".tmp"));
         }
+
         private void CleanupOrphans()
         {
             foreach (string name in AllowedNames) {
                 string target = Path.Combine(directory, name);
                 TryDelete(target + ".new"); TryDelete(target + ".old");
             }
+            TryDelete(Path.Combine(directory, MarkerName + ".tmp"));
         }
-        private void TryDelete(string path)
+
+        private bool TryDelete(string path)
         {
-            try { if (files.Exists(path)) files.Delete(path); } catch { }
+            try { if (files.Exists(path)) files.Delete(path); return !files.Exists(path); } catch { return false; }
         }
         private static bool IsAllowed(string name)
         {
