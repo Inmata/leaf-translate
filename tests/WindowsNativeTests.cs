@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -143,6 +144,22 @@ public static class WindowsNativeTests
                 Check(shell.Popup.IsActive && Ui.Get<TextBox>(shell.Popup, "SourceInput").IsKeyboardFocused &&
                     Ui.Get<TextBox>(shell.Popup, "SourceInput").SelectedText == shell.Current.Source,
                     "Explicit direct input focuses the editor and selects the original for replacement");
+                // Keyboard entry into a word and the collapse behaviour, which offscreen
+                // rendering cannot prove. Verified on a real desktop.
+                shell.OpenRecord(shell.Current); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                var words = WordLinks(shell.Popup);
+                Check(words.Count > 0 && words.All(x => x.Focusable && x.ToolTip != null),
+                    "Original words are reachable by keyboard in a real window");
+                var word = words[0];
+                word.Focus(); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                Check(word.IsKeyboardFocused, "A word takes keyboard focus when the user asks for it");
+                int beforeLookup = transport.Calls;
+                word.RaiseEvent(new RoutedEventArgs(System.Windows.Documents.Hyperlink.ClickEvent));
+                await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                Check(transport.Calls > beforeLookup, "Activating a focused word starts its explanation");
+                IntPtr beforeHide = Native.GetForegroundWindow();
+                shell.HidePopup(); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                Check(Native.GetForegroundWindow() == beforeHide, "Collapsing the popup leaves the foreground application alone");
                 if (!OpenClipboard(new WindowInteropHelper(shell.Popup).Handle)) throw new Exception("Could not reserve clipboard for the isolated contention check.");
                 try {
                     var copy = Native.CopyTextAsync("Clipboard contention fixture");
@@ -190,11 +207,20 @@ public static class WindowsNativeTests
             foreach (var provider in settings.Providers) Credentials.Delete(provider.Id);
         }
     }
+    private static List<System.Windows.Documents.Hyperlink> WordLinks(Window popup)
+    {
+        var links = new List<System.Windows.Documents.Hyperlink>();
+        foreach (var block in Ui.Get<RichTextBox>(popup, "SourceText").Document.Blocks.OfType<System.Windows.Documents.Paragraph>())
+            foreach (var inline in block.Inlines.OfType<System.Windows.Documents.Hyperlink>()) links.Add(inline);
+        return links;
+    }
     private sealed class FixtureTransport : HttpMessageHandler
     {
         public bool KeyMatched;
+        public int Calls;
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellation)
         {
+            Calls++;
             KeyMatched = request.Headers.Authorization.Parameter == "Leaf fake credential fixture 中文";
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) {
                 Content = new StringContent("{\"choices\":[{\"message\":{\"content\":\"测试译文\"},\"finish_reason\":\"stop\"}]}", System.Text.Encoding.UTF8, "application/json")

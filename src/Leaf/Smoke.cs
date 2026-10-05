@@ -15,6 +15,186 @@ namespace Leaf
             if (!condition) throw new InvalidOperationException(message);
             checks.Add(message);
         }
+        // The original editor must be a top-aligned multi-line field whose placeholder shares
+        // the input's typography and starts exactly where the first character is drawn.
+        private static void EditorState(AppShell shell, List<string> checks)
+        {
+            var popup = shell.Popup;
+            var editor = Ui.Get<TextBox>(popup, "SourceInput");
+            var placeholder = Ui.Get<TextBox>(popup, "SourcePlaceholder");
+            var button = Ui.Get<Button>(popup, "TranslateButton");
+            popup.Width = 360; popup.Height = 380; shell.UpdatePopupTypography();
+            shell.BeginSourceEdit(false);
+            editor.Clear();
+            ((FrameworkElement)popup.Content).UpdateLayout();
+            Check(editor.FontSize == placeholder.FontSize && editor.FontFamily.ToString() == placeholder.FontFamily.ToString(),
+                "Popup input and placeholder share typography", checks);
+            Check(editor.VerticalContentAlignment == VerticalAlignment.Top,
+                "Popup editor aligns text at the top instead of single-line centring", checks);
+            Check(popup.FindName("SourceEditHint") == null && popup.FindName("EmptyHint") == null && popup.FindName("SourceActions") == null,
+                "The original editor carries no permanent keyboard tutorial", checks);
+            Check(button.Visibility == Visibility.Collapsed, "An empty input hides its submit action", checks);
+            Check(System.Windows.Automation.AutomationProperties.GetName(button) == "翻译原文" &&
+                System.Windows.Automation.AutomationProperties.GetName(Ui.Get<Button>(popup, "SendButton")) == "发送追问" &&
+                System.Windows.Automation.AutomationProperties.GetName(Ui.Get<Button>(popup, "AskButton")) == "追问",
+                "Reading actions carry assistive names", checks);
+
+            // Compare what is actually painted: the placeholder's first lit pixel must be where
+            // the same text is painted once it is typed into the editor.
+            string sample = placeholder.Text;
+            editor.Clear();
+            ((FrameworkElement)popup.Content).UpdateLayout();
+            var placeholderPixel = PaintedOrigin(placeholder);
+            placeholder.Visibility = Visibility.Collapsed;
+            editor.Text = sample;
+            ((FrameworkElement)popup.Content).UpdateLayout();
+            var textPixel = PaintedOrigin(editor);
+            editor.Clear();
+            placeholder.Visibility = Visibility.Visible;
+            ((FrameworkElement)popup.Content).UpdateLayout();
+            Check(placeholderPixel.X >= 0 && textPixel.X >= 0 &&
+                Math.Abs(placeholderPixel.X - textPixel.X) <= 1 && Math.Abs(placeholderPixel.Y - textPixel.Y) <= 1,
+                "Placeholder paints where the same text lands within one DIP (placeholder " + placeholderPixel + " vs typed text " + textPixel + ")", checks);
+            Check(editor.AcceptsReturn && editor.TextWrapping == TextWrapping.Wrap, "The original editor stays a multi-line field", checks);
+            editor.Text = "M";
+            ((FrameworkElement)popup.Content).UpdateLayout();
+            Check(button.Visibility == Visibility.Visible, "A non-empty input reveals its submit action", checks);
+            editor.Clear();
+            ((FrameworkElement)popup.Content).UpdateLayout();
+
+            // Words in the original are reachable and activatable from the keyboard.
+            var links = new List<System.Windows.Documents.Hyperlink>();
+            foreach (var block in Ui.Get<RichTextBox>(popup, "SourceText").Document.Blocks.OfType<System.Windows.Documents.Paragraph>())
+                foreach (var inline in block.Inlines.OfType<System.Windows.Documents.Hyperlink>()) links.Add(inline);
+            Check(links.Count > 0 && links.All(x => x.Focusable && x.ToolTip != null),
+                "Original words are keyboard reachable and explain themselves on demand", checks);
+            var linkStyle = (Style)Application.Current.Resources[typeof(System.Windows.Documents.Hyperlink)];
+            Check(linkStyle.Triggers.OfType<Trigger>().Any(x => x.Property == UIElement.IsKeyboardFocusedProperty),
+                "Focused words get a visible state without moving focus on open", checks);
+            Check(!popup.ShowActivated, "Refining the editor never makes the popup activate itself", checks);
+        }
+        // The content is arranged exactly like Ui.Render does, so geometry reads are real.
+        private static void Layout(Window window)
+        {
+            var element = (FrameworkElement)window.Content;
+            element.Measure(new Size(window.Width, window.Height));
+            element.Arrange(new Rect(0, 0, window.Width, window.Height));
+            element.UpdateLayout();
+        }
+        // Top-left of the first painted pixel of one element on a white backdrop, at 96 DPI.
+        private static Point PaintedOrigin(FrameworkElement element)
+        {
+            int width = (int)Math.Ceiling(element.ActualWidth), height = (int)Math.Ceiling(element.ActualHeight);
+            if (width <= 0 || height <= 0) throw new InvalidOperationException("Element has no layout to inspect.");
+            var backdrop = new System.Windows.Media.DrawingVisual();
+            using (var drawing = backdrop.RenderOpen())
+                drawing.DrawRectangle(System.Windows.Media.Brushes.White, null, new Rect(0, 0, width, height));
+            var bitmap = new System.Windows.Media.Imaging.RenderTargetBitmap(width, height, 96, 96, System.Windows.Media.PixelFormats.Pbgra32);
+            bitmap.Render(backdrop); bitmap.Render(element);
+            var pixels = new byte[width * height * 4];
+            bitmap.CopyPixels(pixels, width * 4, 0);
+            int left = -1, top = -1;
+            for (int y = 0; y < height; y++)
+                for (int x = 0; x < width; x++) {
+                    int i = (y * width + x) * 4;
+                    if (pixels[i] < 240 || pixels[i + 1] < 240 || pixels[i + 2] < 240) {
+                        if (top < 0) top = y;
+                        if (left < 0 || x < left) left = x;
+                    }
+                }
+            return new Point(left, top);
+        }
+        // Every affected state is rendered at the sizes and DPIs the popup can actually meet.
+        private static void RenderStates(AppShell shell, string folder, List<string> checks)
+        {
+            var popup = shell.Popup;
+            var sizes = new[] {
+                new object[] { "default", 456.0, 620.0 }, new object[] { "compact", 360.0, 380.0 }
+            };
+            foreach (var size in sizes) {
+                popup.Width = (double)size[1]; popup.Height = (double)size[2]; shell.UpdatePopupTypography();
+                Ui.Visible(Ui.Get<RichTextBox>(popup, "SourceText"), true);
+                Ui.Visible(Ui.Get<Border>(popup, "WordPanel"), true);
+                Ui.Visible(Ui.Get<Border>(popup, "ErrorPanel"), false);
+                Ui.Visible(Ui.Get<Grid>(popup, "BusyPanel"), false);
+                Ui.Visible(Ui.Get<Border>(popup, "InputPanel"), false);
+                Ui.Visible(Ui.Get<Grid>(popup, "SourceEditor"), false);
+                Capture(popup, folder, (string)size[0] + "-reading", checks);
+
+                Ui.Visible(Ui.Get<Border>(popup, "InputPanel"), true);
+                Layout(popup);
+                var question = Ui.Get<TextBox>(popup, "QuestionInput");
+                var content = (FrameworkElement)popup.Content;
+                double questionBottom = question.TranslatePoint(new Point(0, question.ActualHeight), content).Y;
+                Check(question.ActualHeight > 0 && questionBottom <= content.ActualHeight,
+                    "The follow-up input fits inside the " + size[0] + " popup (" + questionBottom.ToString("0.#") + " of " + content.ActualHeight.ToString("0.#") + ")", checks);
+                Check(Ui.Get<ScrollViewer>(popup, "BodyScroll").ActualHeight > 0,
+                    "The body still scrolls to word cards and the conversation behind an expanded follow-up", checks);
+                Capture(popup, folder, (string)size[0] + "-followup", checks);
+                Ui.Visible(Ui.Get<Border>(popup, "InputPanel"), false);
+
+                Ui.Visible(Ui.Get<Grid>(popup, "BusyPanel"), true);
+                Ui.Get<TextBlock>(popup, "BusyLabel").Text = "正在回答…";
+                Capture(popup, folder, (string)size[0] + "-sending", checks);
+                Ui.Visible(Ui.Get<Grid>(popup, "BusyPanel"), false);
+
+                shell.ShowError("取词未完成，可重试或手动输入。", null);
+                Capture(popup, folder, (string)size[0] + "-error", checks);
+                Ui.Visible(Ui.Get<Border>(popup, "ErrorPanel"), false);
+
+                shell.BeginSourceEdit(false);
+                var editor = Ui.Get<TextBox>(popup, "SourceInput");
+                editor.Clear();
+                string emptyPath = Capture(popup, folder, (string)size[0] + "-input-empty", checks);
+                // An empty input must not paint the submit arrow; a filled one must.
+                Check(CountInk(emptyPath, 60, 140) == 0, "An empty input paints no submit arrow", checks);
+                editor.Text = "编辑中的原文示例";
+                string filledPath = Capture(popup, folder, (string)size[0] + "-input-filled", checks);
+                Check(CountInk(filledPath, 60, 140) > 10, "A filled input paints the vector submit arrow", checks);
+                editor.Clear();
+                // Collapse the editor before rendering the follow-up state again.
+                Ui.Visible(Ui.Get<RichTextBox>(popup, "SourceText"), true);
+                Ui.Visible(Ui.Get<Grid>(popup, "SourceEditor"), false);
+            }
+            popup.Width = 456; popup.Height = 620; shell.UpdatePopupTypography();
+            checks.Add("All popup states render at 456x620 and 360x380 across 96/120/144/192 DPI with exact output pixels");
+        }
+        private static string Capture(Window window, string folder, string name, List<string> checks)
+        {
+            string first = null;
+            foreach (double dpi in new[] { 96.0, 120.0, 144.0, 192.0 }) {
+                string path = Path.Combine(folder, "popup-" + name + "-" + ((int)dpi) + ".png");
+                Ui.Render(window, path, dpi);
+                var image = new System.Windows.Media.Imaging.BitmapImage();
+                image.BeginInit(); image.UriSource = new Uri(path);
+                image.CacheOption = System.Windows.Media.Imaging.BitmapCacheOption.OnLoad; image.EndInit();
+                int width = (int)Math.Ceiling(window.Width * dpi / 96), height = (int)Math.Ceiling(window.Height * dpi / 96);
+                if (image.PixelWidth != width || image.PixelHeight != height)
+                    throw new InvalidOperationException("Rendered " + name + " at " + dpi + " DPI is " + image.PixelWidth + "x" + image.PixelHeight +
+                        " instead of " + width + "x" + height + ".");
+                if (first == null) first = path;
+            }
+            return first;
+        }
+        // Reads the written PNG back and counts dark (Ink) pixels in the right-hand action
+        // band, so the rendered arrow is inspected rather than only produced.
+        private static int CountInk(string path, int fromY, int toY)
+        {
+            var image = new System.Windows.Media.Imaging.BitmapImage();
+            image.BeginInit(); image.UriSource = new Uri(path);
+            image.CacheOption = System.Windows.Media.Imaging.BitmapCacheOption.OnLoad; image.EndInit();
+            var converted = new System.Windows.Media.Imaging.FormatConvertedBitmap(image, System.Windows.Media.PixelFormats.Bgra32, null, 0);
+            int stride = converted.PixelWidth * 4;
+            var pixels = new byte[stride * converted.PixelHeight];
+            converted.CopyPixels(pixels, stride, 0);
+            int count = 0;
+            for (int y = fromY; y < Math.Min(toY, converted.PixelHeight); y++)
+                for (int x = Math.Max(0, converted.PixelWidth - 130); x < converted.PixelWidth - 20; x++) {
+                    int i = y * stride + x * 4;
+                    if (pixels[i] < 120 && pixels[i + 1] < 120 && pixels[i + 2] < 120) count++;
+                }
+            return count;
+        }
         public static int Run(string folder)
         {
             Directory.CreateDirectory(folder);
@@ -51,6 +231,9 @@ namespace Leaf
                     Ui.Render(shell.Popup, Path.Combine(folder, "popup-large.png"));
                     shell.Popup.Width = 456; shell.Popup.Height = 620; shell.UpdatePopupTypography();
                     Check(translation.FontSize == 17, "Resizing back restores the original typography without cumulative scaling", checks);
+
+                    EditorState(shell, checks);
+                    RenderStates(shell, folder, checks);
 
                     var settings = new SettingsWindow(shell);
                     Check(Ui.Get<ComboBox>(settings.Window, "ProviderCombo").SelectedIndex == -1, "New users choose an endpoint explicitly rather than guessing from a key", checks);

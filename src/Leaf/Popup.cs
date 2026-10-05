@@ -29,10 +29,9 @@ namespace Leaf
             Ui.Click(Popup, "TranslateButton", async () => await SubmitSourceAsync());
             var sourceInput = Ui.Get<TextBox>(Popup, "SourceInput");
             sourceInput.TextChanged += (s, e) => {
-                Ui.Visible(Ui.Get<TextBlock>(Popup, "SourcePlaceholder"), sourceInput.Text.Length == 0);
-                Ui.Get<Button>(Popup, "TranslateButton").IsEnabled = !string.IsNullOrWhiteSpace(sourceInput.Text);
+                Ui.Visible(Ui.Get<TextBox>(Popup, "SourcePlaceholder"), sourceInput.Text.Length == 0);
+                Ui.Visible(Ui.Get<Button>(Popup, "TranslateButton"), !string.IsNullOrWhiteSpace(sourceInput.Text));
                 if (!fillingSource) { CancelCapture(); sourceRevision++; }
-                Ui.Get<TextBlock>(Popup, "SourceEditHint").Text = Current != null && sourceInput.Text != Current.Source ? "原文已修改 · Enter 翻译" : "Enter 翻译 · Shift+Enter 换行";
             };
             sourceInput.PreviewKeyDown += async (s, e) => {
                 if (e.Key == Key.Enter && (Keyboard.Modifiers & ModifierKeys.Shift) == 0) { e.Handled = true; await SubmitSourceAsync(); }
@@ -167,16 +166,15 @@ namespace Leaf
             }
             Ui.Visible(Ui.Get<RichTextBox>(Popup, "SourceText"), false);
             Ui.Visible(Ui.Get<Grid>(Popup, "SourceEditor"), true);
-            Ui.Visible(Ui.Get<Grid>(Popup, "SourceActions"), true);
             Ui.Visible(Ui.Get<Button>(Popup, "EditSourceButton"), false);
             Ui.Get<TextBlock>(Popup, "TranslationCaption").Text = Current != null ? "上次译文" : "译文";
             Ui.Visible(Ui.Get<Border>(Popup, "WordPanel"), false);
             Ui.Visible(Ui.Get<Border>(Popup, "ChatPanel"), false);
             Ui.Visible(Ui.Get<Border>(Popup, "InputPanel"), false);
             Busy();
-            Ui.Visible(Ui.Get<TextBlock>(Popup, "SourcePlaceholder"), input.Text.Length == 0);
-            Ui.Get<Button>(Popup, "TranslateButton").IsEnabled = !string.IsNullOrWhiteSpace(input.Text);
-            Ui.Get<TextBlock>(Popup, "SourceEditHint").Text = Current != null && input.Text != Current.Source ? "原文已修改 · Enter 翻译" : "Enter 翻译 · Shift+Enter 换行";
+            Ui.Visible(Ui.Get<TextBox>(Popup, "SourcePlaceholder"), input.Text.Length == 0);
+            // The submit arrow is the mouse entry point; empty input hides it instead of a tutorial line.
+            Ui.Visible(Ui.Get<Button>(Popup, "TranslateButton"), !string.IsNullOrWhiteSpace(input.Text));
             if (focus) { if (NativeEnabled) Popup.Activate(); input.Focus(); input.SelectAll(); }
         }
         // Brings the existing result back to the reading page without rebuilding it, so the
@@ -194,10 +192,10 @@ namespace Leaf
             ShowPopup();
             if (directInput) BeginSourceEdit(true);
         }
-        private void ShowSourceReadOnly()        {
+        private void ShowSourceReadOnly()
+        {
             Ui.Visible(Ui.Get<RichTextBox>(Popup, "SourceText"), true);
             Ui.Visible(Ui.Get<Grid>(Popup, "SourceEditor"), false);
-            Ui.Visible(Ui.Get<Grid>(Popup, "SourceActions"), false);
             Ui.Visible(Ui.Get<Button>(Popup, "EditSourceButton"), true);
             Ui.Get<TextBlock>(Popup, "TranslationCaption").Text = "译文";
             Ui.Visible(Ui.Get<Border>(Popup, "WordPanel"), selectedCard != null);
@@ -230,7 +228,6 @@ namespace Leaf
             SetTypography("WordTitle", Math.Max(14, 18 * scale), 0);
             SetTypography("WordMeaning", Math.Max(14, 16 * scale), 25 * scale);
             SetTypography("WordMeta", 12, 0);
-            SetTypography("EmptyHint", 12, 0);
             SetTypography("ErrorText", Math.Max(12, 13 * scale), 21 * scale);
             foreach (string name in new[] { "LearningSections", "ChatMessages" }) {
                 var children = Ui.Get<StackPanel>(Popup, name).Children.OfType<TextBlock>().ToArray();
@@ -258,7 +255,6 @@ namespace Leaf
             selectedWord = null; selectedCard = null; wordLinks.Clear(); ClearError();
             var source = Ui.Get<RichTextBox>(Popup, "SourceText");
             source.Document.Blocks.Clear();
-            Ui.Visible(Ui.Get<TextBlock>(Popup, "EmptyHint"), Current == null);
             Ui.Get<TextBlock>(Popup, "CopyStatus").Text = "";
             fillingSource = true; Ui.Get<TextBox>(Popup, "SourceInput").Text = Current == null ? "" : Current.Source; fillingSource = false;
             ShowSourceReadOnly();
@@ -275,8 +271,9 @@ namespace Leaf
             foreach (var piece in TextTools.Pieces(Current.Source)) {
                 if (!piece.IsWord) { paragraph.Inlines.Add(new Run(piece.Text)); continue; }
                 var captured = piece;
+                // Reachable and activatable from the keyboard, so Tab + Enter explains a word.
                 var link = new Hyperlink(new Run(piece.Text)) {
-                    Focusable = false, ToolTip = "解释这个词", Style = (Style)Application.Current.Resources[typeof(Hyperlink)]
+                    Focusable = true, ToolTip = "解释这个词", Style = (Style)Application.Current.Resources[typeof(Hyperlink)]
                 };
                 link.Click += async (s, e) => { e.Handled = true; await SelectWordAsync(captured, false); };
                 wordLinks[piece.Key] = link; paragraph.Inlines.Add(link);
