@@ -51,6 +51,8 @@ namespace Leaf
             Error(row, error); Write(row);
         }
         // One row per whitelisted stage plus one final row, all sharing the capture id.
+        // Each stage carries the duration of that stage alone, so the sum below is the real
+        // elapsed time of the capture instead of a multiple of it.
         // This never accepts selection text, window titles, control Name/Value, context,
         // conversation content or a content hash.
         public void Capture(CaptureTelemetry telemetry)

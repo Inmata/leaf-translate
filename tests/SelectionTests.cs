@@ -119,7 +119,104 @@ internal static class SelectionTests
         await Diagnostics(reader, probe);
         CopyStateMachine();
         await CopyWorker();
+        await BoundedTraversal();
         return count + assertions;
+    }
+
+    // The real bounded traversal runs against a scripted tree, so the limits it is supposed
+    // to apply are exercised by the production algorithm rather than by a fake probe.
+    private static async Task BoundedTraversal()
+    {
+        var target = new CaptureTarget { Window = new IntPtr(123), ProcessId = 456 };
+
+        // A window with far more siblings than the node budget may ever visit.
+        var wide = new ScriptedUiTree();
+        var wideRoot = wide.WindowRoot = new ScriptedUiNode { ControlTypeIdValue = 50033, Selection = null, WindowHandle = 123 };
+        for (int i = 0; i < 5000; i++) wideRoot.Add(new ScriptedUiNode { Selection = null });
+        wide.Focus = new ScriptedUiNode { ControlTypeIdValue = 50004, Selection = "" };
+        var wideResult = await new WindowsSelectionProbe(wide).ReadAutomationAsync(target, CancellationToken.None);
+        Check(wideResult.Status == CaptureStatus.Unavailable && wideResult.Reason == CaptureReason.AutomationBudget,
+            "A window too large for the budget is inconclusive instead of confirmed empty (was " + wideResult.Status + "/" + wideResult.Reason + ")");
+        Check(wide.TotalReads <= WindowsSelectionProbe.MaxNodes && wide.SiblingCalls <= WindowsSelectionProbe.MaxNodes,
+            "A sibling list is never walked past the node budget (reads " + wide.TotalReads + ", siblings " + wide.SiblingCalls + ")");
+
+        // Cancelling between two TreeWalker calls must stop the walk before it enumerates on.
+        var cancelTree = new ScriptedUiTree();
+        var cancelRoot = cancelTree.WindowRoot = new ScriptedUiNode { ControlTypeIdValue = 50033, Selection = null, WindowHandle = 123 };
+        for (int i = 0; i < 5000; i++) cancelRoot.Add(new ScriptedUiNode { Selection = null });
+        cancelTree.Focus = new ScriptedUiNode { ControlTypeIdValue = 50004, Selection = "" };
+        using (var cancelled = new CancellationTokenSource()) {
+            cancelTree.OnRead = node => { if (cancelTree.TotalReads >= 2) cancelled.Cancel(); };
+            var cancelResult = await new WindowsSelectionProbe(cancelTree).ReadAutomationAsync(target, cancelled.Token);
+            Check(cancelResult.Status == CaptureStatus.Cancelled && cancelTree.SiblingCalls == 0,
+                "Cancelling a walk stops it before it can enumerate the next sibling list");
+        }
+
+        // The walk stays inside the captured window: a same-process window above it is never read.
+        var neighbour = new ScriptedUiTree();
+        var otherDocument = new ScriptedUiNode { ControlTypeIdValue = WindowsSelectionProbe.DocumentTypeId, Selection = "another window's selection", WindowHandle = 999 };
+        var captured = neighbour.WindowRoot = new ScriptedUiNode { ControlTypeIdValue = 50033, Selection = null, WindowHandle = 123 };
+        otherDocument.Add(captured);
+        neighbour.Focus = captured.Add(new ScriptedUiNode { ControlTypeIdValue = 50004, Selection = "" });
+        var neighbourResult = await new WindowsSelectionProbe(neighbour).ReadAutomationAsync(target, CancellationToken.None);
+        Check(neighbourResult.Status != CaptureStatus.Text && neighbourResult.Text == "" && otherDocument.Reads == 0,
+            "Ancestors are never walked past the captured window into another window of the same process");
+
+        // The focused editor is empty, but the reading document in the same window is not.
+        var sameWindow = new ScriptedUiTree();
+        var sameRoot = sameWindow.WindowRoot = new ScriptedUiNode { ControlTypeIdValue = 50033, Selection = null, WindowHandle = 123 };
+        var document = sameRoot.Add(new ScriptedUiNode { ControlTypeIdValue = WindowsSelectionProbe.DocumentTypeId, Selection = "document selection" });
+        sameWindow.Focus = sameRoot.Add(new ScriptedUiNode { ControlTypeIdValue = 50004, Selection = "" });
+        var sameResult = await new WindowsSelectionProbe(sameWindow).ReadAutomationAsync(target, CancellationToken.None);
+        Check(sameResult.Status == CaptureStatus.Text && sameResult.Text == "document selection",
+            "An empty focused editor does not hide the selection of the window's document");
+        var sameStep = sameResult.Steps.First(s => s.Stage == "uia");
+        Check(sameStep.ControlTypeId == WindowsSelectionProbe.DocumentTypeId && sameStep.PatternSupported && sameStep.CandidateCount >= 2,
+            "The UIA stage names the control type that supplied the text");
+        Check(document.Reads == 1, "The document that answered was read exactly once");
+
+        // An empty document that is an ancestor of the focused editor answers the same way.
+        var ancestorTree = new ScriptedUiTree();
+        var ancestorDocument = ancestorTree.WindowRoot = new ScriptedUiNode { ControlTypeIdValue = WindowsSelectionProbe.DocumentTypeId, Selection = "ancestor selection", WindowHandle = 123 };
+        ancestorTree.Focus = ancestorDocument.Add(new ScriptedUiNode { ControlTypeIdValue = 50004, Selection = "" });
+        var ancestorResult = await new WindowsSelectionProbe(ancestorTree).ReadAutomationAsync(target, CancellationToken.None);
+        Check(ancestorResult.Status == CaptureStatus.Text && ancestorResult.Text == "ancestor selection",
+            "The focused element's own document is read before the window is scanned");
+
+        // A scan that ran out of budget must not conclude "nothing selected" from the one
+        // empty document it happened to reach first.
+        var cutTree = new ScriptedUiTree();
+        var cutRoot = cutTree.WindowRoot = new ScriptedUiNode { ControlTypeIdValue = 50033, Selection = null, WindowHandle = 123 };
+        cutRoot.Add(new ScriptedUiNode { ControlTypeIdValue = WindowsSelectionProbe.DocumentTypeId, Selection = "" });
+        for (int i = 0; i < 5000; i++) cutRoot.Add(new ScriptedUiNode { Selection = null });
+        cutTree.Focus = cutRoot;
+        var cutResult = await new WindowsSelectionProbe(cutTree).ReadAutomationAsync(target, CancellationToken.None);
+        Check(cutResult.Status == CaptureStatus.Unavailable && cutResult.Reason == CaptureReason.AutomationBudget,
+            "A truncated scan reports an inconclusive capture rather than an empty selection (was " + cutResult.Status + "/" + cutResult.Reason + ")");
+
+        // A small window that really was scanned completely still reports a confirmed empty.
+        var emptyTree = new ScriptedUiTree();
+        var emptyRoot = emptyTree.WindowRoot = new ScriptedUiNode { ControlTypeIdValue = 50033, Selection = null, WindowHandle = 123 };
+        emptyRoot.Add(new ScriptedUiNode { ControlTypeIdValue = WindowsSelectionProbe.DocumentTypeId, Selection = "" });
+        emptyTree.Focus = emptyRoot.Add(new ScriptedUiNode { ControlTypeIdValue = 50004, Selection = "" });
+        var emptyResult = await new WindowsSelectionProbe(emptyTree).ReadAutomationAsync(target, CancellationToken.None);
+        Check(emptyResult.Status == CaptureStatus.Empty && emptyResult.Reason == CaptureReason.EmptySelection &&
+            emptyResult.Steps.First(s => s.Stage == "uia").PatternSupported,
+            "A completely scanned window still reports a confirmed empty selection");
+
+        // Foreground metadata is a real comparison, not "some foreground window exists".
+        Check(!WindowsSelectionProbe.ForegroundIs(new CaptureTarget { Window = new IntPtr(123) }),
+            "A window that is not in front is never reported as the same foreground");
+        Check(!WindowsSelectionProbe.ForegroundIs(null) && !WindowsSelectionProbe.ForegroundIs(new CaptureTarget()),
+            "A missing capture target is never reported as the same foreground");
+        Check(WindowsSelectionProbe.ForegroundIs(new CaptureTarget { Window = Native.GetForegroundWindow() }),
+            "The window that really is in front is reported as the same foreground");
+        var movedTree = emptyTree;
+        movedTree.Foreground = false;
+        var movedResult = await new WindowsSelectionProbe(movedTree).ReadAutomationAsync(target, CancellationToken.None);
+        Check(!movedResult.Steps.First(s => s.Stage == "uia").ForegroundSame,
+            "A moved foreground is reported as a different one instead of merely non-zero");
+        movedTree.Foreground = true;
     }
 
     private static CaptureStep Step(SelectionCaptureResult result, string stage)
@@ -388,6 +485,67 @@ internal static class SelectionTests
         } finally {
             if (Directory.Exists(folder) && Path.GetFullPath(folder).StartsWith(Path.GetFullPath(Path.GetTempPath()), StringComparison.OrdinalIgnoreCase))
                 Directory.Delete(folder, true);
+        }
+    }
+}
+
+// A scripted UI Automation tree. Nodes are ordinary objects, so a traversal that is supposed
+// to stay bounded is what limits the work - not the fixture.
+internal sealed class ScriptedUiTree : IUiTree
+{
+    public ScriptedUiNode Focus, WindowRoot;
+    public bool Foreground = true;
+    public IUiNode Focused { get { return Focus; } }
+    public IUiNode Root(IntPtr window) { return WindowRoot; }
+    public bool IsForeground(CaptureTarget target) { return Foreground; }
+    public Action<ScriptedUiNode> OnRead
+    {
+        get { return ScriptedUiNode.OnRead; }
+        set { ScriptedUiNode.OnRead = value; }
+    }
+    public int TotalReads { get { return ScriptedUiNode.TotalReads; } }
+    public int SiblingCalls { get { return ScriptedUiNode.SiblingCalls; } }
+    public ScriptedUiTree()
+    {
+        ScriptedUiNode.TotalReads = 0; ScriptedUiNode.SiblingCalls = 0; ScriptedUiNode.OnRead = null;
+    }
+}
+
+internal sealed class ScriptedUiNode : IUiNode
+{
+    public static int TotalReads, SiblingCalls;
+    public static Action<ScriptedUiNode> OnRead;
+    public int ProcessIdValue = 456;
+    public int ControlTypeIdValue = 50004;
+    public long WindowHandle;
+    public string Selection = "";   // null means this node exposes no usable text pattern.
+    public readonly List<ScriptedUiNode> Children = new List<ScriptedUiNode>();
+    public ScriptedUiNode ParentNode;
+    public int Reads;
+    private int index = -1;
+
+    public ScriptedUiNode Add(ScriptedUiNode child)
+    {
+        child.ParentNode = this; child.index = Children.Count; Children.Add(child);
+        return child;
+    }
+    public int ProcessId { get { return ProcessIdValue; } }
+    public int ControlTypeId { get { return ControlTypeIdValue; } }
+    public long NativeWindowHandle { get { return WindowHandle; } }
+    public string ReadSelection()
+    {
+        Reads++; TotalReads++;
+        if (OnRead != null) OnRead(this);
+        return Selection;
+    }
+    public IUiNode Parent { get { return ParentNode; } }
+    public IUiNode FirstChild { get { return Children.Count == 0 ? null : Children[0]; } }
+    public IUiNode NextSibling
+    {
+        get {
+            SiblingCalls++;
+            ScriptedUiNode parent = ParentNode;
+            return parent != null && index + 1 < parent.Children.Count ? parent.Children[index + 1] : null;
         }
     }
 }
