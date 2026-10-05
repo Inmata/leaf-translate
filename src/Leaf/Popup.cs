@@ -1,0 +1,366 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Documents;
+using System.Windows.Input;
+using System.Windows.Media;
+using System.Windows.Threading;
+
+namespace Leaf
+{
+    public sealed partial class AppShell
+    {
+        private readonly Dictionary<string, Hyperlink> wordLinks = new Dictionary<string, Hyperlink>();
+        private void InitializePopup()
+        {
+            Popup.Closing += (s, e) => { if (!exiting) { e.Cancel = true; HidePopup(); } };
+            Ui.Click(Popup, "HideButton", HidePopup);
+            Ui.Click(Popup, "PinButton", () => {
+                pinned = !pinned;
+                var button = Ui.Get<Button>(Popup, "PinButton");
+                button.Foreground = pinned ? Ui.Brush("Accent") : Ui.Brush("Muted");
+                button.ToolTip = pinned ? "取消置顶，窗口外点击会收起" : "置顶并保持显示";
+            });
+            Ui.Get<Grid>(Popup, "DragBar").MouseLeftButtonDown += (s, e) => {
+                if (e.OriginalSource is Button || !NativeEnabled) return;
+                try {
+                    Popup.DragMove(); Native.Rect rect;
+                    if (Native.GetWindowRect(handle, out rect)) {
+                        var screen = System.Windows.Forms.Screen.FromPoint(new System.Drawing.Point(rect.Left, rect.Top));
+                        var settings = Json.Copy(Store.Settings);
+                        settings.Positions[screen.DeviceName] = new PointSetting { X = rect.Left, Y = rect.Top };
+                        Store.SaveSettings(settings);
+                    }
+                } catch (UserError error) { ShowError(error.Message, null); }
+                catch (InvalidOperationException) { }
+            };
+            Ui.Click(Popup, "CancelButton", () => {
+                CancelRequests(); ShowError("已停止。尚未完成的结果不会保存。", () => {
+                    if (Current != null) { var task = TranslateAsync(Current.Source, Current.SourceKind, true); }
+                });
+            });
+            Ui.Click(Popup, "RetryButton", () => { var action = retry; ClearError(); if (action != null) action(); });
+            Ui.Click(Popup, "SetupButton", OpenSettings);
+            Ui.Click(Popup, "CopyButton", () => {
+                if (Current == null || !Current.Completed) return;
+                try { Clipboard.SetText(Current.Translation); Ui.Get<Button>(Popup, "CopyButton").Content = "已复制"; }
+                catch { ShowError("暂时无法写入剪贴板，请稍候再试。", null); }
+            });
+            Ui.Click(Popup, "AskButton", () => {
+                if (Current == null || !Current.Completed) return;
+                Ui.Visible(Ui.Get<System.Windows.Controls.Border>(Popup, "InputPanel"), true);
+                Topic(); Ui.Get<TextBox>(Popup, "QuestionInput").Focus();
+            });
+            Ui.Click(Popup, "SendButton", async () => await SendChatAsync());
+            Ui.Get<TextBox>(Popup, "QuestionInput").KeyDown += async (s, e) => {
+                if (e.Key == Key.Enter && (Keyboard.Modifiers & ModifierKeys.Shift) == 0) {
+                    e.Handled = true; await SendChatAsync();
+                }
+            };
+            Ui.Get<TextBox>(Popup, "QuestionInput").TextChanged += (s, e) => {
+                if (Current != null) Current.Draft = Ui.Get<TextBox>(Popup, "QuestionInput").Text;
+            };
+            Ui.Click(Popup, "ExpandWordButton", async () => {
+                if (Current == null || !Current.Completed) return;
+                var piece = TextTools.Pieces(Current.Source).FirstOrDefault(p => p.IsWord);
+                if (piece != null) await SelectWordAsync(piece, false);
+            });
+            Ui.Click(Popup, "BackToSentence", () => {
+                wordGeneration.Next();
+                if (wordCancellation != null) wordCancellation.Cancel();
+                wordBusy = false; selectedWord = null; selectedCard = null;
+                HighlightSource(); DrawTranslation(""); Ui.Visible(Ui.Get<Border>(Popup, "WordPanel"), false); Topic(); Busy();
+            });
+            var contextMenu = new ContextMenu();
+            var explain = new MenuItem { Header = "解释选中片段" };
+            explain.Click += async (s, e) => {
+                var source = Ui.Get<RichTextBox>(Popup, "SourceText");
+                string text = source.Selection.Text.Trim();
+                if (Current == null || !Current.Completed || text.Length == 0) return;
+                string prefix = new TextRange(source.Document.ContentStart, source.Selection.Start).Text.Replace("\r\n", "\n");
+                string normalized = Current.Source.Replace("\r\n", "\n");
+                int guess = Math.Min(prefix.Length, normalized.Length);
+                string selected = text.Replace("\r\n", "\n");
+                int found = normalized.IndexOf(selected, Math.Max(0, guess - 1), StringComparison.Ordinal);
+                if (found < 0) return;
+                int originalOffset = 0, normalizedOffset = 0;
+                while (originalOffset < Current.Source.Length && normalizedOffset < found) {
+                    if (Current.Source[originalOffset] == '\r' && originalOffset + 1 < Current.Source.Length && Current.Source[originalOffset + 1] == '\n') originalOffset++;
+                    originalOffset++; normalizedOffset++;
+                }
+                int endOffset = originalOffset, selectedOffset = 0;
+                while (endOffset < Current.Source.Length && selectedOffset < selected.Length) {
+                    if (Current.Source[endOffset] == '\r' && endOffset + 1 < Current.Source.Length && Current.Source[endOffset + 1] == '\n') endOffset++;
+                    endOffset++; selectedOffset++;
+                }
+                await SelectWordAsync(new TextPiece { Start = originalOffset, Length = endOffset - originalOffset, Text = Current.Source.Substring(originalOffset, endOffset - originalOffset), IsWord = true }, false);
+            };
+            contextMenu.Items.Add(explain);
+            var copySource = new MenuItem { Header = "复制选中内容", Command = ApplicationCommands.Copy };
+            contextMenu.Items.Add(copySource);
+            Ui.Get<RichTextBox>(Popup, "SourceText").ContextMenu = contextMenu;
+            var translationMenu = new ContextMenu();
+            var regenerate = new MenuItem { Header = "重新生成" };
+            regenerate.Click += async (s, e) => { if (Current != null) await TranslateAsync(Current.Source, Current.SourceKind, true); };
+            translationMenu.Items.Add(regenerate);
+            Ui.Get<TextBlock>(Popup, "TranslationText").ContextMenu = translationMenu;
+            DisplayRecord();
+        }
+
+        private void DisplayRecord()
+        {
+            selectedWord = null; selectedCard = null; wordLinks.Clear(); ClearError();
+            var source = Ui.Get<RichTextBox>(Popup, "SourceText");
+            source.Document.Blocks.Clear();
+            Ui.Visible(Ui.Get<TextBlock>(Popup, "EmptyHint"), Current == null);
+            Ui.Get<Button>(Popup, "CopyButton").Content = "复制译文";
+            Ui.Get<Button>(Popup, "CopyButton").IsEnabled = Current != null && Current.Completed;
+            Ui.Visible(Ui.Get<Border>(Popup, "WordPanel"), false);
+            Ui.Visible(Ui.Get<Border>(Popup, "InputPanel"), false);
+            Ui.Visible(Ui.Get<Button>(Popup, "ExpandWordButton"), Current != null && Current.Completed && TextTools.IsWordInput(Current.Source));
+            if (Current == null) {
+                Ui.Get<TextBlock>(Popup, "TranslationText").Text = "准备好时，译文会出现在这里。";
+                Ui.Get<TextBox>(Popup, "QuestionInput").Clear();
+                Ui.Visible(Ui.Get<Border>(Popup, "ChatPanel"), false); Busy(); return;
+            }
+            Ui.Get<TextBlock>(Popup, "SourceBadge").Text = demo ? "演示内容 · 未调用 API" : "来自" + Current.SourceKind;
+            var paragraph = new Paragraph { Margin = new Thickness(0), LineHeight = 25 };
+            foreach (var piece in TextTools.Pieces(Current.Source)) {
+                if (!piece.IsWord) { paragraph.Inlines.Add(new Run(piece.Text)); continue; }
+                var captured = piece;
+                var link = new Hyperlink(new Run(piece.Text)) {
+                    Focusable = false, ToolTip = "解释这个词", Style = (Style)Application.Current.Resources[typeof(Hyperlink)]
+                };
+                link.Click += async (s, e) => { e.Handled = true; await SelectWordAsync(captured, false); };
+                wordLinks[piece.Key] = link; paragraph.Inlines.Add(link);
+            }
+            source.Document.Blocks.Add(paragraph);
+            DrawTranslation("");
+            Ui.Get<TextBox>(Popup, "QuestionInput").Text = Current.Draft ?? "";
+            DrawChat(); Topic(); Busy(); Ui.Get<ScrollViewer>(Popup, "BodyScroll").ScrollToTop();
+        }
+
+        private void HighlightSource()
+        {
+            foreach (var item in wordLinks) {
+                if (selectedWord != null && item.Key == selectedWord.Key) {
+                    item.Value.Background = Ui.Brush("WordHighlight"); item.Value.Foreground = Ui.Brush("Ink");
+                } else {
+                    item.Value.ClearValue(TextElement.BackgroundProperty); item.Value.ClearValue(TextElement.ForegroundProperty);
+                }
+            }
+        }
+
+        private void DrawTranslation(string target)
+        {
+            var block = Ui.Get<TextBlock>(Popup, "TranslationText"); block.Inlines.Clear();
+            string translation = Current == null ? "" : Current.Translation;
+            if (string.IsNullOrWhiteSpace(translation)) { block.Text = Current != null ? "正在翻译…" : "准备好时，译文会出现在这里。"; return; }
+            int index = string.IsNullOrEmpty(target) ? -1 : translation.IndexOf(target, StringComparison.Ordinal);
+            if (index < 0) { block.Text = translation; return; }
+            block.Inlines.Add(new Run(translation.Substring(0, index)));
+            block.Inlines.Add(new Run(target) { Background = Ui.Brush("WordHighlight") });
+            block.Inlines.Add(new Run(translation.Substring(index + target.Length)));
+        }
+        public void ShowError(string text, Action retryAction)
+        {
+            retry = retryAction;
+            Ui.Get<TextBlock>(Popup, "ErrorText").Text = text;
+            Ui.Visible(Ui.Get<Border>(Popup, "ErrorPanel"), true);
+            Ui.Visible(Ui.Get<Button>(Popup, "RetryButton"), retryAction != null);
+        }
+        private void ClearError() { retry = null; Ui.Visible(Ui.Get<Border>(Popup, "ErrorPanel"), false); }
+        private string KeyFor(ProviderProfile provider) { return NativeEnabled ? Credentials.Read(provider.Id) : "test-key"; }
+
+        public async Task TranslateAsync(string text, string sourceKind, bool force)
+        {
+            try { text = TextTools.ValidateInput(text); }
+            catch (UserError error) { ShowError(error.Message, null); ShowPopup(); return; }
+            if (demo) { demo = false; Current = null; }
+            string key = CacheKeys.For(text, Store.Settings);
+            if (!force && Current != null && Current.CacheKey == key && (Current.Completed || translating)) { ShowPopup(); return; }
+            if (!force) {
+                var cached = Store.Find(key);
+                if (cached != null) { OpenRecord(cached); return; }
+            }
+            CancelRequests();
+            Current = TranslationRecord.Create(text, sourceKind, Store.Settings);
+            var record = Current; long version = generation.Next();
+            mainCancellation = new CancellationTokenSource(); var cancellation = mainCancellation;
+            translating = true; DisplayRecord(); ShowPopup(); Busy();
+            long lastProgress = 0;
+            try {
+                record.Translation = await Client.CompleteAsync(record.Context.Provider, KeyFor(record.Context.Provider), Prompts.Translation(record), true, false,
+                    partial => {
+                        long now = DateTime.UtcNow.Ticks;
+                        if (now - lastProgress < TimeSpan.TicksPerMillisecond * 40) return;
+                        lastProgress = now;
+                        Popup.Dispatcher.BeginInvoke(new Action(() => {
+                            if (generation.IsCurrent(version) && !record.Completed && translating) { record.Translation = partial; DrawTranslation(""); }
+                        }));
+                    }, cancellation.Token);
+                if (!generation.IsCurrent(version)) return;
+                record.Completed = true; translating = false;
+                DrawTranslation(""); Busy();
+                Ui.Get<Button>(Popup, "CopyButton").IsEnabled = true;
+                Ui.Visible(Ui.Get<Button>(Popup, "ExpandWordButton"), TextTools.IsWordInput(record.Source));
+                SaveCurrent();
+            } catch (OperationCanceledException) { }
+            catch (Exception error) {
+                if (generation.IsCurrent(version)) {
+                    translating = false; Busy();
+                    ShowError(error is UserError ? error.Message : "翻译没有完成，请重试。", async () => await TranslateAsync(text, sourceKind, true));
+                }
+            } finally {
+                if (generation.IsCurrent(version)) { translating = false; Busy(); }
+                cancellation.Dispose();
+                if (ReferenceEquals(mainCancellation, cancellation)) mainCancellation = null;
+            }
+        }
+
+        public async Task SelectWordAsync(TextPiece word, bool force)
+        {
+            if (Current == null || !Current.Completed || word.Length > 300) return;
+            if (word.Start < 0 || word.Start + word.Length > Current.Source.Length || Current.Source.Substring(word.Start, word.Length) != word.Text) return;
+            if (selectedWord != null && selectedWord.Key == word.Key && wordBusy && !force) return;
+            if (wordCancellation != null) wordCancellation.Cancel();
+            long version = wordGeneration.Next();
+            selectedWord = word; selectedCard = null; HighlightSource(); DrawTranslation(""); Topic(); ClearError();
+            var record = Current;
+            // History keeps its language/learning context, while new calls use the current saved API.
+            var provider = Json.Copy(Store.Settings.Provider);
+            string cardKey = demo ? word.Key : CacheKeys.ForWord(record, word, provider);
+            Ui.Get<TextBlock>(Popup, "WordTitle").Text = word.Text;
+            Ui.Get<TextBlock>(Popup, "WordMeaning").Text = "正在查词…";
+            Ui.Get<TextBlock>(Popup, "WordMeta").Text = "";
+            Ui.Get<StackPanel>(Popup, "LearningSections").Children.Clear();
+            Ui.Visible(Ui.Get<Border>(Popup, "WordPanel"), true);
+            Ui.Visible(Ui.Get<Button>(Popup, "ExpandWordButton"), false);
+            WordCard cached;
+            if (!force && record.Cards.TryGetValue(cardKey, out cached)) { selectedCard = cached; wordBusy = false; DrawCard(cached); Busy(); return; }
+            if (demo) {
+                selectedCard = DemoCard(word.Text); record.Cards[word.Key] = selectedCard; DrawCard(selectedCard); return;
+            }
+            wordCancellation = new CancellationTokenSource(); var cancellation = wordCancellation;
+            wordBusy = true; Busy();
+            try {
+                string payload = await Client.CompleteAsync(provider, KeyFor(provider), Prompts.Word(record, word), false, true, null, cancellation.Token);
+                if (Current != record || !wordGeneration.IsCurrent(version)) return;
+                selectedCard = WordCard.Parse(payload, word.Text, record.Translation);
+                if (record.Cards.Count >= 16) record.Cards.Remove(record.Cards.Keys.First());
+                record.Cards[cardKey] = selectedCard;
+                wordBusy = false; DrawCard(selectedCard); SaveCurrent(); Busy();
+            } catch (OperationCanceledException) { }
+            catch (Exception error) {
+                if (Current == record && wordGeneration.IsCurrent(version)) {
+                    wordBusy = false; Busy(); Ui.Get<TextBlock>(Popup, "WordMeaning").Text = "词卡暂未完成。";
+                    ShowError(error is UserError ? error.Message : "查词没有完成，请重试。", async () => await SelectWordAsync(word, true));
+                }
+            } finally {
+                if (Current == record && wordGeneration.IsCurrent(version)) { wordBusy = false; Busy(); }
+                cancellation.Dispose();
+                if (ReferenceEquals(wordCancellation, cancellation)) wordCancellation = null;
+            }
+        }
+
+        private void DrawCard(WordCard card)
+        {
+            Ui.Get<TextBlock>(Popup, "WordMeaning").Text = card.meaning;
+            Ui.Get<TextBlock>(Popup, "WordMeta").Text = string.Join(" · ", new[] {
+                card.part_of_speech, string.IsNullOrEmpty(card.lemma) ? "" : "原形 " + card.lemma
+            }.Where(x => !string.IsNullOrWhiteSpace(x)));
+            var panel = Ui.Get<StackPanel>(Popup, "LearningSections"); panel.Children.Clear();
+            foreach (var section in card.sections) {
+                panel.Children.Add(new TextBlock { Text = section.title, FontSize = 11, Foreground = Ui.Brush("Muted"), Margin = new Thickness(0, 0, 0, 5) });
+                panel.Children.Add(new TextBlock { Text = section.content, FontSize = 13, LineHeight = 22, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 15) });
+            }
+            HighlightSource(); DrawTranslation(card.target_phrase); Topic();
+        }
+        private void Topic()
+        {
+            Ui.Get<TextBlock>(Popup, "TopicLabel").Text = selectedWord == null ? "关于这段原文" : "关于「" + selectedWord.Text + "」";
+        }
+        private void DrawChat()
+        {
+            var panel = Ui.Get<StackPanel>(Popup, "ChatMessages"); panel.Children.Clear();
+            Ui.Visible(Ui.Get<Border>(Popup, "ChatPanel"), Current != null && Current.Chat.Count > 0);
+            if (Current == null) return;
+            foreach (var turn in Current.Chat) AddChat(panel, turn.Role == "user" ? "你 · " + turn.Topic : "叶译", turn.Content, turn.Role == "user");
+        }
+        private TextBlock AddChat(StackPanel panel, string label, string content, bool user)
+        {
+            panel.Children.Add(new TextBlock { Text = label, FontSize = 11, Foreground = Ui.Brush("Muted"), Margin = new Thickness(0, 0, 0, 6) });
+            var text = new TextBlock { Text = content, FontSize = 13, LineHeight = 23, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 18) };
+            if (user) text.Foreground = Ui.Brush("Accent");
+            panel.Children.Add(text); return text;
+        }
+        public async Task SendChatAsync()
+        {
+            if (Current == null || !Current.Completed || chatBusy) return;
+            var input = Ui.Get<TextBox>(Popup, "QuestionInput");
+            string question = input.Text.Trim();
+            if (question.Length == 0) return;
+            if (demo) { ShowError("这是演示内容。配置 API 后可进行真实追问。", OpenSettings); return; }
+            string topic = selectedWord == null ? "原句" : selectedWord.Text;
+            var record = Current; var card = selectedCard;
+            var provider = Json.Copy(Store.Settings.Provider);
+            long version = generation.Next();
+            chatCancellation = new CancellationTokenSource(); var cancellation = chatCancellation;
+            chatBusy = true; Busy(); ClearError();
+            var panel = Ui.Get<StackPanel>(Popup, "ChatMessages");
+            Ui.Visible(Ui.Get<Border>(Popup, "ChatPanel"), true);
+            AddChat(panel, "你 · " + topic, question, true);
+            var response = AddChat(panel, "叶译", "正在回答…", false);
+            try {
+                string result = await Client.CompleteAsync(provider, KeyFor(provider), Prompts.Followup(record, topic, card, question), true, false,
+                    partial => Popup.Dispatcher.BeginInvoke(new Action(() => {
+                        if (Current == record && generation.IsCurrent(version)) { response.Text = partial; Ui.Get<ScrollViewer>(Popup, "BodyScroll").ScrollToBottom(); }
+                    })), cancellation.Token);
+                if (Current != record || !generation.IsCurrent(version)) return;
+                record.Chat.Add(new ChatTurn { Role = "user", Content = question, Topic = topic });
+                record.Chat.Add(new ChatTurn { Role = "assistant", Content = result, Topic = topic });
+                while (record.Chat.Count > 24) record.Chat.RemoveRange(0, 2);
+                if (input.Text.Trim() == question) input.Clear();
+                record.Draft = input.Text;
+                response.Text = result; chatBusy = false; DrawChat(); SaveCurrent(); Busy();
+                Ui.Get<ScrollViewer>(Popup, "BodyScroll").ScrollToBottom();
+            } catch (OperationCanceledException) { }
+            catch (Exception error) {
+                if (Current == record && generation.IsCurrent(version)) {
+                    chatBusy = false; DrawChat(); Busy();
+                    ShowError(error is UserError ? error.Message : "追问没有完成，请重试。", async () => await SendChatAsync());
+                }
+            } finally {
+                if (Current == record && generation.IsCurrent(version)) { chatBusy = false; Busy(); }
+                cancellation.Dispose();
+                if (ReferenceEquals(chatCancellation, cancellation)) chatCancellation = null;
+            }
+        }
+
+        public void PopulateDemo()
+        {
+            demo = true;
+            Current = TranslationRecord.Create("His combat prowess gives him an edge.", "剪贴板", Store.Settings);
+            Current.Translation = "他出色的战斗本领让他占据优势。"; Current.Completed = true;
+            var word = TextTools.Pieces(Current.Source).First(p => p.Text == "prowess");
+            Current.Cards[word.Key] = DemoCard("prowess");
+            DisplayRecord(); selectedWord = word; selectedCard = Current.Cards[word.Key];
+            Ui.Get<TextBlock>(Popup, "WordTitle").Text = word.Text;
+            Ui.Visible(Ui.Get<Border>(Popup, "WordPanel"), true); DrawCard(selectedCard);
+        }
+        private static WordCard DemoCard(string word)
+        {
+            return new WordCard {
+                word = word, lemma = word, part_of_speech = "名词", meaning = "高超的本领；非凡的技艺",
+                target_phrase = "本领", sections = new List<LearningSection> {
+                    new LearningSection { title = "近义词比较", content = "prowess 强调在某个领域展现出的高超能力。\npower 更广，可以指力量、权力或影响力。" },
+                    new LearningSection { title = "语境", content = "combat prowess 指战斗本领；an edge 在这里是「优势」，不是物体的边缘。" }
+                }
+            };
+        }
+    }
+}

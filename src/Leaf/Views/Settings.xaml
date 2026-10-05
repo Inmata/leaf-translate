@@ -1,0 +1,93 @@
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Title="叶译 · 设置" Width="620" Height="780" MinWidth="500" MinHeight="460" WindowStartupLocation="CenterScreen">
+  <Grid Margin="32,26,32,20">
+    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+    <StackPanel Margin="0,0,0,24">
+      <TextBlock Text="设置" FontSize="25" FontWeight="SemiBold"/>
+      <TextBlock Text="按你的习惯翻译。" Foreground="{StaticResource Muted}" FontSize="13" Margin="0,7,0,0"/>
+    </StackPanel>
+    <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" Padding="0,0,10,0">
+      <StackPanel>
+        <TextBlock Text="翻译服务" Style="{StaticResource SectionTitle}"/>
+        <Grid Margin="0,0,0,15">
+          <Grid.ColumnDefinitions><ColumnDefinition Width="145"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+          <StackPanel Margin="0,0,14,0"><TextBlock Text="服务商" Style="{StaticResource Caption}"/><ComboBox x:Name="ProviderCombo" DisplayMemberPath="Name"/></StackPanel>
+          <StackPanel Grid.Column="1"><TextBlock Text="模型" Style="{StaticResource Caption}"/><TextBox x:Name="ModelInput" MaxLength="100"/></StackPanel>
+        </Grid>
+        <TextBlock Text="API 密钥" Style="{StaticResource Caption}"/>
+        <PasswordBox x:Name="ApiKeyInput" MaxLength="1000"/>
+        <Grid Margin="0,7,0,18">
+          <TextBlock x:Name="KeyHint" Text="保存在 Windows 凭据管理器。" Foreground="{StaticResource Muted}" FontSize="11" VerticalAlignment="Center"/>
+          <Button x:Name="TestConnection" Content="测试连接" Style="{StaticResource GhostButton}" HorizontalAlignment="Right" Margin="0,0,-8,0"/>
+        </Grid>
+        <Expander Header="接口地址" Foreground="{StaticResource Muted}" FontSize="12" Margin="0,0,0,24">
+          <StackPanel Margin="0,12,0,0">
+            <TextBox x:Name="EndpointInput" MaxLength="300" FontSize="12"/>
+            <TextBlock Text="修改地址后需重新填密钥。测试连接会发送一次短请求。" FontSize="11" Margin="0,7,0,0" Foreground="{StaticResource Muted}"/>
+            <Button x:Name="DeleteKey" Content="删除此服务的已存密钥" Style="{StaticResource GhostButton}" HorizontalAlignment="Left" Margin="-8,8,0,0"/>
+          </StackPanel>
+        </Expander>
+        <TextBlock Text="阅读与翻译" Style="{StaticResource SectionTitle}"/>
+        <Grid Margin="0,0,0,16">
+          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+          <StackPanel Margin="0,0,14,0"><TextBlock Text="阅读场景" Style="{StaticResource Caption}"/><ComboBox x:Name="SceneCombo"/></StackPanel>
+          <StackPanel Grid.Column="1"><TextBlock Text="目标语言" Style="{StaticResource Caption}"/><TextBox x:Name="TargetInput" MaxLength="40"/></StackPanel>
+        </Grid>
+        <StackPanel x:Name="SceneDetailPanel" Margin="0,0,0,16" Visibility="Collapsed">
+          <TextBlock x:Name="SceneDetailLabel" Text="书名（选填）" Style="{StaticResource Caption}"/>
+          <TextBox x:Name="SceneDetailInput" MaxLength="500"/>
+        </StackPanel>
+        <StackPanel x:Name="GameTypePanel" Margin="0,0,0,16" Visibility="Collapsed">
+          <TextBlock Text="游戏文字类型" Style="{StaticResource Caption}"/><ComboBox x:Name="GameTypeCombo"/>
+        </StackPanel>
+        <TextBlock Text="翻译风格" Style="{StaticResource Caption}"/>
+        <ComboBox x:Name="StyleCombo" Margin="0,0,0,28"/>
+        <TextBlock Text="展开时，想学什么" Style="{StaticResource SectionTitle}" Margin="0,0,0,12"/>
+        <WrapPanel x:Name="LearningChoices" Margin="0,0,0,3"/>
+        <Expander Header="添加自己的学习偏好" FontSize="12" Foreground="{StaticResource Muted}" Margin="0,7,0,15">
+          <StackPanel Margin="0,13,0,0">
+            <TextBlock Text="名称" Style="{StaticResource Caption}"/><TextBox x:Name="CustomNameInput" MaxLength="32"/>
+            <TextBlock Text="希望怎样讲解" Style="{StaticResource Caption}" Margin="0,12,0,8"/>
+            <TextBox x:Name="CustomInstructionInput" AcceptsReturn="True" Height="68" TextWrapping="Wrap" MaxLength="600"/>
+            <Button x:Name="AddCustom" Content="添加为可选项" HorizontalAlignment="Left" Margin="0,10,0,0"/>
+          </StackPanel>
+        </Expander>
+        <Expander Header="偏好预设" FontSize="12" Foreground="{StaticResource Muted}" Margin="0,0,0,28">
+          <StackPanel Margin="0,13,0,0">
+            <Grid>
+              <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+              <ComboBox x:Name="PresetCombo" DisplayMemberPath="Name"/>
+              <Button x:Name="LoadPreset" Content="应用" Grid.Column="1" Margin="8,0,0,0"/>
+              <Button x:Name="RemovePreset" Content="删除" Grid.Column="2" Style="{StaticResource GhostButton}" Margin="4,0,0,0"/>
+            </Grid>
+            <TextBlock Text="把当前场景、语言和学习选项保存为一组。" FontSize="11" Foreground="{StaticResource Muted}" Margin="0,9,0,9"/>
+            <Grid>
+              <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+              <TextBox x:Name="PresetNameInput" MaxLength="32"/>
+              <Button x:Name="SavePreset" Content="保存预设" Grid.Column="1" Margin="8,0,0,0"/>
+            </Grid>
+          </StackPanel>
+        </Expander>
+        <TextBlock Text="使用习惯" Style="{StaticResource SectionTitle}"/>
+        <CheckBox x:Name="ClipboardModeCheck" Content="快捷键读取剪贴板"/>
+        <TextBlock Text="开启后先复制，再按快捷键；关闭后尝试读取选区。" Foreground="{StaticResource Muted}" FontSize="11" Margin="25,-5,0,17"/>
+        <TextBlock Text="全局快捷键" Style="{StaticResource Caption}"/>
+        <TextBox x:Name="ShortcutInput" MaxLength="50" Margin="0,0,0,16"/>
+        <TextBlock Text="浮窗显示位置" Style="{StaticResource Caption}"/>
+        <ComboBox x:Name="MonitorCombo" DisplayMemberPath="Name" Margin="0,0,0,17"/>
+        <CheckBox x:Name="AutoStartCheck" Content="开机启动"/>
+        <CheckBox x:Name="HistoryCheck" Content="保存本地历史"/>
+        <TextBlock Text="关闭保存会清空已有历史。回看不调用 API。" Foreground="{StaticResource Muted}" FontSize="11" Margin="25,-5,0,17"/>
+        <TextBlock Text="最多保留条数（20–1000）" Style="{StaticResource Caption}"/>
+        <TextBox x:Name="HistoryLimitInput" MaxLength="4" Margin="0,0,0,12"/>
+        <TextBlock Text="历史也有存储空间上限；超出后移除最旧记录。" Foreground="{StaticResource Muted}" FontSize="11" Margin="0,0,0,20"/>
+      </StackPanel>
+    </ScrollViewer>
+    <Border Grid.Row="2" BorderBrush="{StaticResource Line}" BorderThickness="0,1,0,0" Padding="0,16,0,0" Margin="0,14,0,0">
+      <Grid>
+        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+        <TextBlock x:Name="SettingsStatus" Foreground="{StaticResource Muted}" FontSize="12" VerticalAlignment="Center" Margin="0,0,15,0"/>
+        <Button x:Name="SaveSettingsButton" Grid.Column="1" Content="保存设置" Style="{StaticResource PrimaryButton}" Padding="22,10"/>
+      </Grid>
+    </Border>
+  </Grid>
+</Window>

@@ -1,0 +1,14 @@
+bin/
+obj/
+dist/
+work/
+*.user
+*.suo
+*.log
+.vs/
+.env
+.env.*
+settings.json
+history.json
+*.pfx
+*.key

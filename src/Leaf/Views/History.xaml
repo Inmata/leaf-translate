@@ -1,0 +1,44 @@
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Title="叶译 · 历史记录" Width="640" Height="660" MinWidth="460" MinHeight="380" WindowStartupLocation="CenterScreen">
+  <Grid Margin="28,24,28,20">
+    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+    <Grid Margin="0,0,0,20">
+      <TextBlock Text="历史记录" FontSize="25" FontWeight="SemiBold"/>
+      <TextBlock x:Name="HistoryCount" Text="最近 0 条" Foreground="{StaticResource Muted}" FontSize="12" HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,0,4"/>
+    </Grid>
+    <Grid Grid.Row="1" Margin="0,0,0,16">
+      <TextBox x:Name="HistorySearch" ToolTip="搜索原文或译文"/>
+      <TextBlock Text="搜索原文或译文" IsHitTestVisible="False" Foreground="{StaticResource Muted}" Margin="14,0" VerticalAlignment="Center" FontSize="13">
+        <TextBlock.Style>
+          <Style TargetType="TextBlock">
+            <Setter Property="Visibility" Value="Collapsed"/>
+            <Style.Triggers><DataTrigger Binding="{Binding Text, ElementName=HistorySearch}" Value=""><Setter Property="Visibility" Value="Visible"/></DataTrigger></Style.Triggers>
+          </Style>
+        </TextBlock.Style>
+      </TextBlock>
+    </Grid>
+    <Grid Grid.Row="2">
+      <ListBox x:Name="HistoryList" Background="Transparent" BorderThickness="0" ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.VerticalScrollBarVisibility="Auto" VirtualizingPanel.IsVirtualizing="True">
+        <ListBox.ItemTemplate>
+          <DataTemplate>
+            <Grid>
+              <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+              <TextBlock Text="{Binding Preview}" FontSize="16" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"/>
+              <TextBlock Grid.Row="1" Text="{Binding Translation}" Foreground="{StaticResource Muted}" FontSize="13" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" Margin="0,6,0,0"/>
+              <TextBlock Grid.Row="2" Text="{Binding TimeLabel}" FontSize="11" Foreground="#A0A89D" Margin="0,8,0,0"/>
+            </Grid>
+          </DataTemplate>
+        </ListBox.ItemTemplate>
+      </ListBox>
+      <TextBlock x:Name="HistoryEmpty" Text="查过的词句，会留在这里。" Foreground="{StaticResource Muted}" HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="14"/>
+    </Grid>
+    <Border Grid.Row="3" BorderBrush="{StaticResource Line}" BorderThickness="0,1,0,0" Padding="0,14,0,0" Margin="0,14,0,0">
+      <Grid>
+        <StackPanel Orientation="Horizontal">
+          <Button x:Name="DeleteHistory" Content="删除这条" Style="{StaticResource GhostButton}" Margin="-8,0,5,0"/>
+          <Button x:Name="ClearHistory" Content="清空" Style="{StaticResource GhostButton}"/>
+        </StackPanel>
+        <Button x:Name="OpenHistory" Content="查看与继续追问" Style="{StaticResource PrimaryButton}" HorizontalAlignment="Right"/>
+      </Grid>
+    </Border>
+  </Grid>
+</Window>

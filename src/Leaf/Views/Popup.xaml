@@ -1,0 +1,79 @@
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Title="Leaf · 叶译" Width="456" Height="620" MinWidth="360" MinHeight="380" WindowStyle="None" AllowsTransparency="True" Background="Transparent" ResizeMode="CanResizeWithGrip" ShowInTaskbar="False" ShowActivated="False" Topmost="True">
+  <Border Margin="8" Background="#FDFEFB" CornerRadius="16" BorderBrush="#E5E9E1" BorderThickness="1">
+    <Border.Effect><DropShadowEffect Color="#263B2A" BlurRadius="20" ShadowDepth="3" Opacity="0.12"/></Border.Effect>
+    <Grid Margin="22,12,22,16">
+      <Grid.RowDefinitions><RowDefinition Height="34"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+      <Grid x:Name="DragBar" Grid.Row="0" Background="Transparent">
+        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+          <Ellipse Width="5" Height="5" Fill="#8FA88C" Margin="0,0,8,0"/>
+          <TextBlock x:Name="SourceBadge" Text="来自剪贴板" FontSize="11" Foreground="{StaticResource Muted}"/>
+        </StackPanel>
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+          <Button x:Name="PinButton" Content="&#xE718;" Style="{StaticResource IconButton}" ToolTip="置顶并保持显示"/>
+          <Button x:Name="HideButton" Content="&#xE738;" Style="{StaticResource IconButton}" ToolTip="收起"/>
+        </StackPanel>
+      </Grid>
+      <Border Grid.Row="1" BorderBrush="{StaticResource Line}" BorderThickness="0,0,0,1" Padding="0,12,0,18">
+        <StackPanel>
+          <TextBlock Text="原文" Style="{StaticResource Caption}" FontSize="11"/>
+          <RichTextBox x:Name="SourceText" IsReadOnly="True" IsDocumentEnabled="True" BorderThickness="0" Background="Transparent" Padding="0" MaxHeight="100" FontSize="16" Foreground="#68756B" VerticalScrollBarVisibility="Auto">
+            <FlowDocument PagePadding="0" FontFamily="Segoe UI, Microsoft YaHei UI" FontSize="16"/>
+          </RichTextBox>
+          <TextBlock x:Name="EmptyHint" Text="选中或复制一段文字，然后按快捷键。" Foreground="{StaticResource Muted}" FontSize="15" Margin="0,2,0,0" Visibility="Collapsed"/>
+        </StackPanel>
+      </Border>
+      <ScrollViewer x:Name="BodyScroll" Grid.Row="2" VerticalScrollBarVisibility="Auto" Margin="0,18,0,0">
+        <StackPanel>
+          <TextBlock Text="译文" Style="{StaticResource Caption}" FontSize="11"/>
+          <TextBlock x:Name="TranslationText" FontSize="22" LineHeight="34" TextWrapping="Wrap" Text="准备好时，译文会出现在这里。" Margin="0,0,0,12"/>
+          <Grid x:Name="BusyPanel" Visibility="Collapsed" Margin="0,6,0,10">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+              <Ellipse Width="5" Height="5" Fill="{StaticResource Accent}" Margin="0,0,8,0"/>
+              <TextBlock x:Name="BusyLabel" Text="正在翻译…" FontSize="12" Foreground="{StaticResource Muted}"/>
+            </StackPanel>
+            <Button x:Name="CancelButton" Grid.Column="1" Content="停止" Style="{StaticResource GhostButton}"/>
+          </Grid>
+          <Border x:Name="ErrorPanel" Visibility="Collapsed" Background="#F8F0EB" CornerRadius="10" Padding="13" Margin="0,6,0,12">
+            <StackPanel>
+              <TextBlock x:Name="ErrorText" Foreground="#935E43" FontSize="13" LineHeight="21"/>
+              <StackPanel Orientation="Horizontal" Margin="0,7,0,0">
+                <Button x:Name="RetryButton" Content="重试" Style="{StaticResource GhostButton}" Foreground="#935E43"/>
+                <Button x:Name="SetupButton" Content="打开设置" Style="{StaticResource GhostButton}" Foreground="#935E43"/>
+              </StackPanel>
+            </StackPanel>
+          </Border>
+          <Button x:Name="ExpandWordButton" Content="展开学习" HorizontalAlignment="Left" Style="{StaticResource GhostButton}" Visibility="Collapsed"/>
+          <Border x:Name="WordPanel" Visibility="Collapsed" BorderBrush="{StaticResource Line}" BorderThickness="0,1,0,0" Padding="0,17,0,0" Margin="0,8,0,0">
+            <StackPanel>
+              <Grid Margin="0,0,0,9">
+                <TextBlock x:Name="WordTitle" Text="prowess" FontSize="16" FontWeight="SemiBold"/>
+                <Button x:Name="BackToSentence" Content="返回整句" Style="{StaticResource GhostButton}" HorizontalAlignment="Right" Margin="0,-4,-8,0"/>
+              </Grid>
+              <TextBlock x:Name="WordMeaning" Text="高超的本领；非凡的技艺" FontSize="17" LineHeight="26"/>
+              <TextBlock x:Name="WordMeta" Foreground="{StaticResource Muted}" FontSize="12" Margin="0,5,0,0"/>
+              <StackPanel x:Name="LearningSections" Margin="0,15,0,4"/>
+            </StackPanel>
+          </Border>
+          <Border x:Name="ChatPanel" Visibility="Collapsed" BorderBrush="{StaticResource Line}" BorderThickness="0,1,0,0" Padding="0,17,0,4" Margin="0,17,0,0">
+            <StackPanel x:Name="ChatMessages"/>
+          </Border>
+        </StackPanel>
+      </ScrollViewer>
+      <Grid Grid.Row="3" Margin="0,14,0,0">
+        <Button x:Name="CopyButton" Content="复制译文" Style="{StaticResource GhostButton}" HorizontalAlignment="Left" Margin="-8,0,0,0"/>
+        <Button x:Name="AskButton" Content="追问  ↗" Style="{StaticResource GhostButton}" HorizontalAlignment="Right" Foreground="{StaticResource Ink}" Margin="0,0,-8,0"/>
+      </Grid>
+      <Border x:Name="InputPanel" Grid.Row="4" Visibility="Collapsed" BorderBrush="{StaticResource Line}" BorderThickness="0,1,0,0" Margin="0,9,0,0" Padding="0,12,0,0">
+        <StackPanel>
+          <TextBlock x:Name="TopicLabel" Text="关于这段原文" FontSize="11" Foreground="{StaticResource Muted}" Margin="0,0,0,8"/>
+          <Grid>
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="44"/></Grid.ColumnDefinitions>
+            <TextBox x:Name="QuestionInput" AcceptsReturn="True" Height="66" MaxLength="1500" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" Padding="10,8"/>
+            <Button x:Name="SendButton" Grid.Column="1" Content="&#xE724;" FontFamily="Segoe MDL2 Assets" Style="{StaticResource PrimaryButton}" Margin="8,0,0,0" Padding="0" VerticalAlignment="Bottom" Height="36" ToolTip="发送（Enter；Shift+Enter 换行）"/>
+          </Grid>
+        </StackPanel>
+      </Border>
+    </Grid>
+  </Border>
+</Window>
