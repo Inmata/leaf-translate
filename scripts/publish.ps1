@@ -2,7 +2,7 @@ param([switch]$CheckOnly, [switch]$WithRelease)
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $repository = 'Inmata/leaf-translate'
-$allowedRoots = @('.github', '.gitignore', 'AGENTS.md', 'README.md', 'docs', 'scripts', 'src', 'tests')
+$allowedRoots = @('.github', '.gitignore', 'AGENTS.md', 'README.md', 'README.en.md', 'CONTRIBUTING.md', 'docs', 'scripts', 'src', 'tests')
 $publicFiles = @()
 foreach ($relativeRoot in $allowedRoots) {
     $sourcePath = Join-Path $projectRoot $relativeRoot

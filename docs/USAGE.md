@@ -1,5 +1,7 @@
 # 叶译首版使用说明
 
+**简体中文** · [English](USAGE.en.md) · [项目首页](../README.md) · [下载软件](https://github.com/Inmata/leaf-translate/releases/latest)
+
 ## 配置 API
 
 首次启动或托盘右键「设置」进入配置页。选择智谱、千问或 DeepSeek，填写模型与密钥。密钥输入框不会显示已有密钥；留空表示继续使用已保存的密钥。修改接口地址必须重新填写密钥。展开「接口地址」可以使用兼容的 HTTPS 服务；本机调试允许 localhost HTTP。
