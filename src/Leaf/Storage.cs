@@ -68,6 +68,7 @@ namespace Leaf
                                 settings = candidate;
                                 if (candidateRecords != null) records = candidateRecords;
                             }
+                            if (candidateRecords != null && !candidate.HistoryEnabled) DeleteHistoryBackups();
                         });
                 } finally {
                     if (batch.RecoveryBlocked) RecoveryBlocked = true;
@@ -137,6 +138,7 @@ namespace Leaf
                 var candidate = new List<TranslationRecord>();
                 CommitHistory(candidate);
                 records = candidate;
+                DeleteHistoryBackups();
             }
         }
 
@@ -175,7 +177,7 @@ namespace Leaf
                             Width = 456, Height = 620, Screen = position.Key };
                     }
                 }
-                parsed.Normalize();
+                parsed.NormalizeLoaded();
                 return parsed;
             } catch {
                 BackupFile(path, AtomicFileBatch.SettingsName);
@@ -192,7 +194,16 @@ namespace Leaf
                 if (files.Length(path) > ReadLimit) throw new InvalidDataException();
                 var parsed = Json.Read<List<TranslationRecord>>(files.Read(path));
                 if (parsed == null) return new List<TranslationRecord>();
-                return parsed.Where(r => r != null).ToList();
+                var kept = new List<TranslationRecord>(); int rejected = 0;
+                foreach (var record in parsed) {
+                    if (record != null && record.TryNormalizeLoaded()) kept.Add(record);
+                    else rejected++;
+                }
+                if (rejected > 0) {
+                    QuarantineFile(path, AtomicFileBatch.HistoryName);
+                    Warning = "部分历史记录已跳过，原始数据已保留一份隔离副本。";
+                }
+                return kept;
             } catch {
                 BackupFile(path, AtomicFileBatch.HistoryName);
                 Warning = "一份本地数据无法读取，已尽量保留备份。请检查设置。";
@@ -203,8 +214,27 @@ namespace Leaf
         private void BackupFile(string path, string name)
         {
             try {
-                files.Copy(path, Path.Combine(folder,
-                    name + ".corrupt-" + DateTime.UtcNow.ToString("yyyyMMddHHmmss")), false);
+                files.Copy(path, Path.Combine(folder, name + ".corrupt-" + Stamp()),
+                    false);
+            } catch { }
+        }
+        private void QuarantineFile(string path, string name)
+        {
+            try {
+                files.Copy(path, Path.Combine(folder, name + ".quarantine-" + Stamp()),
+                    false);
+            } catch { }
+        }
+        private static string Stamp()
+        {
+            return DateTime.UtcNow.ToString("yyyyMMddHHmmssfff") + "-" + Guid.NewGuid().ToString("N");
+        }
+        private void DeleteHistoryBackups()
+        {
+            try {
+                foreach (string pattern in new[] { "history.json.corrupt-*", "history.json.quarantine-*" })
+                    foreach (string path in Directory.GetFiles(folder, pattern))
+                        try { files.Delete(path); } catch { }
             } catch { }
         }
 

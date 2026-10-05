@@ -27,6 +27,7 @@ public static class StorageRegressionTests
         await TransactionRecovery(folder);
         await CredentialAndPatchScenarios(folder);
         await QueueScenarios();
+        await StructureScenarios(folder);
         return assertions - start;
     }
     // WPF-side checks; must run inside the ApplicationTests application/dispatcher.
@@ -329,6 +330,100 @@ public static class StorageRegressionTests
         await queue.FlushAsync();
         Check(order.SequenceEqual(new[] { 1, 2, 3, 4 }) && queue.FailureCount == 0,
             "Acknowledged failures let Flush succeed without losing later work");
+    }
+
+    private static Task StructureScenarios(string folder)
+    {
+        string nullProvider = NewDirectory(folder, "null-provider");
+        File.WriteAllText(Path.Combine(nullProvider, "settings.json"), "{\"Version\":3,\"Providers\":[null],\"HistoryEnabled\":true}");
+        var recoveredNull = new LocalStore(nullProvider);
+        Check(recoveredNull.Settings.Provider != null, "Providers:[null] cannot crash startup");
+        Check(Directory.GetFiles(nullProvider, "settings.json.corrupt-*").Length == 1,
+            "Semantically invalid settings are backed up before defaults");
+
+        string emptyId = NewDirectory(folder, "empty-provider");
+        File.WriteAllText(Path.Combine(emptyId, "settings.json"),
+            "{\"Version\":3,\"ProviderId\":\"\",\"Providers\":[{\"Id\":\"\",\"Name\":\"\",\"BaseUrl\":\"\",\"Model\":\"\"}]}");
+        var recoveredEmpty = new LocalStore(emptyId);
+        Check(Directory.GetFiles(emptyId, "settings.json.corrupt-*").Length == 1, "An empty provider id is treated as corruption");
+        Check(recoveredEmpty.Settings.Provider != null && recoveredEmpty.Settings.Provider.Id == "zhipu",
+            "Empty provider ids fall back to default settings");
+
+        string duplicate = NewDirectory(folder, "duplicate-provider");
+        File.WriteAllText(Path.Combine(duplicate, "settings.json"),
+            "{\"Version\":3,\"ProviderId\":\"x\",\"Providers\":[{\"Id\":\"x\",\"Name\":\"A\",\"BaseUrl\":\"\",\"Model\":\"\"},{\"Id\":\"x\",\"Name\":\"B\",\"BaseUrl\":\"\",\"Model\":\"\"}]}");
+        var recoveredDuplicate = new LocalStore(duplicate);
+        Check(Directory.GetFiles(duplicate, "settings.json.corrupt-*").Length == 1, "Duplicate provider ids are treated as corruption");
+        Check(recoveredDuplicate.Settings.Provider != null, "Duplicate provider ids fall back to default settings");
+
+        string nullLearning = NewDirectory(folder, "null-learning");
+        File.WriteAllText(Path.Combine(nullLearning, "settings.json"), "{\"Version\":3,\"Learning\":[null]}");
+        var recoveredLearning = new LocalStore(nullLearning);
+        Check(Directory.GetFiles(nullLearning, "settings.json.corrupt-*").Length == 1, "A null learning entry is treated as corruption");
+        Check(recoveredLearning.Settings.Learning.All(x => x != null), "Null learning entries never reach the settings UI");
+
+        string legalCustom = NewDirectory(folder, "unconfigured-custom");
+        File.WriteAllText(Path.Combine(legalCustom, "settings.json"),
+            "{\"Version\":3,\"ProviderId\":\"custom\",\"Providers\":[{\"Id\":\"custom\",\"Name\":\"自定义兼容服务\",\"BaseUrl\":\"\",\"Model\":\"\"}]}");
+        var legal = new LocalStore(legalCustom);
+        Check(legal.Settings.Provider.Id == "custom" && legal.Settings.Provider.BaseUrl == "",
+            "An unconfigured custom service is legal and not mistaken for corruption");
+        Check(Directory.GetFiles(legalCustom, "settings.json.corrupt-*").Length == 0,
+            "A legal unconfigured service creates no corruption backup");
+
+        string legacy = NewDirectory(folder, "legacy-fields");
+        File.WriteAllText(Path.Combine(legacy, "settings.json"), "{\"Version\":1}");
+        var migrated = new LocalStore(legacy);
+        Check(migrated.Settings.Provider != null && Directory.GetFiles(legacy, "settings.json.corrupt-*").Length == 0,
+            "Old settings with missing fields migrate instead of counting as corruption");
+
+        string historyDir = NewDirectory(folder, "history-structure");
+        var baseContext = FixtureSettings("fixture", "https://old-api.invalid/v1", "fixture-model");
+        var good = TranslationRecord.Create("good source", "剪贴板", baseContext);
+        good.Translation = "好"; good.Completed = true; good.CacheKey = null;
+        var badTicks = TranslationRecord.Create("bad ticks source", "剪贴板", baseContext);
+        badTicks.Translation = "坏"; badTicks.Completed = true; badTicks.UpdatedUtcTicks = 0;
+        var nullContext = TranslationRecord.Create("null context source", "剪贴板", baseContext);
+        nullContext.Translation = "无"; nullContext.Completed = true; nullContext.Context = null;
+        var filtered = TranslationRecord.Create("filtered source", "剪贴板", baseContext);
+        filtered.Translation = "过滤"; filtered.Completed = true;
+        filtered.Cards = new Dictionary<string, WordCard> {
+            { "0:4", new WordCard { word = "good", meaning = "好的", sections = new List<LearningSection> {
+                null, new LearningSection { title = "t", content = "c" } } } },
+            { "bad", null }
+        };
+        filtered.Chat = new List<ChatTurn> {
+            null, new ChatTurn { Role = "user", Content = "q" },
+            new ChatTurn { Role = "assistant", Content = "a" },
+            new ChatTurn { Role = "user", Content = "orphan" }
+        };
+        File.WriteAllText(Path.Combine(historyDir, "history.json"),
+            Json.Write(new object[] { good, badTicks, nullContext, filtered }));
+        var loaded = new LocalStore(historyDir);
+        var kept = loaded.History("");
+        Check(kept.Count == 2 && kept.All(r => r.Id == good.Id || r.Id == filtered.Id),
+            "Structurally broken history records are dropped individually");
+        Check(kept.First(r => r.Id == good.Id).CacheKey == CacheKeys.For("good source", baseContext),
+            "A missing cache key is recomputed from the record context");
+        Check(kept.First(r => r.Id == filtered.Id).Cards.Count == 1 &&
+            kept.First(r => r.Id == filtered.Id).Cards.Values.Single().sections.Count == 1,
+            "Null cards and null sections are filtered from loaded history");
+        Check(kept.First(r => r.Id == filtered.Id).Chat.Count == 2 &&
+            kept.First(r => r.Id == filtered.Id).Chat[0].Role == "user" &&
+            kept.First(r => r.Id == filtered.Id).Chat[1].Role == "assistant",
+            "Chat keeps only complete user/assistant pairs");
+        Check(Directory.GetFiles(historyDir, "history.json.quarantine-*").Length == 1,
+            "Partially bad history gets an isolated copy");
+        Check(loaded.Warning != null && !loaded.Warning.Contains("good source") && !loaded.Warning.Contains("bad ticks"),
+            "Recovery warnings never contain history content");
+        Check(File.ReadAllText(Path.Combine(historyDir, "history.json")).Contains("bad ticks source"),
+            "The original history file is preserved until the next successful save");
+        var normalizeTarget = Settings.Defaults(); normalizeTarget.NormalizeLoaded();
+        Check(normalizeTarget.Providers.Count > 0, "NormalizeLoaded accepts and normalizes default settings");
+        var tryRecord = TranslationRecord.Create("normalizable source", "剪贴板", Settings.Defaults());
+        tryRecord.Completed = true;
+        Check(tryRecord.TryNormalizeLoaded(), "A completed record with a valid context normalizes");
+        return Task.FromResult(0);
     }
 
     private static async Task UiRecoveryAndCredentials(string folder)

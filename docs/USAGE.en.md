@@ -86,7 +86,7 @@ Open **History (历史记录)** from the tray, search the source or translation,
 
 History keeps the latest 200 entries by default. Retention can be set to 20–1000, with an additional content-size limit. Delete or clear records as needed. **Disabling history saving clears existing records and prevents new ones.**
 
-Settings and history are stored in `%LOCALAPPDATA%\LeafTranslate`. If a file cannot be read, Leaf attempts to preserve a `.corrupt-...` backup. API keys are stored separately in Windows Credential Manager under `LeafTranslate/provider-id`.
+Settings and history are stored in `%LOCALAPPDATA%\LeafTranslate`. If a file cannot be read, Leaf attempts to preserve a `.corrupt-<time>-<random>` backup; individually broken records inside otherwise valid JSON are skipped and the original file is kept as a `.quarantine-<time>-<random>` copy. API keys are stored separately in Windows Credential Manager under an endpoint-bound target such as `LeafTranslate/provider-id/endpoint/<digest>`.
 
 Translation sends source text and context to the configured endpoint. Word lookups and follow-ups also send relevant translations, preferences, or recent conversation. Leaf has no project-operated relay server. Stopping a request ends the local wait but does not guarantee the provider will waive usage charges.
 

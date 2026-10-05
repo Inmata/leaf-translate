@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
@@ -129,6 +130,33 @@ namespace Leaf
             if (string.IsNullOrWhiteSpace(Shortcut)) Shortcut = defaults.Shortcut;
             HistoryLimit = Math.Max(20, Math.Min(1000, HistoryLimit == 0 ? 200 : HistoryLimit));
         }
+        // Validates the structure of freshly loaded JSON before Normalize runs. Throws for
+        // structurally invalid data so the caller can back it up and restore defaults.
+        public void NormalizeLoaded()
+        {
+            if (Providers != null && Providers.Count > 0) {
+                var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var provider in Providers) {
+                    if (provider == null) throw new InvalidDataException("A provider entry is null.");
+                    if (string.IsNullOrWhiteSpace(provider.Id)) throw new InvalidDataException("A provider id is empty.");
+                    if (!ids.Add(provider.Id)) throw new InvalidDataException("A provider id is duplicated.");
+                    provider.Name = provider.Name ?? "";
+                    provider.Model = provider.Model ?? "";
+                    provider.BaseUrl = provider.BaseUrl ?? "";
+                    if (!string.IsNullOrWhiteSpace(provider.BaseUrl)) LlmClient.Endpoint(provider.BaseUrl);
+                }
+            }
+            if (Learning != null) foreach (var option in Learning)
+                if (option == null) throw new InvalidDataException("A learning entry is null.");
+            if (Presets != null) foreach (var preset in Presets) {
+                if (preset == null) throw new InvalidDataException("A preset entry is null.");
+                if (preset.Learning == null) throw new InvalidDataException("A preset has no learning list.");
+                foreach (var option in preset.Learning)
+                    if (option == null) throw new InvalidDataException("A preset learning entry is null.");
+            }
+            Normalize();
+            if (Providers.All(p => p.Id != ProviderId)) ProviderId = Providers[0].Id;
+        }
     }
     public sealed class LearningSection
     {
@@ -200,6 +228,41 @@ namespace Leaf
                 UpdatedUtcTicks = DateTime.UtcNow.Ticks, Cards = new Dictionary<string, WordCard>(),
                 Chat = new List<ChatTurn>(), Draft = ""
             };
+        }
+        // Repairs one loaded record in place. Returns false for records that cannot be
+        // recovered individually; the caller keeps the rest and quarantines the original.
+        public bool TryNormalizeLoaded()
+        {
+            if (!Completed || string.IsNullOrWhiteSpace(Id) || string.IsNullOrWhiteSpace(Source) || Context == null ||
+                UpdatedUtcTicks <= 0 || UpdatedUtcTicks > DateTime.MaxValue.Ticks)
+                return false;
+            try { Context.NormalizeLoaded(); }
+            catch { return false; }
+            Cards = Cards ?? new Dictionary<string, WordCard>();
+            Chat = Chat ?? new List<ChatTurn>();
+            Draft = Draft ?? "";
+            SourceKind = SourceKind ?? "";
+            Translation = Translation ?? "";
+            var cards = new Dictionary<string, WordCard>();
+            foreach (var pair in Cards) {
+                var card = pair.Value;
+                if (card == null || string.IsNullOrWhiteSpace(card.meaning)) continue;
+                card.sections = (card.sections ?? new List<LearningSection>()).Where(s => s != null).ToList();
+                foreach (var section in card.sections) {
+                    section.title = section.title ?? ""; section.content = section.content ?? "";
+                }
+                cards[pair.Key] = card;
+            }
+            Cards = cards;
+            var chat = new List<ChatTurn>(); ChatTurn pending = null;
+            foreach (var turn in Chat) {
+                if (turn == null || (turn.Role != "user" && turn.Role != "assistant")) continue;
+                if (turn.Role == "user") { pending = turn; continue; }
+                if (pending != null) { chat.Add(pending); chat.Add(turn); pending = null; }
+            }
+            Chat = chat;
+            if (string.IsNullOrWhiteSpace(CacheKey)) CacheKey = CacheKeys.For(Source, Context);
+            return true;
         }
     }
     public static class CacheKeys
