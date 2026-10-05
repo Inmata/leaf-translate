@@ -9,7 +9,7 @@ if ([string]::IsNullOrWhiteSpace($Version)) { $Version = $versionInfo.SemVer }
 elseif ($Version -cne $versionInfo.SemVer) {
     throw ('Explicit version ' + $Version + ' does not match the version constant ' + $versionInfo.SemVer + '.')
 }
-if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid version.' }
+[void](Assert-LeafVersionString -Value $Version -Label 'The publish version')
 $repository = 'Inmata/leaf-translate'
 $manifest = Get-PublicSourceManifest -ProjectRoot $projectRoot
 Write-Output ('Public source: ' + $manifest.Files.Count + ' files; repository: ' + $repository)
