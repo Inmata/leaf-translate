@@ -55,6 +55,9 @@ namespace Leaf
         // True when files were restored but an applied external effect could not be rolled
         // back; the app must not claim the old configuration is fully active again.
         public bool ExternalRollbackPending { get; private set; }
+        // True when Recover(true) kept old evidence because the replacement commit must first
+        // become durable before the pending external state can count as resolved.
+        public bool ExternalResolutionRetained { get; private set; }
 
         public AtomicFileBatch(string directory, IStoreFiles files)
         {
@@ -87,6 +90,7 @@ namespace Leaf
                 throw new UserError("storage", "上一次保存尚未完全恢复，请重新应用配置后重试。");
             if (ExternalRollbackPending)
                 throw new UserError("storage", "上次保存的外部设置未能恢复，请重新应用配置后重试。");
+            bool inheritedExternal = ExternalResolutionRetained;
 
             string[] names = payloads.Keys.OrderBy(name => name == SettingsName ? 0 : 1).ToArray();
             foreach (string name in names) ValidateName(name);
@@ -94,8 +98,11 @@ namespace Leaf
                 Name = name, Existed = files.Exists(Path.Combine(directory, name))
             }).ToList();
             var staged = new Dictionary<string, string>();
-            bool markedExternalApplied = applyExternal != null;
+            // A reapply inherits the earlier external uncertainty: the new prepared marker must
+            // keep it recorded so a mid-commit failure still blocks requests after a restart.
+            bool markedExternalApplied = applyExternal != null || inheritedExternal;
             bool committed = false;
+            bool newMarkerWritten = false;
             try {
                 foreach (var item in targets) {
                     string target = Path.Combine(directory, item.Name);
@@ -108,6 +115,7 @@ namespace Leaf
                 // The prepared marker records whether external effects may have run. Writing it
                 // before applyExternal keeps recovery conservative if the process dies mid-apply.
                 WriteMarker("prepared", markedExternalApplied, targets);
+                newMarkerWritten = true;
                 if (applyExternal != null) applyExternal();
                 foreach (var item in targets) {
                     string target = Path.Combine(directory, item.Name);
@@ -124,14 +132,20 @@ namespace Leaf
                     if (error is UserError) throw;
                     throw new UserError("storage", "本地数据已保存，但清理未完成；下次启动会自动处理。", error);
                 }
-                // Without a prepared marker no target was replaced, so there is nothing to
-                // restore from a backup and missing staging backups must not block recovery.
-                bool markerWritten = files.Exists(Path.Combine(directory, MarkerName));
-                bool filesRestored = markerWritten ? TryRestore(targets) : true;
+                // Without a durable prepared marker no target was replaced, so there is nothing
+                // to restore from a backup and missing staging backups must not block recovery.
+                bool filesRestored = newMarkerWritten ? TryRestore(targets) : true;
                 bool externalRestored = !markedExternalApplied;
                 if (filesRestored && rollbackExternal != null) {
                     try { rollbackExternal(); externalRestored = true; }
                     catch { externalRestored = false; }
+                }
+                if (inheritedExternal) {
+                    // The earlier external uncertainty is unresolved until the reapply fully
+                    // commits; whichever marker is durable stays as restart evidence.
+                    if (!filesRestored) RecoveryBlocked = true;
+                    ExternalRollbackPending = true;
+                    throw new UserError("storage", "本地保存失败，且上次保存的外部设置尚未确认。请重新应用配置后重试。", error);
                 }
                 if (filesRestored && externalRestored) {
                     RemoveMarkerOrBlock(targets);
@@ -152,39 +166,54 @@ namespace Leaf
 
         public void Recover() { Recover(false); }
 
+        // resolveExternalPending is the explicit user reapply path. It keeps the old marker,
+        // backups and quarantine copies in place; only a replacement commit that becomes
+        // durable supersedes them, so a failed reapply cannot look like a clean store.
         public void Recover(bool resolveExternalPending)
         {
+            ExternalResolutionRetained = false;
             string marker = Path.Combine(directory, MarkerName);
             if (!files.Exists(marker)) { CleanupOrphans(); return; }
             TransactionState state = null;
             try { state = Json.Read<TransactionState>(files.Read(marker)); } catch { state = null; }
-            if (!IsValidState(state)) { RefuseOrQuarantine(resolveExternalPending); return; }
+            if (!IsValidState(state)) {
+                if (!resolveExternalPending) { RecoveryBlocked = true; return; }
+                // Preserve the unreadable bytes for inspection but keep the marker itself until
+                // the replacement commit is durable; deleting it now would erase the only
+                // durable hint that this store still needs an explicit recovery.
+                if (!QuarantineBadMarker()) { RecoveryBlocked = true; return; }
+                ExternalResolutionRetained = true;
+                return;
+            }
             if (state.State == "committed") { RemoveMarkerOrBlock(state.Targets); return; }
             if (!TryRestore(state.Targets)) { RecoveryBlocked = true; return; }
-            if (state.ExternalApplied && !resolveExternalPending) {
-                // The files are back to the old state, but applied credentials/hotkeys may not
-                // be. Keep the marker as durable evidence and require an explicit reapply.
-                ExternalRollbackPending = true;
+            if (state.ExternalApplied) {
+                if (!resolveExternalPending) {
+                    // The files are back to the old state, but applied credentials/hotkeys may not
+                    // be. Keep the marker as durable evidence and require an explicit reapply.
+                    ExternalRollbackPending = true;
+                    return;
+                }
+                ExternalResolutionRetained = true;
                 return;
             }
             RemoveMarkerOrBlock(state.Targets);
         }
 
-        private void RefuseOrQuarantine(bool resolveExternalPending)
+        private bool QuarantineBadMarker()
         {
-            if (!resolveExternalPending) { RecoveryBlocked = true; return; }
-            // An explicit settings reapply cannot use a structurally invalid marker; preserve
-            // its bytes for inspection, clear the staging area and let the user's new
-            // configuration replace it.
             string marker = Path.Combine(directory, MarkerName);
             try {
-                files.Copy(marker, marker + ".corrupt-" + DateTime.UtcNow.ToString("yyyyMMddHHmmssfff") +
-                    "-" + Guid.NewGuid().ToString("N"), false);
-            } catch {
-                RecoveryBlocked = true; return;
-            }
-            if (!TryDelete(marker)) { RecoveryBlocked = true; return; }
-            CleanupOrphans();
+                // Quarantine once; repeated reapply attempts must not multiply evidence copies.
+                if (Directory.GetFiles(directory, MarkerName + ".corrupt-*").Length > 0) return true;
+                files.Copy(marker, marker + ".corrupt-" + Stamp(), false);
+                return true;
+            } catch { return false; }
+        }
+
+        private static string Stamp()
+        {
+            return DateTime.UtcNow.ToString("yyyyMMddHHmmssfff") + "-" + Guid.NewGuid().ToString("N");
         }
 
         private static bool IsValidState(TransactionState state)

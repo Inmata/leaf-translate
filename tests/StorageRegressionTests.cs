@@ -34,6 +34,7 @@ public static class StorageRegressionTests
         await SettingsFailureScopeScenarios(folder);
         await FailedDisableBarrierScenarios(folder);
         await ClearBoundaryScenarios(folder);
+        await ExplicitRecoveryEvidenceScenarios(folder);
         await StructureScenarios(folder);
         await ByteLimitRegression(folder);
         await HistoryScenarios(folder);
@@ -658,6 +659,74 @@ public static class StorageRegressionTests
         var reloaded = new LocalStore(directory).History("");
         Check(reloaded.Count == 0,
             "A clear removes a record published by an in-flight save that passed its epoch check");
+    }
+
+    // An explicit reapply may clear a pending external rollback or an unreadable marker only
+    // when the replacement commit is durable; a failure at any earlier point keeps evidence.
+    private static async Task ExplicitRecoveryEvidenceScenarios(string folder)
+    {
+        var settings = FixtureSettings("fixture", "https://old-api.invalid/v1", "fixture-model");
+
+        string valid = NewDirectory(folder, "explicit-valid");
+        await SeedStore(valid, settings);
+        var prepared = Json.Copy(Settings.Defaults()); prepared.TargetLanguage = "日本語";
+        File.WriteAllText(Path.Combine(valid, "settings.json.new"), Json.Write(prepared));
+        File.Copy(Path.Combine(valid, "settings.json"), Path.Combine(valid, "settings.json.old"), true);
+        File.WriteAllText(Path.Combine(valid, AtomicFileBatch.MarkerName), Json.Write(new {
+            State = "prepared", ExternalApplied = true,
+            Targets = new[] { new { Name = "settings.json", Existed = true } }
+        }));
+        var validFiles = new FaultingFiles();
+        var validStore = new LocalStore(valid, validFiles);
+        Check(validStore.ExternalRollbackPending && validStore.NeedsExplicitRecovery,
+            "A recovered prepared transaction keeps its external rollback pending");
+        var next = Json.Copy(validStore.Settings); next.TargetLanguage = "日本語";
+        validFiles.MatchingCalls = 0; validFiles.FailOperation = "Write"; validFiles.FailAt = 1;
+        bool reapplyFailed = false;
+        try { await validStore.CommitSettingsAsync(SettingsUpdate.Full(next), null, null, true, null); }
+        catch (UserError) { reapplyFailed = true; }
+        Check(reapplyFailed && validStore.NeedsExplicitRecovery,
+            "A staging failure during the explicit reapply keeps the pending evidence");
+        Check(new LocalStore(valid).NeedsExplicitRecovery,
+            "A restart after the failed reapply still requires explicit recovery");
+        validFiles.MatchingCalls = 0; validFiles.FailOperation = "Replace"; validFiles.FailAt = 1;
+        reapplyFailed = false;
+        try { await validStore.CommitSettingsAsync(SettingsUpdate.Full(next), null, null, true, null); }
+        catch (UserError) { reapplyFailed = true; }
+        Check(reapplyFailed && validStore.NeedsExplicitRecovery,
+            "A marker-write failure during the explicit reapply keeps the pending evidence");
+        Check(new LocalStore(valid).NeedsExplicitRecovery,
+            "A restart after the failed marker write still requires explicit recovery");
+        validFiles.MatchingCalls = 0; validFiles.FailAt = -1;
+        await validStore.CommitSettingsAsync(SettingsUpdate.Full(next), null, null, true, null);
+        Check(!validStore.NeedsExplicitRecovery,
+            "A completed explicit reapply clears the retained evidence");
+        Check(!new LocalStore(valid).NeedsExplicitRecovery,
+            "A clean restart after the explicit reapply needs no recovery");
+
+        string corrupt = NewDirectory(folder, "explicit-corrupt");
+        await SeedStore(corrupt, settings);
+        File.WriteAllText(Path.Combine(corrupt, "settings.json.new"), "stale candidate");
+        File.WriteAllText(Path.Combine(corrupt, "settings.json.old"), "stale backup");
+        File.WriteAllText(Path.Combine(corrupt, AtomicFileBatch.MarkerName), "{not-json");
+        var corruptFiles = new FaultingFiles();
+        var corruptStore = new LocalStore(corrupt, corruptFiles);
+        Check(corruptStore.RecoveryBlocked && corruptStore.NeedsExplicitRecovery,
+            "An unreadable marker blocks until an explicit reapply");
+        var corruptNext = Json.Copy(corruptStore.Settings); corruptNext.TargetLanguage = "日本語";
+        corruptFiles.MatchingCalls = 0; corruptFiles.FailOperation = "Write"; corruptFiles.FailAt = 1;
+        reapplyFailed = false;
+        try { await corruptStore.CommitSettingsAsync(SettingsUpdate.Full(corruptNext), null, null, true, null); }
+        catch (UserError) { reapplyFailed = true; }
+        Check(reapplyFailed && corruptStore.NeedsExplicitRecovery,
+            "A failed explicit recovery of an unreadable marker still needs recovery");
+        Check(new LocalStore(corrupt).NeedsExplicitRecovery,
+            "A restart after the failed corrupt-marker recovery is still blocked");
+        corruptFiles.MatchingCalls = 0; corruptFiles.FailAt = -1;
+        await corruptStore.CommitSettingsAsync(SettingsUpdate.Full(corruptNext), null, null, true, null);
+        Check(!corruptStore.NeedsExplicitRecovery, "A completed explicit recovery replaces the unreadable marker");
+        Check(!new LocalStore(corrupt).NeedsExplicitRecovery,
+            "A restart after the explicit recovery is clean");
     }
 
     private static async Task CredentialAndPatchScenarios(string folder)
