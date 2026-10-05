@@ -53,7 +53,7 @@ Leaf is portable and runs in the system tray. Starting with Windows is optional 
 
 ### 1. Connect a translation provider
 
-Start with **API Key**, then choose an **API service (API 服务)**. Official presets supply the endpoint; choose **Custom compatible service (自定义兼容服务)** for another provider and enter its URL. Once the endpoint is known, Leaf automatically fetches models with loading, success, or failure feedback. Select a text-chat model or use **Refresh models (刷新模型)** to retry. Saving remembers the endpoint for future key changes.
+Choose an **API service (API 服务)**, then enter its **API Key**. Official presets supply the endpoint; choose **Custom compatible service (自定义兼容服务)** for another provider and enter its URL. Once the endpoint is known, Leaf automatically fetches models with loading, success, or failure feedback. Select a text-chat model or use **Refresh models (刷新模型)** to retry. Saving remembers the endpoint for future key changes.
 
 Keys do not reliably identify their service, so Leaf never probes multiple providers with the same key. Model ownership is shown when supplied by the catalog; otherwise it is not guessed. Leaf does not automatically choose a paid model.
 
@@ -67,7 +67,7 @@ Keys do not reliably identify their service, so Leaf never probes multiple provi
 
 The model field also accepts a manually entered ID. Some services do not expose a model catalog; use their documentation in that case. Default endpoints are provided and can be edited. A listed model may still need activation or quota in your account, so test the connection.
 
-Click **Test connection (测试连接)**, then **Save settings (保存设置)** after it succeeds. Testing sends one short request and may count toward API usage. Model availability, quotas, and pricing depend on your provider account.
+Click **Test connection (测试连接)**, then **Apply service configuration (应用服务配置)** after it succeeds. Testing sends one short request and may count toward API usage. Model availability, quotas, and pricing depend on your provider account.
 
 **Advanced options (高级选项)** are collapsed by default. Keep thinking mode on **Auto (自动适配)** for normal use. GLM-5.3 / Flash require thinking and default to light effort, with higher effort available. Leave the output token cap blank for automatic limits. It includes thinking and visible output; a small cap can truncate a response, and actual usage is billed by the provider.
 
@@ -94,9 +94,15 @@ For a phrase or text that is awkward to select word by word, drag across the ori
 
 Click **Ask (追问)** to reveal the input. Questions concern the selected word or passage; **Back to sentence (返回整句)** switches back to the passage. Press `Enter` to send or `Shift+Enter` for a new line.
 
+### 4. Type or edit your own text
+
+The shortcut immediately opens an editable popup when no text is captured. With existing text, click the pencil beside the source, or enable **Direct input on shortcut (快捷键唤起后直接输入)** to focus and select it automatically. `Enter` or **Translate ↵ (翻译 ↵)** submits a new conversation; `Shift+Enter` inserts a new line. Drag to select translated text, then use `Ctrl+C` or the copy context menu. There is no separate copy-translation button.
+
+[![Manual source editing and translation](docs/images/manual-input.png)](docs/images/manual-input.png)
+
 ## Screenshots
 
-These views are rendered from the v0.3.0 windows. Text, model choices, conversations, and history are demonstration content; no live API was called. The app UI is currently Chinese. Click an image to view it at full size.
+These views are rendered from the v0.4.0 windows. Text, model choices, conversations, and history are demonstration content; no live API was called. The app UI is currently Chinese. Click an image to view it at full size.
 
 <table>
   <tr>
@@ -169,7 +175,7 @@ If something is missing, expand **Add a learning preference (添加自己的学�
 >
 > **Instruction:** Explain a commonly confused usage and give one short example.
 
-The new option becomes selectable alongside the built-in options. **Preference presets (偏好预设)** save the target language, context, and learning options together. Click **Save settings (保存设置)** after editing.
+The new option becomes selectable alongside the built-in options. **Preference presets (偏好预设)** save the target language, context, and learning options together. Reading preferences and desktop habits apply automatically with feedback. Each context remembers its own title or detail.
 
 ## Shortcuts and window behavior
 
@@ -185,11 +191,11 @@ The new option becomes selectable alongside the built-in options. **Preference p
 
 The first popup appears on the right of the primary display. Move and resize it once to choose where it belongs; subsequent shortcuts and application restarts restore that position and size. Retry keeps a visible window in place. Drag it to another monitor directly; if that display is removed, Leaf keeps the window inside the available work area.
 
-Smaller windows use slightly smaller body text, line spacing, and padding, with readable minimum sizes. Buttons keep their size; long content remains scrollable. Click the shortcut field and press a combination to record it. `Esc` cancels; save settings to apply.
+Smaller windows use slightly smaller body text, line spacing, and padding, with readable minimum sizes. Buttons keep their size; long content remains scrollable. Click the shortcut field and press a combination to record it. `Esc` cancels; accepted combinations apply automatically.
 
 The visible popup has a taskbar entry; hiding it keeps the tray icon. You can set `Alt+Space` in settings. While Leaf runs, that combination translates instead of opening the Windows system menu. If another shortcut utility uses the same combination, change it in one of the apps.
 
-Opening the popup keeps focus in your current application. Click the popup to interact. Settings and **History (历史记录)** are available from the tray menu; check the taskbar's hidden-icons area if you cannot find Leaf.
+Opening preserves focus by default. Enable **Direct input on shortcut (快捷键唤起后直接输入)** to focus and select the source automatically. The gear beside the pin opens settings; **History (历史记录)** is available from the tray menu. Check the hidden-icons area if you cannot find Leaf.
 
 ## Data and privacy
 
@@ -213,7 +219,7 @@ Check that Leaf is running in the tray. If the shortcut is already in use, choos
 
 ### Why does my API request fail after entering a key?
 
-Check the provider, model, endpoint, and account quota. Leaf displays errors for network failures, timeouts, invalid keys, rate limits, and malformed responses. Save settings after a successful connection test. A blank key field with **Key saved (已保存密钥)** below it is normal: stored keys are not filled back into the input, and leaving it blank keeps the saved key. Changing the endpoint requires entering the key again.
+Check the provider, model, endpoint, and account quota. Leaf displays errors for network failures, timeouts, invalid keys, rate limits, and malformed responses. Apply service configuration after a successful connection test. A masked saved-key placeholder is normal: stored keys are not filled back into the input, and leaving it blank keeps the saved key. Changing the endpoint requires entering the key again. Applying keeps settings open; changes to a previously configured model apply automatically.
 
 ### Can I use another language or compatible service?
 
@@ -228,6 +234,8 @@ Hiding keeps the current conversation ready for the next lookup. Use **Exit (退
 This version is Windows-only and does not include OCR, screenshot translation, or exclusive-fullscreen game support. Word clicking depends on text segmentation; selecting a passage provides another way to look up text. Selection capture and multi-monitor behavior can vary across desktop environments. LLM translations, definitions, and etymology may be inaccurate; check important details.
 
 ## Documentation and feedback
+
+- [Measured resource usage](docs/PERFORMANCE-v0.4.0.md)
 
 - [English user guide](docs/USAGE.en.md)
 - [中文使用说明](docs/USAGE.md)

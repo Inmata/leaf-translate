@@ -2,6 +2,8 @@ using System;
 using System.Diagnostics;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Automation;
@@ -72,10 +74,16 @@ namespace Leaf
         [DllImport("user32.dll", SetLastError = true)] public static extern bool RegisterHotKey(IntPtr window, int id, uint modifiers, uint key);
         [DllImport("user32.dll")] public static extern bool UnregisterHotKey(IntPtr window, int id);
         [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+        [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr window, int command);
+        [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr window);
+        [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr window);
+        [DllImport("dwmapi.dll")] private static extern int DwmGetWindowAttribute(IntPtr window, uint attribute, out uint value, uint size);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(IntPtr window, StringBuilder name, int count);
         [DllImport("user32.dll")] public static extern bool GetCursorPos(out Point point);
         [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr window, out Rect rect);
         [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr window, IntPtr after, int x, int y, int width, int height, uint flags);
         [DllImport("user32.dll")] public static extern uint GetClipboardSequenceNumber();
+        [DllImport("user32.dll")] private static extern bool IsClipboardFormatAvailable(uint format);
         [DllImport("user32.dll")] private static extern short GetAsyncKeyState(int key);
         [DllImport("user32.dll", SetLastError = true)] private static extern uint SendInput(uint count, Input[] inputs, int size);
         [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(Point point);
@@ -90,6 +98,40 @@ namespace Leaf
         [DllImport("shcore.dll")] private static extern int GetDpiForMonitor(IntPtr monitor, int type, out uint x, out uint y);
         [DllImport("user32.dll")] private static extern IntPtr MonitorFromPoint(Point point, uint flags);
         private static int automationRunning;
+        private static int clipboardWriting;
+        private static int captureRunning;
+
+        public static bool IsDesktop(IntPtr window)
+        {
+            var name = new StringBuilder(128); GetClassName(window, name, name.Capacity);
+            string kind = name.ToString();
+            return window == IntPtr.Zero || kind == "Progman" || kind == "WorkerW" || kind == "Shell_TrayWnd" || kind == "Shell_SecondaryTrayWnd";
+        }
+        public static void Reveal(Window window)
+        {
+            IntPtr target = new WindowInteropHelper(window).EnsureHandle();
+            // Re-show even when WPF IsVisible is still true after Explorer's Show Desktop.
+            uint cloaked;
+            if (DwmGetWindowAttribute(target, 14, out cloaked, 4) == 0 && cloaked != 0) ShowWindow(target, 0);
+            ShowWindow(target, 4); // SW_SHOWNOACTIVATE restores without taking keyboard focus.
+            SetWindowPos(target, new IntPtr(-1), 0, 0, 0, 0, 0x0010 | 0x0001 | 0x0002 | 0x0040);
+        }
+        public static async Task CopyTextAsync(string text)
+        {
+            if (Interlocked.CompareExchange(ref clipboardWriting, 1, 0) != 0)
+                throw new UserError("clipboard", "剪贴板正在忙，请稍后再复制。");
+            var result = new TaskCompletionSource<bool>();
+            var worker = new Thread(() => {
+                try {
+                    var data = new Forms.DataObject(); data.SetText(text, Forms.TextDataFormat.UnicodeText);
+                    Forms.Clipboard.SetDataObject(data, true, 0, 0); result.TrySetResult(true);
+                } catch { result.TrySetResult(false); }
+                finally { Interlocked.Exchange(ref clipboardWriting, 0); }
+            }) { IsBackground = true, Name = "Leaf clipboard" };
+            worker.SetApartmentState(ApartmentState.STA); worker.Start();
+            if (await Task.WhenAny(result.Task, Task.Delay(800)) != result.Task || !await result.Task)
+                throw new UserError("clipboard", "暂时无法复制，剪贴板可能正被其他程序使用。请稍后再试。");
+        }
 
         public static string ClipboardText()
         {
@@ -99,30 +141,60 @@ namespace Leaf
             } catch (UserError) { throw; }
             catch { throw new UserError("clipboard", "剪贴板正被其他程序使用。请稍候再试。"); }
         }
+        public static Task<string> ClipboardTextAsync()
+        {
+            if (!IsClipboardFormatAvailable(13) && !IsClipboardFormatAvailable(1)) return Task.FromResult("");
+            return StaCapture(() => Forms.Clipboard.GetText(Forms.TextDataFormat.UnicodeText), false);
+        }
+        private sealed class CaptureResult { public string Text; public Exception Error; }
+        private static async Task<string> StaCapture(Func<string> action, bool selection)
+        {
+            if (Interlocked.CompareExchange(ref captureRunning, 1, 0) != 0)
+                throw new UserError("clipboard_busy", "取词尚未完成，可直接输入或稍后再试。");
+            var result = new TaskCompletionSource<CaptureResult>();
+            var worker = new Thread(() => {
+                var captured = new CaptureResult();
+                try { captured.Text = action(); } catch (Exception error) { captured.Error = error; }
+                finally { Interlocked.Exchange(ref captureRunning, 0); result.TrySetResult(captured); }
+            }) { IsBackground = true, Name = "Leaf capture" };
+            worker.SetApartmentState(ApartmentState.STA); worker.Start();
+            if (await Task.WhenAny(result.Task, Task.Delay(selection ? 1600 : 600)) != result.Task)
+                throw new UserError("clipboard_busy", "取词暂时不可用，可直接输入或稍后再试。");
+            var value = await result.Task;
+            if (value.Error != null) throw value.Error is UserError ? value.Error : new UserError("clipboard_busy", "剪贴板暂时不可用，可直接输入或稍后再试。");
+            return value.Text;
+        }
 
         public static async Task<string> SelectedTextAsync()
         {
             IntPtr foreground = GetForegroundWindow();
+            if (IsDesktop(foreground)) return "";
             var automation = System.Threading.Interlocked.CompareExchange(ref automationRunning, 1, 0) == 0 ? Task.Run(() => {
                 try {
                     var focused = AutomationElement.FocusedElement; object pattern;
                     if (focused != null && focused.TryGetCurrentPattern(TextPattern.Pattern, out pattern)) {
+                        uint process; GetWindowThreadProcessId(foreground, out process);
+                        if (focused.Current.ProcessId != process) return null;
                         return string.Join("", ((TextPattern)pattern).GetSelection().Select(range => range.GetText(6001)));
                     }
                 } catch { }
                 finally { System.Threading.Interlocked.Exchange(ref automationRunning, 0); }
-                return "";
-            }) : Task.FromResult("");
-            if (await Task.WhenAny(automation, Task.Delay(250)) == automation) {
+                return null;
+            }) : Task.FromResult<string>(null);
+            if (await Task.WhenAny(automation, Task.Delay(180)) == automation) {
                 string selected = await automation;
-                if (!string.IsNullOrWhiteSpace(selected) && GetForegroundWindow() == foreground)
-                    return TextTools.ValidateInput(selected);
+                if (selected != null && GetForegroundWindow() == foreground)
+                    return string.IsNullOrWhiteSpace(selected) ? "" : TextTools.ValidateInput(selected);
             }
-            for (int i = 0; i < 30 && ModifiersHeld(); i++) await Task.Delay(20);
+            return await StaCapture(() => CopySelection(foreground), true);
+        }
+        private static string CopySelection(IntPtr foreground)
+        {
+            for (int i = 0; i < 30 && ModifiersHeld(); i++) Thread.Sleep(20);
             if (ModifiersHeld() || GetForegroundWindow() != foreground)
                 throw new UserError("selection", "没有取得选中文字。请松开快捷键重试，或切到剪贴板模式。");
-            IDataObject previous;
-            try { previous = Clipboard.GetDataObject(); }
+            Forms.IDataObject previous;
+            try { previous = Forms.Clipboard.GetDataObject(); }
             catch { throw new UserError("clipboard", "剪贴板暂时不可用。请稍候再试。"); }
             uint before = GetClipboardSequenceNumber();
             var inputs = new[] { KeyInput(17, false), KeyInput(67, false), KeyInput(67, true), KeyInput(17, true) };
@@ -130,18 +202,18 @@ namespace Leaf
                 throw new UserError("selection", "当前程序不允许读取选区。请复制文字后使用剪贴板模式。");
             uint copied = before; string text = "";
             try {
-                for (int i = 0; i < 35; i++) {
-                    await Task.Delay(20);
+                for (int i = 0; i < 20; i++) {
+                    Thread.Sleep(20);
                     copied = GetClipboardSequenceNumber();
                     if (copied == before) continue;
                     if (GetForegroundWindow() != foreground) break;
-                    try { if (Clipboard.ContainsText()) text = Clipboard.GetText(); } catch { }
+                    try { if (IsClipboardFormatAvailable(13)) text = Forms.Clipboard.GetText(Forms.TextDataFormat.UnicodeText); } catch { }
                     if (!string.IsNullOrWhiteSpace(text)) break;
                 }
             } finally {
                 // Never overwrite a newer copy performed by the user or a different foreground app.
                 if (copied != before && GetClipboardSequenceNumber() == copied && GetForegroundWindow() == foreground) {
-                    try { if (previous == null) Clipboard.Clear(); else Clipboard.SetDataObject(previous, true); } catch { }
+                    try { if (previous == null) Forms.Clipboard.Clear(); else Forms.Clipboard.SetDataObject(previous, true, 0, 0); } catch { }
                 }
             }
             if (string.IsNullOrWhiteSpace(text)) throw new UserError("selection", "未取得选中文字。当前软件可能不支持选区复制，请试试剪贴板模式。");

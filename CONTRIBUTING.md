@@ -32,6 +32,8 @@ If a running app locks `bin\Leaf.exe`, use `-OutputDirectory bin/verification` w
 
 ## Repository layout
 
+For an isolated resource benchmark, run `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/performance.ps1`. It creates a native tray/WPF process with fresh data and a delayed local SSE fixture, briefly opens its own windows, and writes results under `work/performance/run-...`. It uses a separate Ctrl+Alt+Shift+F12 shortcut and never sends real API requests or reads user settings, history, or saved keys. Metrics include working set, private commit, CPU, threads, handles, GDI/USER objects, and process I/O. See [the measured report](docs/PERFORMANCE-v0.4.0.md) for methodology and limits.
+
 | Path | Purpose |
 | --- | --- |
 | `src/Leaf` | Application, native Windows integration, storage, and LLM client |
@@ -44,7 +46,7 @@ If a running app locks `bin\Leaf.exe`, use `-OutputDirectory bin/verification` w
 
 ## Changes and documentation
 
-Read `AGENTS.md` and `docs/PRODUCT.md` before changing behavior. Preserve focus on opening, explicit clipboard invocation, contextual word learning, and optional local history. Keys belong in Windows Credential Manager.
+Read `AGENTS.md` and `docs/PRODUCT.md` before changing behavior. Preserve focus by default on opening (activation requires the explicit direct-input preference), explicit clipboard invocation, contextual word learning, and optional local history. Keys belong in Windows Credential Manager.
 
 Keep Chinese and English documentation consistent. Screenshots should show the actual application with sample text and no credentials or private history; label demonstration content. Keep user-facing READMEs focused on download, setup, and usage.
 

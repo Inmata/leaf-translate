@@ -69,6 +69,7 @@ namespace Leaf
         public string Shortcut { get; set; }
         public string Scene { get; set; }
         public string SceneDetail { get; set; }
+        public Dictionary<string, string> SceneDetails { get; set; }
         public string GameTextType { get; set; }
         public string Style { get; set; }
         public List<LearningOption> Learning { get; set; }
@@ -76,16 +77,18 @@ namespace Leaf
         public bool HistoryEnabled { get; set; }
         public int HistoryLimit { get; set; }
         public bool AutoStart { get; set; }
+        public bool FocusInputOnShortcut { get; set; }
         public WindowPlacement Placement { get; set; }
         public ProviderProfile Provider { get { return Providers.FirstOrDefault(p => p.Id == ProviderId) ?? Providers[0]; } }
 
         public static Settings Defaults()
         {
             return new Settings {
-                Version = 2, ProviderId = "zhipu", TargetLanguage = "中文", ClipboardMode = false,
+                Version = 3, ProviderId = "zhipu", TargetLanguage = "中文", ClipboardMode = false,
                 Shortcut = "Ctrl+Alt+T", Scene = "通用", SceneDetail = "", GameTextType = "自动判断",
                 Style = "自然准确", HistoryEnabled = true, HistoryLimit = 200,
                 Presets = new List<LearningPreset>(),
+                SceneDetails = new Dictionary<string, string>(),
                 Providers = new List<ProviderProfile> {
                     new ProviderProfile { Id = "zhipu", Name = "智谱", BaseUrl = "https://open.bigmodel.cn/api/paas/v4", Model = "" },
                     new ProviderProfile { Id = "qwen", Name = "千问", BaseUrl = "https://dashscope.aliyuncs.com/compatible-mode/v1", Model = "" },
@@ -117,7 +120,9 @@ namespace Leaf
                     (p.BaseUrl ?? "").TrimEnd('/') == "https://api.deepseek.com");
                 if (oldDefault != null) oldDefault.Model = "deepseek-flash";
             }
-            Version = 2;
+            if (SceneDetails == null) SceneDetails = new Dictionary<string, string>();
+            if (!string.IsNullOrEmpty(Scene) && Scene != "通用" && !SceneDetails.ContainsKey(Scene)) SceneDetails[Scene] = SceneDetail ?? "";
+            Version = 3;
             if (string.IsNullOrWhiteSpace(TargetLanguage)) TargetLanguage = "中文";
             if (string.IsNullOrWhiteSpace(Scene)) Scene = "通用";
             if (string.IsNullOrWhiteSpace(Style)) Style = "自然准确";

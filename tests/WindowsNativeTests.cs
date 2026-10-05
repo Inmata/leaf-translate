@@ -16,6 +16,8 @@ using Leaf;
 
 public static class WindowsNativeTests
 {
+    [DllImport("user32.dll", SetLastError = true)] private static extern bool OpenClipboard(IntPtr owner);
+    [DllImport("user32.dll")] private static extern bool CloseClipboard();
     private static int assertions;
     private static void Check(bool condition, string label)
     {
@@ -62,11 +64,18 @@ public static class WindowsNativeTests
                 Check(store.Settings.ProviderId == chosenId, "The chosen provider is saved with its API key");
                 Check(Credentials.Read(chosenId) == sampleKey && Credentials.Read(settings.Providers[0].Id) == "", "Credential Manager retains a Unicode key under the selected provider");
                 Check(!File.ReadAllText(Path.Combine(folder, "settings.json")).Contains(sampleKey), "Native credential saving never writes the key into local settings");
+                Check(Ui.Get<PasswordBox>(window.Window, "ApiKeyInput").Password.Length == 0 &&
+                    Ui.Get<TextBlock>(window.Window, "KeyPlaceholder").Text.Contains("已保存"), "Applying a key clears the editor and shows a saved placeholder without inserting a fake password");
+                window.Window.Close();
                 window = new SettingsWindow(shell);
                 Check(((ProviderProfile)Ui.Get<ComboBox>(window.Window, "ProviderCombo").SelectedItem).Id == chosenId &&
                     Ui.Get<TextBlock>(window.Window, "KeyHint").Text.Contains("已保存密钥"), "Reopened settings recognize the saved key for the active provider");
                 Ui.Get<Button>(window.Window, "SaveSettingsButton").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
                 Check(Credentials.Read(chosenId) == sampleKey, "Saving with a blank password preserves the existing credential");
+                Ui.Get<ComboBox>(window.Window, "ModelInput").Text = "fixture-model-2"; await Task.Delay(650);
+                Check(store.Settings.Provider.Model == "fixture-model-2" && Credentials.Read(chosenId) == sampleKey,
+                    "Model auto-apply preserves the saved native key");
+                window.Window.Close();
 
                 window = new SettingsWindow(shell); window.Window.Show(); window.Window.Activate();
                 var recorder = Ui.Get<TextBox>(window.Window, "ShortcutInput");
@@ -109,6 +118,29 @@ public static class WindowsNativeTests
                 shell.ShowPopup();
                 Check(Native.GetForegroundWindow() == foreground, "Showing the taskbar-visible popup keeps focus in the previous application");
                 await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                shell.Popup.WindowState = WindowState.Minimized; await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                foreground = Native.GetForegroundWindow();
+                shell.ShowPopup(); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                Check(!Native.IsIconic(new WindowInteropHelper(shell.Popup).Handle) && Native.GetForegroundWindow() == foreground,
+                    "Re-showing a minimized popup restores it without stealing foreground focus");
+                IntPtr popupHandle = new WindowInteropHelper(shell.Popup).Handle;
+                Native.ShowWindow(popupHandle, 0); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                shell.ShowPopup(); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                Check(Native.IsWindowVisible(popupHandle) && Native.GetForegroundWindow() == foreground,
+                    "Re-showing restores an OS-hidden window even when WPF visibility is stale");
+                shell.BeginSourceEdit(true); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                Check(shell.Popup.IsActive && Ui.Get<TextBox>(shell.Popup, "SourceInput").IsKeyboardFocused &&
+                    Ui.Get<TextBox>(shell.Popup, "SourceInput").SelectedText == shell.Current.Source,
+                    "Explicit direct input focuses the editor and selects the original for replacement");
+                if (!OpenClipboard(new WindowInteropHelper(shell.Popup).Handle)) throw new Exception("Could not reserve clipboard for the isolated contention check.");
+                try {
+                    var copy = Native.CopyTextAsync("Clipboard contention fixture");
+                    bool responsive = false;
+                    shell.Popup.Dispatcher.BeginInvoke(new Action(() => responsive = true));
+                    bool failed = false; try { await copy; } catch (UserError error) { failed = error.Code == "clipboard"; }
+                    await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                    Check(failed && responsive, "Clipboard contention reports an error while the UI dispatcher remains responsive");
+                } finally { CloseClipboard(); }
                 shell.Popup.Width = 520; shell.Popup.Height = 570;
                 await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
                 Native.Rect original;

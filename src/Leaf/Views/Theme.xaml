@@ -74,7 +74,7 @@
     <Setter Property="Template">
       <Setter.Value>
         <ControlTemplate TargetType="TextBox">
-          <Border x:Name="Chrome" CornerRadius="8" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="1">
+          <Border x:Name="Chrome" CornerRadius="8" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}">
             <ScrollViewer x:Name="PART_ContentHost" Margin="{TemplateBinding Padding}"/>
           </Border>
           <ControlTemplate.Triggers>
@@ -176,7 +176,64 @@
       <Trigger Property="IsMouseOver" Value="True"><Setter Property="Background" Value="#F3ECD7"/><Setter Property="Foreground" Value="{StaticResource Ink}"/></Trigger>
     </Style.Triggers>
   </Style>
-  <Style TargetType="ScrollViewer"><Setter Property="HorizontalScrollBarVisibility" Value="Disabled"/></Style>
+  <Style TargetType="Expander">
+    <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Expander">
+      <StackPanel>
+        <ToggleButton x:Name="HeaderToggle" HorizontalAlignment="Left" Foreground="{TemplateBinding Foreground}" FontSize="{TemplateBinding FontSize}" IsChecked="{Binding IsExpanded, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay}">
+          <ToggleButton.Template><ControlTemplate TargetType="ToggleButton">
+            <StackPanel Orientation="Horizontal" Background="Transparent" Margin="0,3">
+              <Path x:Name="Chevron" Data="M 0 0 L 4 4 L 8 0" Stroke="{StaticResource Muted}" StrokeThickness="1.3" Width="8" Height="4" VerticalAlignment="Center" Margin="0,0,10,0" RenderTransformOrigin="0.5,0.5">
+                <Path.RenderTransform><RotateTransform Angle="-90"/></Path.RenderTransform>
+              </Path>
+              <ContentPresenter Content="{Binding Header, RelativeSource={RelativeSource AncestorType=Expander}}" RecognizesAccessKey="True"/>
+            </StackPanel>
+            <ControlTemplate.Triggers><Trigger Property="IsChecked" Value="True"><Setter TargetName="Chevron" Property="RenderTransform"><Setter.Value><RotateTransform Angle="0"/></Setter.Value></Setter></Trigger></ControlTemplate.Triggers>
+          </ControlTemplate></ToggleButton.Template>
+        </ToggleButton>
+        <ContentPresenter x:Name="ExpandContent" Content="{TemplateBinding Content}" Visibility="Collapsed"/>
+      </StackPanel>
+      <ControlTemplate.Triggers><Trigger Property="IsExpanded" Value="True"><Setter TargetName="ExpandContent" Property="Visibility" Value="Visible"/></Trigger></ControlTemplate.Triggers>
+    </ControlTemplate></Setter.Value></Setter>
+  </Style>
+  <Style x:Key="ScrollThumb" TargetType="Thumb">
+    <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Thumb">
+      <Border Background="#BAC5BF" CornerRadius="3" Margin="1,2"/>
+    </ControlTemplate></Setter.Value></Setter>
+  </Style>
+  <Style x:Key="ScrollTrackButton" TargetType="RepeatButton">
+    <Setter Property="Focusable" Value="False"/>
+    <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="RepeatButton"><Border Background="Transparent"/></ControlTemplate></Setter.Value></Setter>
+  </Style>
+  <Style TargetType="ScrollBar">
+    <Setter Property="Width" Value="7"/><Setter Property="MinHeight" Value="20"/>
+    <Setter Property="Background" Value="Transparent"/><Setter Property="Opacity" Value="0.55"/>
+    <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ScrollBar">
+      <Track x:Name="PART_Track" IsDirectionReversed="True" Orientation="{TemplateBinding Orientation}">
+        <Track.DecreaseRepeatButton><RepeatButton Style="{StaticResource ScrollTrackButton}" Command="ScrollBar.PageUpCommand"/></Track.DecreaseRepeatButton>
+        <Track.Thumb><Thumb Style="{StaticResource ScrollThumb}" MinHeight="24"/></Track.Thumb>
+        <Track.IncreaseRepeatButton><RepeatButton Style="{StaticResource ScrollTrackButton}" Command="ScrollBar.PageDownCommand"/></Track.IncreaseRepeatButton>
+      </Track>
+    </ControlTemplate></Setter.Value></Setter>
+    <Style.Triggers><Trigger Property="IsMouseOver" Value="True"><Setter Property="Opacity" Value="1"/></Trigger></Style.Triggers>
+  </Style>
+  <Style TargetType="ScrollViewer"><Setter Property="HorizontalScrollBarVisibility" Value="Disabled"/><Setter Property="PanningMode" Value="VerticalOnly"/></Style>
+  <Style x:Key="SlimScrollViewer" TargetType="ScrollViewer" BasedOn="{StaticResource {x:Type ScrollViewer}}">
+    <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ScrollViewer">
+      <Grid>
+        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="9"/></Grid.ColumnDefinitions>
+        <ScrollContentPresenter x:Name="PART_ScrollContentPresenter" Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}" CanContentScroll="{TemplateBinding CanContentScroll}" Margin="{TemplateBinding Padding}"/>
+        <ScrollBar x:Name="PART_VerticalScrollBar" Grid.Column="1" Orientation="Vertical" Width="7" Minimum="0" Maximum="{TemplateBinding ScrollableHeight}" ViewportSize="{TemplateBinding ViewportHeight}" Value="{Binding VerticalOffset, RelativeSource={RelativeSource TemplatedParent}, Mode=OneWay}" Visibility="{TemplateBinding ComputedVerticalScrollBarVisibility}"/>
+      </Grid>
+    </ControlTemplate></Setter.Value></Setter>
+  </Style>
+  <Style x:Key="ReadingText" TargetType="RichTextBox">
+    <Setter Property="IsUndoEnabled" Value="False"/>
+    <Setter Property="BorderThickness" Value="0"/><Setter Property="Background" Value="Transparent"/>
+    <Setter Property="Padding" Value="0"/><Setter Property="IsReadOnly" Value="True"/>
+    <Setter Property="IsDocumentEnabled" Value="True"/><Setter Property="VerticalScrollBarVisibility" Value="Disabled"/>
+    <Setter Property="HorizontalScrollBarVisibility" Value="Disabled"/><Setter Property="MinHeight" Value="0"/>
+    <Setter Property="SelectionBrush" Value="#BBD3C2"/>
+  </Style>
   <Style TargetType="ListBoxItem">
     <Setter Property="Padding" Value="16,14"/>
     <Setter Property="HorizontalContentAlignment" Value="Stretch"/>

@@ -15,12 +15,37 @@ namespace Leaf
     public sealed partial class AppShell
     {
         private readonly Dictionary<string, Hyperlink> wordLinks = new Dictionary<string, Hyperlink>();
+        private bool fillingSource;
+        private long sourceRevision;
+        private DispatcherTimer copyFeedback;
         private void InitializePopup()
         {
             Popup.Closing += (s, e) => { if (!exiting) { e.Cancel = true; HidePopup(); } };
             Popup.LocationChanged += (s, e) => QueuePlacementSave();
             Popup.SizeChanged += (s, e) => { UpdatePopupTypography(); QueuePlacementSave(); };
             Ui.Click(Popup, "HideButton", HidePopup);
+            Ui.Click(Popup, "SettingsButton", OpenSettings);
+            Ui.Click(Popup, "EditSourceButton", () => BeginSourceEdit(true));
+            Ui.Click(Popup, "TranslateButton", async () => await SubmitSourceAsync());
+            var sourceInput = Ui.Get<TextBox>(Popup, "SourceInput");
+            sourceInput.TextChanged += (s, e) => {
+                Ui.Visible(Ui.Get<TextBlock>(Popup, "SourcePlaceholder"), sourceInput.Text.Length == 0);
+                Ui.Get<Button>(Popup, "TranslateButton").IsEnabled = !string.IsNullOrWhiteSpace(sourceInput.Text);
+                if (!fillingSource) sourceRevision++;
+                Ui.Get<TextBlock>(Popup, "SourceEditHint").Text = Current != null && sourceInput.Text != Current.Source ? "原文已修改 · Enter 翻译" : "Enter 翻译 · Shift+Enter 换行";
+            };
+            sourceInput.PreviewKeyDown += async (s, e) => {
+                if (e.Key == Key.Enter && (Keyboard.Modifiers & ModifierKeys.Shift) == 0) { e.Handled = true; await SubmitSourceAsync(); }
+                else if (e.Key == Key.Escape && Current != null) { e.Handled = true; ShowSourceReadOnly(); }
+            };
+            Ui.Get<RichTextBox>(Popup, "SourceText").PreviewKeyDown += (s, e) => {
+                if (e.Key == Key.Back || e.Key == Key.Delete) {
+                    e.Handled = true; BeginSourceEdit(true); sourceInput.Clear();
+                }
+            };
+            Ui.Get<RichTextBox>(Popup, "SourceText").PreviewTextInput += (s, e) => {
+                e.Handled = true; BeginSourceEdit(true); sourceInput.Text = e.Text; sourceInput.CaretIndex = sourceInput.Text.Length;
+            };
             Ui.Click(Popup, "PinButton", () => {
                 pinned = !pinned;
                 var button = Ui.Get<Button>(Popup, "PinButton");
@@ -28,7 +53,7 @@ namespace Leaf
                 button.ToolTip = pinned ? "取消置顶，窗口外点击会收起" : "置顶并保持显示";
             });
             Ui.Get<Grid>(Popup, "DragBar").MouseLeftButtonDown += (s, e) => {
-                if (e.OriginalSource is Button || !NativeEnabled) return;
+                if (!NativeEnabled || (e.OriginalSource is DependencyObject && HasButtonParent((DependencyObject)e.OriginalSource))) return;
                 try {
                     Popup.DragMove(); RememberPlacement();
                 } catch (UserError error) { ShowError(error.Message, null); }
@@ -41,16 +66,12 @@ namespace Leaf
             });
             Ui.Click(Popup, "RetryButton", () => { var action = retry; ClearError(); if (action != null) action(); });
             Ui.Click(Popup, "SetupButton", OpenSettings);
-            Ui.Click(Popup, "CopyButton", () => {
-                if (Current == null || !Current.Completed) return;
-                try { Clipboard.SetText(Current.Translation); Ui.Get<Button>(Popup, "CopyButton").Content = "已复制"; }
-                catch { ShowError("暂时无法写入剪贴板，请稍候再试。", null); }
-            });
             Ui.Click(Popup, "AskButton", () => {
                 if (Current == null || !Current.Completed) return;
                 Ui.Visible(Ui.Get<System.Windows.Controls.Border>(Popup, "InputPanel"), true);
-                Topic(); Ui.Get<TextBox>(Popup, "QuestionInput").Focus();
+                Topic(); Busy(); Ui.Get<TextBox>(Popup, "QuestionInput").Focus();
             });
+            Ui.Click(Popup, "CloseQuestionButton", () => { Ui.Visible(Ui.Get<Border>(Popup, "InputPanel"), false); Busy(); });
             Ui.Click(Popup, "SendButton", async () => await SendChatAsync());
             Ui.Get<TextBox>(Popup, "QuestionInput").KeyDown += async (s, e) => {
                 if (e.Key == Key.Enter && (Keyboard.Modifiers & ModifierKeys.Shift) == 0) {
@@ -100,12 +121,79 @@ namespace Leaf
             contextMenu.Items.Add(copySource);
             Ui.Get<RichTextBox>(Popup, "SourceText").ContextMenu = contextMenu;
             var translationMenu = new ContextMenu();
+            translationMenu.Items.Add(new MenuItem { Header = "复制", Command = ApplicationCommands.Copy });
+            translationMenu.Items.Add(new MenuItem { Header = "全选", Command = ApplicationCommands.SelectAll });
             var regenerate = new MenuItem { Header = "重新生成" };
             regenerate.Click += async (s, e) => { if (Current != null) await TranslateAsync(Current.Source, Current.SourceKind, true); };
             translationMenu.Items.Add(regenerate);
-            Ui.Get<TextBlock>(Popup, "TranslationText").ContextMenu = translationMenu;
+            Ui.Get<RichTextBox>(Popup, "TranslationText").ContextMenu = translationMenu;
+            foreach (string name in new[] { "SourceText", "TranslationText" }) {
+                var reading = Ui.Get<RichTextBox>(Popup, name);
+                reading.CommandBindings.Add(new CommandBinding(ApplicationCommands.Copy,
+                    async (s, e) => { e.Handled = true; await CopySelectionAsync(reading.Selection.Text); },
+                    (s, e) => { e.CanExecute = !reading.Selection.IsEmpty; e.Handled = true; }));
+            }
             DisplayRecord();
             UpdatePopupTypography();
+        }
+        private static bool HasButtonParent(DependencyObject item)
+        {
+            while (item != null) {
+                if (item is Button) return true;
+                item = item is Visual ? VisualTreeHelper.GetParent(item) : LogicalTreeHelper.GetParent(item);
+            }
+            return false;
+        }
+        private async Task CopySelectionAsync(string text)
+        {
+            try {
+                if (NativeEnabled) await Native.CopyTextAsync(text);
+                Ui.Get<TextBlock>(Popup, "CopyStatus").Text = "已复制";
+                if (copyFeedback == null) {
+                    copyFeedback = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
+                    copyFeedback.Tick += (s, e) => { copyFeedback.Stop(); Ui.Get<TextBlock>(Popup, "CopyStatus").Text = ""; };
+                }
+                copyFeedback.Stop(); copyFeedback.Start();
+            } catch (Exception error) { Log.Event("copy_failed", error); ShowError(error is UserError ? error.Message : "复制失败，请稍后再试。", null); }
+        }
+        public void BeginSourceEdit(bool focus)
+        {
+            if (focus) sourceRevision++;
+            var input = Ui.Get<TextBox>(Popup, "SourceInput");
+            if (Ui.Get<Grid>(Popup, "SourceEditor").Visibility != Visibility.Visible) {
+                fillingSource = true; input.Text = Current == null ? "" : Current.Source; fillingSource = false;
+            }
+            Ui.Visible(Ui.Get<RichTextBox>(Popup, "SourceText"), false);
+            Ui.Visible(Ui.Get<Grid>(Popup, "SourceEditor"), true);
+            Ui.Visible(Ui.Get<Grid>(Popup, "SourceActions"), true);
+            Ui.Visible(Ui.Get<Button>(Popup, "EditSourceButton"), false);
+            Ui.Get<TextBlock>(Popup, "TranslationCaption").Text = Current != null ? "上次译文" : "译文";
+            Ui.Visible(Ui.Get<Border>(Popup, "WordPanel"), false);
+            Ui.Visible(Ui.Get<Border>(Popup, "ChatPanel"), false);
+            Ui.Visible(Ui.Get<Border>(Popup, "InputPanel"), false);
+            Busy();
+            Ui.Visible(Ui.Get<TextBlock>(Popup, "SourcePlaceholder"), input.Text.Length == 0);
+            Ui.Get<Button>(Popup, "TranslateButton").IsEnabled = !string.IsNullOrWhiteSpace(input.Text);
+            Ui.Get<TextBlock>(Popup, "SourceEditHint").Text = Current != null && input.Text != Current.Source ? "原文已修改 · Enter 翻译" : "Enter 翻译 · Shift+Enter 换行";
+            if (focus) { if (NativeEnabled) Popup.Activate(); input.Focus(); input.SelectAll(); }
+        }
+        private void ShowSourceReadOnly()
+        {
+            Ui.Visible(Ui.Get<RichTextBox>(Popup, "SourceText"), true);
+            Ui.Visible(Ui.Get<Grid>(Popup, "SourceEditor"), false);
+            Ui.Visible(Ui.Get<Grid>(Popup, "SourceActions"), false);
+            Ui.Visible(Ui.Get<Button>(Popup, "EditSourceButton"), true);
+            Ui.Get<TextBlock>(Popup, "TranslationCaption").Text = "译文";
+            Ui.Visible(Ui.Get<Border>(Popup, "WordPanel"), selectedCard != null);
+            Ui.Visible(Ui.Get<Border>(Popup, "ChatPanel"), Current != null && Current.Chat.Count > 0);
+            Busy();
+        }
+        public async Task SubmitSourceAsync()
+        {
+            sourceRevision++;
+            string text = Ui.Get<TextBox>(Popup, "SourceInput").Text;
+            if (string.IsNullOrWhiteSpace(text)) return;
+            await TranslateAsync(text, "输入", true);
         }
         public static double TypographyScale(double width, double height)
         {
@@ -118,18 +206,21 @@ namespace Leaf
             source.FontSize = source.Document.FontSize = 16 * scale;
             source.MaxHeight = 100 * scale;
             foreach (var paragraph in source.Document.Blocks.OfType<Paragraph>()) paragraph.LineHeight = 25 * scale;
-            SetTypography("TranslationText", 22 * scale, 34 * scale);
-            SetTypography("WordTitle", 16 * scale, 0);
-            SetTypography("WordMeaning", 17 * scale, 26 * scale);
+            var translation = Ui.Get<RichTextBox>(Popup, "TranslationText");
+            translation.FontSize = translation.Document.FontSize = Math.Max(14, 17 * scale);
+            foreach (var paragraph in translation.Document.Blocks.OfType<Paragraph>()) paragraph.LineHeight = 27 * scale;
+            Ui.Get<TextBox>(Popup, "SourceInput").FontSize = Math.Max(14, 16 * scale);
+            SetTypography("WordTitle", Math.Max(14, 17 * scale), 0);
+            SetTypography("WordMeaning", Math.Max(14, 16 * scale), 25 * scale);
             SetTypography("WordMeta", 12, 0);
-            SetTypography("EmptyHint", Math.Max(13, 15 * scale), 0);
+            SetTypography("EmptyHint", 12, 0);
             SetTypography("ErrorText", Math.Max(12, 13 * scale), 21 * scale);
             foreach (string name in new[] { "LearningSections", "ChatMessages" }) {
                 var children = Ui.Get<StackPanel>(Popup, name).Children.OfType<TextBlock>().ToArray();
                 for (int i = 0; i < children.Length; i++) {
                     bool label = i % 2 == 0;
-                    children[i].FontSize = label ? 11 : Math.Max(12, 13 * scale);
-                    if (!label) children[i].LineHeight = (name == "ChatMessages" ? 23 : 22) * scale;
+                    children[i].FontSize = label ? 12 : Math.Max(13, 14 * scale);
+                    if (!label) children[i].LineHeight = 24 * scale;
                     children[i].Margin = new Thickness(0, 0, 0, (label ? 5 : 15) * scale);
                 }
             }
@@ -151,13 +242,14 @@ namespace Leaf
             var source = Ui.Get<RichTextBox>(Popup, "SourceText");
             source.Document.Blocks.Clear();
             Ui.Visible(Ui.Get<TextBlock>(Popup, "EmptyHint"), Current == null);
-            Ui.Get<Button>(Popup, "CopyButton").Content = "复制译文";
-            Ui.Get<Button>(Popup, "CopyButton").IsEnabled = Current != null && Current.Completed;
+            Ui.Get<TextBlock>(Popup, "CopyStatus").Text = "";
+            fillingSource = true; Ui.Get<TextBox>(Popup, "SourceInput").Text = Current == null ? "" : Current.Source; fillingSource = false;
+            ShowSourceReadOnly();
             Ui.Visible(Ui.Get<Border>(Popup, "WordPanel"), false);
             Ui.Visible(Ui.Get<Border>(Popup, "InputPanel"), false);
             Ui.Visible(Ui.Get<Button>(Popup, "ExpandWordButton"), Current != null && Current.Completed && TextTools.IsWordInput(Current.Source));
             if (Current == null) {
-                Ui.Get<TextBlock>(Popup, "TranslationText").Text = "准备好时，译文会出现在这里。";
+                DrawTranslation(""); BeginSourceEdit(false);
                 Ui.Get<TextBox>(Popup, "QuestionInput").Clear();
                 Ui.Visible(Ui.Get<Border>(Popup, "ChatPanel"), false); Busy(); return;
             }
@@ -192,11 +284,14 @@ namespace Leaf
 
         private void DrawTranslation(string target)
         {
-            var block = Ui.Get<TextBlock>(Popup, "TranslationText"); block.Inlines.Clear();
+            var box = Ui.Get<RichTextBox>(Popup, "TranslationText");
+            box.Document.Blocks.Clear();
+            var block = new Paragraph { Margin = new Thickness(0), LineHeight = 27 * TypographyScale(Popup.Width, Popup.Height) };
+            box.Document.Blocks.Add(block);
             string translation = Current == null ? "" : Current.Translation;
-            if (string.IsNullOrWhiteSpace(translation)) { block.Text = Current != null ? "正在翻译…" : "准备好时，译文会出现在这里。"; return; }
+            if (string.IsNullOrWhiteSpace(translation)) { block.Inlines.Add(new Run(Current != null ? "正在翻译…" : "译文会显示在这里。")); return; }
             int index = string.IsNullOrEmpty(target) ? -1 : translation.IndexOf(target, StringComparison.Ordinal);
-            if (index < 0) { block.Text = translation; return; }
+            if (index < 0) { block.Inlines.Add(new Run(translation)); return; }
             block.Inlines.Add(new Run(translation.Substring(0, index)));
             block.Inlines.Add(new Run(target) { Background = Ui.Brush("WordHighlight") });
             block.Inlines.Add(new Run(translation.Substring(index + target.Length)));
@@ -209,7 +304,7 @@ namespace Leaf
             Ui.Visible(Ui.Get<Button>(Popup, "RetryButton"), retryAction != null);
         }
         private void ClearError() { retry = null; Ui.Visible(Ui.Get<Border>(Popup, "ErrorPanel"), false); }
-        private string KeyFor(ProviderProfile provider) { return NativeEnabled ? Credentials.Read(provider.Id) : "test-key"; }
+        private string KeyFor(ProviderProfile provider) { return CredentialReader != null ? CredentialReader(provider) : NativeEnabled ? Credentials.Read(provider.Id) : "test-key"; }
 
         public async Task TranslateAsync(string text, string sourceKind, bool force)
         {
@@ -241,7 +336,6 @@ namespace Leaf
                 if (!generation.IsCurrent(version)) return;
                 record.Completed = true; translating = false;
                 DrawTranslation(""); Busy();
-                Ui.Get<Button>(Popup, "CopyButton").IsEnabled = true;
                 Ui.Visible(Ui.Get<Button>(Popup, "ExpandWordButton"), TextTools.IsWordInput(record.Source));
                 SaveCurrent();
             } catch (OperationCanceledException) { }

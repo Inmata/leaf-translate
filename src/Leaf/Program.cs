@@ -8,8 +8,8 @@ using System.Security.Principal;
 
 [assembly: AssemblyTitle("Leaf")]
 [assembly: AssemblyDescription("A small Windows translator for reading and learning")]
-[assembly: AssemblyVersion("0.3.0.0")]
-[assembly: AssemblyFileVersion("0.3.0.0")]
+[assembly: AssemblyVersion("0.4.0.0")]
+[assembly: AssemblyFileVersion("0.4.0.0")]
 
 namespace Leaf
 {
@@ -19,6 +19,7 @@ namespace Leaf
         public static int Main(string[] args)
         {
             if (args.Length > 1 && args[0] == "--ui-smoke") return Smoke.Run(args[1]);
+            if (args.Length > 1 && args[0] == "--performance") return Performance.Run(args[1]);
             string folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LeafTranslate");
             var log = new DiagnosticLog(Path.Combine(folder, "logs"));
             string identity = WindowsIdentity.GetCurrent().User.Value.Replace("-", "");

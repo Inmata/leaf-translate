@@ -45,6 +45,16 @@ public static class ApplicationTests
             await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
             Check(shell.Current.Completed && shell.Current.Translation == "完整译文", "Queued partial output cannot overwrite a finished translation");
             Check(shell.Store.History("").Single().Translation == "完整译文", "History retains the complete streamed result");
+            string previousId = shell.Current.Id;
+            shell.BeginSourceEdit(false); Ui.Get<TextBox>(shell.Popup, "SourceInput").Text = "A fast sentence";
+            await shell.SubmitSourceAsync();
+            Check(shell.Current.Id != previousId && shell.Current.SourceKind == "输入" && shell.Current.Chat.Count == 0,
+                "Manual submit starts a new conversation even when the text matches history");
+            Check(Ui.Get<Grid>(shell.Popup, "SourceEditor").Visibility == Visibility.Collapsed,
+                "Submitting returns to the clickable original text");
+            var translated = Ui.Get<RichTextBox>(shell.Popup, "TranslationText");
+            Check(new System.Windows.Documents.TextRange(translated.Document.ContentStart, translated.Document.ContentEnd).Text.Trim() == "完整译文",
+                "Selectable translation document retains the complete response");
         }
 
         var handler = new ControlledHandler();
@@ -105,6 +115,21 @@ public static class ApplicationTests
             Ui.Get<Button>(settings.Window, "SaveSettingsButton").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             var reloaded = new LocalStore(Path.Combine(folder, "provider"));
             Check(reloaded.Settings.ProviderId == "deepseek" && reloaded.Settings.Provider.Model == "user-chosen-model", "Saving a provider selection makes it the active provider after restart");
+            bool closed = false; settings.Window.Closed += (s, e) => closed = true;
+            Ui.Get<Button>(settings.Window, "SaveSettingsButton").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Check(!closed && Ui.Get<TextBlock>(settings.Window, "SettingsStatus").Text.Contains("已应用"), "Applying a service confirms success without closing settings");
+            var scene = Ui.Get<ComboBox>(settings.Window, "SceneCombo"); var detail = Ui.Get<TextBox>(settings.Window, "SceneDetailInput");
+            scene.SelectedItem = "游戏"; detail.Text = "Baldur's Gate 3";
+            scene.SelectedItem = "影视"; detail.Text = "Arrival"; scene.SelectedItem = "游戏";
+            Check(detail.Text == "Baldur's Gate 3", "Each scene remembers its own detail while switching");
+            Ui.Get<CheckBox>(settings.Window, "FocusInputCheck").IsChecked = true;
+            await Task.Delay(650);
+            reloaded = new LocalStore(Path.Combine(folder, "provider"));
+            Check(reloaded.Settings.SceneDetail == "Baldur's Gate 3" && reloaded.Settings.SceneDetails["影视"] == "Arrival" && reloaded.Settings.FocusInputOnShortcut,
+                "Scene names and focus preference automatically persist without applying a service");
+            Ui.Get<ComboBox>(settings.Window, "ModelInput").Text = "second-model"; await Task.Delay(650);
+            Check(shell.Store.Settings.Provider.Model == "second-model", "Switching a configured model applies without closing settings");
+            settings.Window.Close();
             settings = new SettingsWindow(shell);
             Check(((ProviderProfile)Ui.Get<ComboBox>(settings.Window, "ProviderCombo").SelectedItem).Id == "deepseek", "Reopening settings selects the saved provider instead of looking for another provider's key");
             settings.Window.Close();

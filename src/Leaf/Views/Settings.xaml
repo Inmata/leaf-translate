@@ -5,23 +5,23 @@
       <TextBlock Text="设置" FontSize="25" FontWeight="SemiBold"/>
       <TextBlock Text="按你的习惯翻译。" Foreground="{StaticResource Muted}" FontSize="13" Margin="0,7,0,0"/>
     </StackPanel>
-    <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" Padding="0,0,10,0">
+    <ScrollViewer Style="{StaticResource SlimScrollViewer}" Grid.Row="1" VerticalScrollBarVisibility="Auto" Padding="0,0,10,0">
       <StackPanel>
         <TextBlock Text="翻译服务" Style="{StaticResource SectionTitle}"/>
-        <TextBlock Text="API Key" Style="{StaticResource Caption}"/>
-        <PasswordBox x:Name="ApiKeyInput" MaxLength="1000"/>
-        <TextBlock x:Name="KeyHint" Text="填入密钥，再选择服务或填写接口地址。" TextWrapping="Wrap" Foreground="{StaticResource Muted}" FontSize="11" Margin="0,7,0,18"/>
-        <Grid Margin="0,0,0,15">
-          <Grid.ColumnDefinitions><ColumnDefinition Width="180"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-          <StackPanel Margin="0,0,14,0"><TextBlock Text="API 服务" Style="{StaticResource Caption}"/>
+        <StackPanel Margin="0,0,0,16"><TextBlock Text="API 服务" Style="{StaticResource Caption}"/>
             <Grid><ComboBox x:Name="ProviderCombo" DisplayMemberPath="Name"/>
               <TextBlock x:Name="ProviderPlaceholder" Text="选择服务…" IsHitTestVisible="False" Margin="12,0,25,0" FontSize="12" VerticalAlignment="Center" Foreground="{StaticResource Muted}" Visibility="Collapsed"/>
             </Grid>
           </StackPanel>
-          <StackPanel Grid.Column="1"><TextBlock Text="模型" Style="{StaticResource Caption}"/>
+        <TextBlock Text="API Key" Style="{StaticResource Caption}"/>
+        <Grid>
+          <PasswordBox x:Name="ApiKeyInput" MaxLength="1000" Height="40"/>
+          <TextBlock x:Name="KeyPlaceholder" Text="输入此服务的 API Key…" IsHitTestVisible="False" Foreground="{StaticResource Muted}" FontSize="13" VerticalAlignment="Center" Margin="12,0"/>
+        </Grid>
+        <TextBlock x:Name="KeyHint" Text="密钥保存在 Windows 凭据管理器。" TextWrapping="Wrap" Foreground="{StaticResource Muted}" FontSize="11" Margin="0,7,0,16"/>
+          <StackPanel Margin="0,0,0,15"><TextBlock Text="模型" Style="{StaticResource Caption}"/>
             <ComboBox x:Name="ModelInput" IsEditable="True" IsTextSearchEnabled="False" MaxDropDownHeight="260"/>
           </StackPanel>
-        </Grid>
         <TextBlock x:Name="ModelVendorHint" TextWrapping="Wrap" Foreground="{StaticResource Muted}" FontSize="11" Margin="0,-7,0,10" Visibility="Collapsed"/>
         <Grid Margin="0,-8,0,10">
           <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
@@ -58,6 +58,7 @@
             <Button x:Name="DeleteKey" Content="删除此服务的已存密钥" Style="{StaticResource GhostButton}" HorizontalAlignment="Left" Margin="-8,8,0,0"/>
           </StackPanel>
         </Expander>
+        <Button x:Name="SaveSettingsButton" Content="应用服务配置" HorizontalAlignment="Left" Padding="16,9" Margin="0,-6,0,28"/>
         <TextBlock Text="阅读与翻译" Style="{StaticResource SectionTitle}"/>
         <Grid Margin="0,0,0,16">
           <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
@@ -102,6 +103,8 @@
         <TextBlock Text="使用习惯" Style="{StaticResource SectionTitle}"/>
         <CheckBox x:Name="ClipboardModeCheck" Content="快捷键读取剪贴板"/>
         <TextBlock Text="开启后先复制，再按快捷键；关闭后尝试读取选区。" Foreground="{StaticResource Muted}" FontSize="11" Margin="25,-5,0,17"/>
+        <CheckBox x:Name="FocusInputCheck" Content="快捷键唤起后直接输入"/>
+        <TextBlock Text="开启后聚焦原文并选中全文，方便替换；默认保留原软件焦点。" Foreground="{StaticResource Muted}" FontSize="11" Margin="25,-5,0,17"/>
         <TextBlock Text="全局快捷键" Style="{StaticResource Caption}"/>
         <TextBox x:Name="ShortcutInput" IsReadOnly="True" IsReadOnlyCaretVisible="False" InputMethod.IsInputMethodEnabled="False" Cursor="Hand" Margin="0,0,0,7" ToolTip="点击后按下快捷键，Esc 取消"/>
         <TextBlock x:Name="ShortcutHint" Text="点击上方，再按下组合键；Esc 取消。" Foreground="{StaticResource Muted}" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,16"/>
@@ -116,8 +119,8 @@
     <Border Grid.Row="2" BorderBrush="{StaticResource Line}" BorderThickness="0,1,0,0" Padding="0,16,0,0" Margin="0,14,0,0">
       <Grid>
         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-        <TextBlock x:Name="SettingsStatus" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap" VerticalAlignment="Center" Margin="0,0,15,0"/>
-        <Button x:Name="SaveSettingsButton" Grid.Column="1" Content="保存设置" Style="{StaticResource PrimaryButton}" Padding="22,10"/>
+        <TextBlock x:Name="SettingsStatus" Text="阅读偏好和使用习惯自动应用。" Foreground="{StaticResource Muted}" FontSize="12" TextWrapping="Wrap" VerticalAlignment="Center" Margin="0,0,15,0"/>
+        <Button x:Name="CloseSettingsButton" Grid.Column="1" Content="完成" Padding="22,10"/>
       </Grid>
     </Border>
   </Grid>

@@ -20,6 +20,7 @@ namespace Leaf
         public DiagnosticLog Log { get; private set; }
         public Window Popup { get; private set; }
         public bool NativeEnabled { get; private set; }
+        internal Func<ProviderProfile, string> CredentialReader;
         public TranslationRecord Current { get; private set; }
         private readonly RequestGate generation = new RequestGate();
         private readonly RequestGate wordGeneration = new RequestGate();
@@ -138,29 +139,49 @@ namespace Leaf
         private async void CaptureAndTranslate()
         {
             if (captureBusy || shortcutRecording) return;
+            uint foregroundProcess; Native.GetWindowThreadProcessId(Native.GetForegroundWindow(), out foregroundProcess);
+            if (foregroundProcess == (uint)Process.GetCurrentProcess().Id) {
+                ShowPopup(); BeginSourceEdit(Store.Settings.FocusInputOnShortcut); return;
+            }
             captureBusy = true;
+            long revision = sourceRevision;
             string text = null, kind = Store.Settings.ClipboardMode ? "剪贴板" : "选中文字";
             try {
-                text = Store.Settings.ClipboardMode ? Native.ClipboardText() : await Native.SelectedTextAsync();
+                // Start acquisition with the original foreground intact, then show immediately.
+                var capture = Store.Settings.ClipboardMode ? Native.ClipboardTextAsync() : Native.SelectedTextAsync();
+                ShowPopup();
+                text = await capture;
             } catch (Exception error) {
                 Log.Event("capture_failed", error);
-                if (!(error is OperationCanceledException)) {
+                if (!(error is OperationCanceledException) && sourceRevision == revision) {
                     CancelRequests(); Current = null; DisplayRecord();
                     Ui.Get<TextBlock>(Popup, "SourceBadge").Text = Store.Settings.ClipboardMode ? "剪贴板模式" : "选中模式";
-                    ShowError(error is UserError ? error.Message : "没有取得文字，请重试。", CaptureAndTranslate);
+                    if (!(error is UserError) || ((UserError)error).Code != "selection" && ((UserError)error).Code != "clipboard")
+                        ShowError(error is UserError ? error.Message : "没有取得文字，请重试。", CaptureAndTranslate);
+                    Ui.Get<TextBlock>(Popup, "SourceEditHint").Text = "未取得文字，可直接输入 · Enter 翻译";
                     ShowPopup();
+                    BeginSourceEdit(Store.Settings.FocusInputOnShortcut);
                 }
             } finally { captureBusy = false; }
-            if (text != null) await TranslateAsync(text, kind, false);
+            if (sourceRevision != revision) return;
+            if (!string.IsNullOrWhiteSpace(text)) {
+                var translation = TranslateAsync(text, kind, false);
+                if (Store.Settings.FocusInputOnShortcut) BeginSourceEdit(true);
+                await translation;
+            } else if (text != null) {
+                CancelRequests(); Current = null; DisplayRecord();
+                Ui.Get<TextBlock>(Popup, "SourceBadge").Text = "输入翻译";
+                ShowPopup(); BeginSourceEdit(Store.Settings.FocusInputOnShortcut);
+            }
         }
         public void ShowPopup()
         {
             if (exiting) return;
             if (NativeEnabled) {
-                if (Popup.IsVisible) return;
+                if (Popup.IsVisible) { Native.Reveal(Popup); return; }
                 restoringPlacement = true;
                 try {
-                    Popup.ShowActivated = false; Native.Position(Popup, Store.Settings); Popup.Show(); placementInitialized = true;
+                    Popup.ShowActivated = false; Native.Position(Popup, Store.Settings); Popup.Show(); Native.Reveal(Popup); placementInitialized = true;
                 } finally { restoringPlacement = false; }
                 RememberPlacement();
                 if (outsideClick != null) outsideClick.Enable();
@@ -168,7 +189,7 @@ namespace Leaf
         }
         private void QueuePlacementSave()
         {
-            if (!NativeEnabled || restoringPlacement || !placementInitialized || !Popup.IsVisible) return;
+            if (!NativeEnabled || restoringPlacement || !placementInitialized || !Popup.IsVisible || Popup.WindowState == WindowState.Minimized) return;
             if (placementTimer == null) {
                 placementTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(350) };
                 placementTimer.Tick += (s, e) => { placementTimer.Stop(); RememberPlacement(); };
@@ -178,7 +199,7 @@ namespace Leaf
         private void RememberPlacement()
         {
             if (placementTimer != null) placementTimer.Stop();
-            if (!NativeEnabled || restoringPlacement || !placementInitialized) return;
+            if (!NativeEnabled || restoringPlacement || !placementInitialized || Popup.WindowState == WindowState.Minimized) return;
             var placement = Native.CapturePlacement(Popup);
             if (placement == null || placement.Width <= 0 || placement.Height <= 0 || Json.Write(placement) == Json.Write(Store.Settings.Placement)) return;
             try { Store.SavePlacement(placement); }
@@ -186,6 +207,7 @@ namespace Leaf
         }
         public void HidePopup()
         {
+            sourceRevision++;
             RememberPlacement();
             if (Current != null) {
                 Current.Draft = Ui.Get<TextBox>(Popup, "QuestionInput").Text; SaveCurrent();
@@ -221,7 +243,7 @@ namespace Leaf
                     foreach (var key in keys) Credentials.Save(key.Key, key.Value);
                     if (settings.AutoStart != previous.AutoStart) Native.AutoStart(settings.AutoStart);
                 }
-                Store.SaveSettings(settings);
+                Store.SaveSettings(Json.Copy(settings));
             } catch {
                 RegisterShortcut(previous.Shortcut);
                 if (NativeEnabled) {
@@ -232,7 +254,7 @@ namespace Leaf
                 }
                 throw;
             }
-            CancelRequests();
+            if (Json.Write(previous.Provider) != Json.Write(settings.Provider) || previous.ProviderId != settings.ProviderId || keys.Count > 0 || deleted.Count > 0) CancelRequests();
             if (!settings.HistoryEnabled) Forget(null);
             if (clipboardMenu != null) { clipboardMenu.Checked = settings.ClipboardMode; tray.Text = "Leaf · " + settings.Shortcut; }
             if (historyWindow != null) historyWindow.Refresh();
@@ -268,6 +290,7 @@ namespace Leaf
             Ui.Get<TextBlock>(Popup, "BusyLabel").Text = translating ? "正在翻译…" : wordBusy ? "正在查词…" : "正在回答…";
             Ui.Get<Button>(Popup, "SendButton").IsEnabled = Current != null && Current.Completed && !chatBusy;
             Ui.Get<Button>(Popup, "AskButton").IsEnabled = Current != null && Current.Completed;
+            Ui.Visible(Ui.Get<Button>(Popup, "AskButton"), Current != null && Ui.Get<Grid>(Popup, "SourceEditor").Visibility != Visibility.Visible && Ui.Get<Border>(Popup, "InputPanel").Visibility != Visibility.Visible);
         }
         public void Exit() { exiting = true; Dispose(); Application.Current.Shutdown(); }
         public void Dispose()
@@ -275,6 +298,7 @@ namespace Leaf
             if (disposed) return;
             RememberPlacement();
             disposed = true;
+            if (copyFeedback != null) copyFeedback.Stop();
             Log.Event("app_exit", null);
             if (Current != null && !demo) {
                 Current.Draft = Ui.Get<TextBox>(Popup, "QuestionInput").Text;
