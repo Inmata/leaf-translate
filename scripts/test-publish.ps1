@@ -2,6 +2,7 @@ $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $script:checks = 0
 $script:createdJunctions = @()
+$script:secretSentinel = 'CONTENT-MUST-NOT-LEAK-' + [guid]::NewGuid().ToString('N')
 
 function Assert-Check {
     param([bool]$Condition, [string]$Label)
@@ -26,6 +27,80 @@ function Write-FixtureFile {
     Set-Content -LiteralPath $Path -Value $Content -Encoding UTF8
 }
 
+function Write-FixtureScript {
+    param([string]$Path, [string]$Content)
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Path) | Out-Null
+    [IO.File]::WriteAllText($Path, $Content, (New-Object System.Text.UTF8Encoding($false)))
+}
+
+function Get-TreeFingerprint {
+    param([string]$Root)
+    $resolved = [IO.Path]::GetFullPath($Root).TrimEnd('\')
+    $lines = New-Object System.Collections.ArrayList
+    if (Test-Path -LiteralPath $resolved) {
+        foreach ($file in (Get-ChildItem -LiteralPath $resolved -Recurse -File -Force | Sort-Object FullName)) {
+            $relative = $file.FullName.Substring($resolved.Length + 1)
+            [void]$lines.Add($relative + ' ' + (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash)
+        }
+    }
+    return ($lines -join "`n")
+}
+
+function Test-PngSignature {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    return ($bytes.Length -ge 8 -and $bytes[0] -eq 0x89 -and $bytes[1] -eq 0x50 -and
+        $bytes[2] -eq 0x4E -and $bytes[3] -eq 0x47 -and $bytes[4] -eq 0x0D -and
+        $bytes[5] -eq 0x0A -and $bytes[6] -eq 0x1A -and $bytes[7] -eq 0x0A)
+}
+
+function New-MinimalPublicFixture {
+    param([string]$Root)
+    $files = [ordered]@{
+        '.github\workflows\windows.yml' = "name: fixture`r`n"
+        '.gitignore' = "bin/`r`n"
+        'AGENTS.md' = "# Fixture repository`r`n"
+        'README.md' = "# Fixture`r`n"
+        'README.en.md' = "# Fixture`r`n"
+        'CONTRIBUTING.md' = "# Fixture`r`n"
+        'docs\keep.md' = "# Kept document`r`n"
+        'scripts\build.ps1' = "# Fixture script`r`n"
+        'src\app.cs' = "public class App { }`r`n"
+        'tests\test.cs' = "public class FixtureTest { }`r`n"
+    }
+    foreach ($entry in $files.GetEnumerator()) {
+        Write-FixtureFile -Path (Join-Path $Root $entry.Key) -Content $entry.Value
+    }
+}
+
+function Test-MirrorMatchesSource {
+    param([string]$SourceRoot, [string]$DestinationRoot)
+    $manifest = Get-PublicSourceManifest -ProjectRoot $SourceRoot
+    $wanted = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($file in $manifest.Files) {
+        [void]$wanted.Add($file.RelativePath)
+        $target = Join-Path $DestinationRoot $file.RelativePath
+        if (-not (Test-Path -LiteralPath $target -PathType Leaf)) { return $false }
+        if ((Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash) { return $false }
+    }
+    $existing = Get-PublicDestinationFiles -PublishRoot $DestinationRoot -Roots $manifest.Roots
+    foreach ($key in $existing.Keys) {
+        if (-not $wanted.Contains($key)) { return $false }
+    }
+    return $true
+}
+
+function Copy-PublicSourceOnly {
+    param([string]$SourceRoot, [string]$DestinationRoot)
+    $manifest = Get-PublicSourceManifest -ProjectRoot $SourceRoot
+    foreach ($file in $manifest.Files) {
+        $target = Join-Path $DestinationRoot $file.RelativePath
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
+        Copy-Item -LiteralPath $file.FullName -Destination $target -Force
+    }
+}
+
 $fixtureRoot = Join-Path $projectRoot ('work\publish-tests\' + [guid]::NewGuid().ToString('N'))
 $sourceRoot = Join-Path $fixtureRoot 'source'
 $destinationRoot = Join-Path $fixtureRoot 'destination'
@@ -44,6 +119,7 @@ function Remove-FixtureTree {
 
 try {
     . (Join-Path $PSScriptRoot 'public-source.ps1')
+    . (Join-Path $PSScriptRoot 'sync-public-source.ps1')
 
     New-Item -ItemType Directory -Force -Path $sourceRoot | Out-Null
     New-Item -ItemType Directory -Force -Path $destinationRoot | Out-Null
@@ -56,6 +132,7 @@ try {
         'CONTRIBUTING.md' = "# Fixture`r`n"
         'docs\keep.md' = "# Kept document`r`n"
         'docs\new-name.md' = "# Renamed document`r`n"
+        'docs\diagram.png' = "not really a png in the fixture`r`n"
         'scripts\build.ps1' = "# Fixture script`r`n"
         'src\app.cs' = "public class App { }`r`n"
         'tests\test.cs' = "public class FixtureTest { }`r`n"
@@ -69,6 +146,7 @@ try {
     Write-FixtureFile -Path (Join-Path $destinationRoot 'src\Deleted.cs') -Content "public class Deleted { }`r`n"
     Write-FixtureFile -Path (Join-Path $destinationRoot 'keep-local.txt') -Content "local-only`r`n"
     Write-FixtureFile -Path (Join-Path $destinationRoot '.git\config') -Content "[core]`r`n"
+    Write-FixtureFile -Path (Join-Path $destinationRoot 'docs\.git\config') -Content "nested repository metadata`r`n"
 
     $gitAvailable = $null -ne (Get-Command git -ErrorAction SilentlyContinue)
     Assert-Check $gitAvailable 'Git is available for the offline fixture'
@@ -84,17 +162,15 @@ try {
     Assert-Check ($LASTEXITCODE -eq 0) 'Fixture baseline committed'
 
     $sourceManifest = Get-PublicSourceManifest -ProjectRoot $sourceRoot
+
+    # Item 7: replay the legacy copy-only behavior offline and show it fails the
+    # same deletion expectation the new synchronization is required to satisfy.
     $legacyDestination = Join-Path $fixtureRoot 'legacy-destination'
     Copy-Tree -From $destinationRoot -To $legacyDestination
-    foreach ($file in $sourceManifest.Files) {
-        $legacyTarget = Join-Path $legacyDestination $file.RelativePath
-        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $legacyTarget) | Out-Null
-        Copy-Item -LiteralPath $file.FullName -Destination $legacyTarget -Force
-    }
-    Assert-Check (Test-Path -LiteralPath (Join-Path $legacyDestination 'src\Deleted.cs')) 'Copy-only publication leaves a deleted file behind (defect reproduced)'
-    Assert-Check (Test-Path -LiteralPath (Join-Path $legacyDestination 'docs\old-name.md')) 'Copy-only publication leaves a renamed file behind (defect reproduced)'
+    Copy-PublicSourceOnly -SourceRoot $sourceRoot -DestinationRoot $legacyDestination
+    Assert-Check (-not (Test-MirrorMatchesSource -SourceRoot $sourceRoot -DestinationRoot $legacyDestination)) 'BEHAVIOR RED: copy-only synchronization fails the deletion expectation'
+    Assert-Check (Test-Path -LiteralPath (Join-Path $legacyDestination 'src\Deleted.cs')) 'BEHAVIOR RED: the legacy algorithm left a deleted public file behind'
 
-    . (Join-Path $PSScriptRoot 'sync-public-source.ps1')
     $dryPlan = Sync-PublicSource -ProjectRoot $sourceRoot -PublishRoot $destinationRoot -DryRun
     Assert-Check ($dryPlan.Copy.Count -eq 1) ('Dry run plans the renamed file, got ' + $dryPlan.Copy.Count)
     Assert-Check ($dryPlan.Delete.Count -eq 2) ('Dry run plans two deletions, got ' + $dryPlan.Delete.Count)
@@ -110,6 +186,8 @@ try {
     Assert-Check (Test-Path -LiteralPath (Join-Path $destinationRoot 'src\app.cs')) 'Existing public source was kept'
     Assert-Check (Test-Path -LiteralPath (Join-Path $destinationRoot 'keep-local.txt')) 'Synchronization touched no path outside the allowlist'
     Assert-Check (Test-Path -LiteralPath (Join-Path $destinationRoot '.git\config')) 'Synchronization left .git untouched'
+    Assert-Check (Test-Path -LiteralPath (Join-Path $destinationRoot 'docs\.git\config')) 'Synchronization left a nested .git untouched'
+    Assert-Check (Test-MirrorMatchesSource -SourceRoot $sourceRoot -DestinationRoot $destinationRoot) 'GREEN: mirror matches the source manifest including deletions'
 
     $secondPlan = Sync-PublicSource -ProjectRoot $sourceRoot -PublishRoot $destinationRoot
     Assert-Check ($secondPlan.Copy.Count -eq 0 -and $secondPlan.Delete.Count -eq 0) 'Second synchronization is a no-op'
@@ -121,7 +199,9 @@ try {
     Assert-Check ($staged -match '(?m)^D\s+src/Deleted\.cs\s*$') 'Removed file deletion is staged'
     Assert-Check ($staged -match '(?m)^A\s+docs/new-name\.md\s*$') 'New file addition is staged'
     Assert-Check (-not ($staged -match 'keep-local')) 'Outside allowlist is not staged'
+    Assert-Check (-not ($staged -match 'docs/\.git')) 'Nested .git is not staged through the mirror'
 
+    # Item 2: publication roots inside the project must be ignored work fixtures.
     $sameRootRejected = $false
     try { Sync-PublicSource -ProjectRoot $sourceRoot -PublishRoot $sourceRoot | Out-Null } catch { $sameRootRejected = $true }
     Assert-Check $sameRootRejected 'Publication into the project root itself is rejected'
@@ -129,6 +209,61 @@ try {
     try { Sync-PublicSource -ProjectRoot $sourceRoot -PublishRoot $fixtureRoot | Out-Null } catch { $parentRootRejected = $true }
     Assert-Check $parentRootRejected 'Publication into the parent directory is rejected'
     Assert-Check (Test-Path -LiteralPath (Join-Path $destinationRoot 'keep-local.txt')) 'Rejected runs left the fixture intact'
+
+    foreach ($insidePath in @('docs', 'src', 'src\nested', 'work', 'AGENTS.md')) {
+        $beforeSource = Get-TreeFingerprint -Root $sourceRoot
+        $beforeDestination = Get-TreeFingerprint -Root $destinationRoot
+        $insideRejected = $false
+        try { Sync-PublicSource -ProjectRoot $sourceRoot -PublishRoot (Join-Path $sourceRoot $insidePath) | Out-Null } catch { $insideRejected = $true }
+        Assert-Check $insideRejected ('Publication into a project-managed path is rejected: ' + $insidePath)
+        Assert-Check ((Get-TreeFingerprint -Root $sourceRoot) -eq $beforeSource) ('Rejected destination left the source unchanged: ' + $insidePath)
+        Assert-Check ((Get-TreeFingerprint -Root $destinationRoot) -eq $beforeDestination) ('Rejected destination left the mirror unchanged: ' + $insidePath)
+    }
+
+    foreach ($insidePublic in @('docs', 'docs\images', 'src', 'src\Leaf', 'tests', 'AGENTS.md')) {
+        $insidePublicRejected = $false
+        try { Assert-PublishRootIsolated -ProjectRoot $projectRoot -PublishRoot (Join-Path $projectRoot $insidePublic) | Out-Null } catch { $insidePublicRejected = $true }
+        Assert-Check $insidePublicRejected ('The real project rejects a publication root inside public source: ' + $insidePublic)
+    }
+    foreach ($allowedFixture in @('work\publish-0123456789abcdef0123456789abcdef', 'work\publish-tests\0123456789abcdef0123456789abcdef\destination')) {
+        $allowedFixtureOk = $true
+        try { Assert-PublishRootIsolated -ProjectRoot $projectRoot -PublishRoot (Join-Path $projectRoot $allowedFixture) | Out-Null } catch { $allowedFixtureOk = $false }
+        Assert-Check $allowedFixtureOk ('The ignored work fixture publication root is allowed: ' + $allowedFixture)
+    }
+
+    # Item 2: file-versus-directory shape conflicts must be diagnosed before any change.
+    $shapeFile = Join-Path $fixtureRoot 'shape-file-blocked'
+    Copy-Tree -From $destinationRoot -To $shapeFile
+    Remove-Item -LiteralPath (Join-Path $shapeFile 'docs\new-name.md') -Force
+    New-Item -ItemType Directory -Force -Path (Join-Path $shapeFile 'docs\new-name.md') | Out-Null
+    Write-FixtureFile -Path (Join-Path $shapeFile 'docs\new-name.md\blocker.txt') -Content 'blocker'
+    $beforeShapeFile = Get-TreeFingerprint -Root $shapeFile
+    $shapeFileRejected = $false
+    try { Sync-PublicSource -ProjectRoot $sourceRoot -PublishRoot $shapeFile | Out-Null } catch { $shapeFileRejected = $true }
+    Assert-Check $shapeFileRejected 'A directory where a public file must be written is diagnosed'
+    Assert-Check ((Get-TreeFingerprint -Root $shapeFile) -eq $beforeShapeFile) 'Shape conflict left the destination unchanged'
+    Assert-Check (Test-Path -LiteralPath (Join-Path $shapeFile 'docs\new-name.md\blocker.txt')) 'Shape conflict kept the conflicting directory'
+
+    $shapeParent = Join-Path $fixtureRoot 'shape-parent-blocked'
+    Copy-Tree -From $destinationRoot -To $shapeParent
+    Remove-Item -LiteralPath (Join-Path $shapeParent 'src') -Recurse -Force
+    Write-FixtureFile -Path (Join-Path $shapeParent 'src') -Content 'not a directory'
+    $beforeShapeParent = Get-TreeFingerprint -Root $shapeParent
+    $shapeParentRejected = $false
+    try { Sync-PublicSource -ProjectRoot $sourceRoot -PublishRoot $shapeParent | Out-Null } catch { $shapeParentRejected = $true }
+    Assert-Check $shapeParentRejected 'A file blocking a needed directory is diagnosed'
+    Assert-Check ((Get-TreeFingerprint -Root $shapeParent) -eq $beforeShapeParent) 'Parent shape conflict left the destination unchanged'
+    Assert-Check (-not (Get-Item -LiteralPath (Join-Path $shapeParent 'src') -Force).PSIsContainer) 'Parent shape conflict kept the blocking file'
+
+    # Item 2: empty-directory cleanup must never touch .git.
+    $gitGuard = Join-Path $fixtureRoot 'git-guard'
+    Copy-Tree -From $destinationRoot -To $gitGuard
+    New-Item -ItemType Directory -Force -Path (Join-Path $gitGuard 'src\.git') | Out-Null
+    Write-FixtureFile -Path (Join-Path $gitGuard 'docs\stale\notes.md') -Content 'stale public file'
+    $gitGuardPlan = Sync-PublicSource -ProjectRoot $sourceRoot -PublishRoot $gitGuard
+    Assert-Check (Test-Path -LiteralPath (Join-Path $gitGuard 'src\.git')) 'Empty nested .git survives synchronization cleanup'
+    Assert-Check (Test-Path -LiteralPath (Join-Path $gitGuard 'docs\.git\config')) 'Nested .git content survives synchronization'
+    Assert-Check (-not (Test-Path -LiteralPath (Join-Path $gitGuard 'docs\stale'))) 'Stale public files are still removed around protected .git directories'
 
     $escapeRejected = $false
     try { Assert-PublishChild -PublishRoot $destinationRoot -Candidate (Join-Path $destinationRoot '..\escape.txt') | Out-Null } catch { $escapeRejected = $true }
@@ -151,6 +286,51 @@ try {
     Assert-Check $innerRejected 'A reparse point inside the publication root is rejected'
     [IO.Directory]::Delete($innerLink, $false)
 
+    # Item 1: a junction project root must be rejected before enumerating its target.
+    $sourceLink = Join-Path $fixtureRoot 'source-link'
+    New-Item -ItemType Junction -Path $sourceLink -Target $sourceRoot | Out-Null
+    $script:createdJunctions += $sourceLink
+    $sourceLinkRejected = $false
+    try { Get-PublicSourceManifest -ProjectRoot $sourceLink | Out-Null } catch { $sourceLinkRejected = $true }
+    Assert-Check $sourceLinkRejected 'A junction project root is rejected instead of enumerating its target'
+    [IO.Directory]::Delete($sourceLink, $false)
+
+    # Item 1: fixed private/local scope, diagnostics name the path and never print content.
+    $privateCases = @(
+        @{ Name = 'settings.json.new'; Path = 'docs\settings.json.new'; Token = 'settings.json.new' },
+        @{ Name = 'settings.json.old'; Path = 'docs\settings.json.old'; Token = 'settings.json.old' },
+        @{ Name = 'history.json.corrupt'; Path = 'docs\history.json.corrupt-20261006T120000'; Token = 'history.json.corrupt-20261006T120000' },
+        @{ Name = 'history.json.quarantine'; Path = 'docs\history.json.quarantine-abc123'; Token = 'history.json.quarantine-abc123' },
+        @{ Name = 'history.json.tmp'; Path = 'docs\history.json.tmp'; Token = 'history.json.tmp' },
+        @{ Name = 'store-transaction.json'; Path = 'docs\store-transaction.json'; Token = 'store-transaction.json' },
+        @{ Name = 'store-transaction.json.new'; Path = 'docs\store-transaction.json.new'; Token = 'store-transaction.json.new' },
+        @{ Name = '.env.local'; Path = 'docs\.env.local'; Token = '.env.local' },
+        @{ Name = 'nested .git'; Path = 'src\.git\config'; Token = 'src\.git' },
+        @{ Name = 'nested work'; Path = 'docs\work\notes.md'; Token = 'docs\work' },
+        @{ Name = 'binary exe'; Path = 'scripts\tools.exe'; Token = 'tools.exe' },
+        @{ Name = 'binary dll'; Path = 'src\helper.dll'; Token = 'helper.dll' },
+        @{ Name = 'log file'; Path = 'docs\trace.log'; Token = 'trace.log' }
+    )
+    foreach ($case in $privateCases) {
+        $caseRoot = Join-Path $fixtureRoot ('private-' + [guid]::NewGuid().ToString('N'))
+        New-MinimalPublicFixture -Root $caseRoot
+        Write-FixtureFile -Path (Join-Path $caseRoot $case.Path) -Content ($script:secretSentinel + "`r`n")
+        $caseRejected = $false
+        $caseMessage = ''
+        try { Get-PublicSourceManifest -ProjectRoot $caseRoot | Out-Null } catch { $caseRejected = $true; $caseMessage = $_.Exception.Message }
+        Assert-Check $caseRejected ('Private/local source is rejected: ' + $case.Name)
+        Assert-Check ($caseMessage.Contains($case.Token)) ('Private rejection names the offending path: ' + $case.Name)
+        Assert-Check (-not $caseMessage.Contains($script:secretSentinel)) ('Private rejection does not print file content: ' + $case.Name)
+    }
+
+    $assetRoot = Join-Path $fixtureRoot 'private-assets'
+    New-MinimalPublicFixture -Root $assetRoot
+    [IO.File]::WriteAllBytes((Join-Path $assetRoot 'docs\icon.ico'), [byte[]](0, 0, 1, 0))
+    Write-FixtureFile -Path (Join-Path $assetRoot 'docs\shot.png') -Content 'asset fixture'
+    $assetManifest = Get-PublicSourceManifest -ProjectRoot $assetRoot
+    Assert-Check (@($assetManifest.Files | Where-Object { $_.RelativePath -eq 'docs\shot.png' }).Count -eq 1) 'Allowed source assets still pass the manifest'
+    Assert-Check (@($assetManifest.Files | Where-Object { $_.RelativePath -eq 'docs\icon.ico' }).Count -eq 1) 'Allowed icons still pass the manifest'
+
     $publishScript = Join-Path $PSScriptRoot 'publish.ps1'
     $mirrorsBefore = @(Get-ChildItem -LiteralPath (Join-Path $projectRoot 'work') -Directory -Filter 'publish-*' -ErrorAction SilentlyContinue).Count
     $checkOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $publishScript -CheckOnly 2>&1
@@ -160,33 +340,76 @@ try {
     $mirrorsAfter = @(Get-ChildItem -LiteralPath (Join-Path $projectRoot 'work') -Directory -Filter 'publish-*' -ErrorAction SilentlyContinue).Count
     Assert-Check ($mirrorsAfter -eq $mirrorsBefore) 'publish -CheckOnly created no checkout'
 
+    # Item 3: a failing UI smoke run keeps this run's real PNG and result, never stale files.
     $fixtureId = Split-Path -Leaf $fixtureRoot
     $retentionSmoke = Join-Path $fixtureRoot 'retention\smoke'
     $retentionResults = Join-Path $fixtureRoot 'retention\results'
     New-Item -ItemType Directory -Force -Path $retentionSmoke | Out-Null
-    Set-Content -LiteralPath (Join-Path $retentionSmoke 'data') -Value 'poison'
-    Set-Content -LiteralPath (Join-Path $retentionSmoke 'popup.png') -Value 'existing-image'
+    Write-FixtureFile -Path (Join-Path $retentionSmoke 'popup.png') -Content 'existing-image'
+    Write-FixtureFile -Path (Join-Path $retentionSmoke 'result.json') -Content '{"success":true,"checks":["stale-fixture"]}'
+    $staleFakeHash = (Get-FileHash -LiteralPath (Join-Path $retentionSmoke 'popup.png') -Algorithm SHA256).Hash
     $relativeBuild = 'work/publish-tests/' + $fixtureId + '/retention/build'
     $relativeSmoke = 'work/publish-tests/' + $fixtureId + '/retention/smoke'
     $relativeResults = 'work/publish-tests/' + $fixtureId + '/retention/results'
     $savedPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    $retentionOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'test.ps1') -OutputDirectory $relativeBuild -ResultsDirectory $relativeResults -SmokeDirectory $relativeSmoke 2>&1
-    $retentionExit = $LASTEXITCODE
-    $ErrorActionPreference = $savedPreference
+    $env:LEAF_SMOKE_FAIL_AFTER_RENDER = '1'
+    try {
+        $retentionOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'test.ps1') -OutputDirectory $relativeBuild -ResultsDirectory $relativeResults -SmokeDirectory $relativeSmoke 2>&1
+        $retentionExit = $LASTEXITCODE
+    } finally {
+        Remove-Item Env:\LEAF_SMOKE_FAIL_AFTER_RENDER -ErrorAction SilentlyContinue
+        $ErrorActionPreference = $savedPreference
+    }
     Assert-Check ($retentionExit -ne 0) 'A failing UI smoke run reports failure'
+    Assert-Check (Test-Path -LiteralPath (Join-Path $retentionResults 'run.json')) 'Failing runs keep a per-run evidence record'
+    $runRecord = [IO.File]::ReadAllText((Join-Path $retentionResults 'run.json')) | ConvertFrom-Json
+    Assert-Check (-not [string]::IsNullOrWhiteSpace([string]$runRecord.run_id)) 'The run record carries a run ID'
+    Assert-Check (-not [string]::IsNullOrWhiteSpace([string]$runRecord.commit)) 'The run record carries the commit or unknown'
+    Assert-Check (-not [string]::IsNullOrWhiteSpace([string]$runRecord.started_at) -and -not [string]::IsNullOrWhiteSpace([string]$runRecord.ended_at)) 'The run record carries start and end times'
+    Assert-Check (@($runRecord.steps).Count -ge 2) 'The run record carries each step'
+    $smokeStep = @($runRecord.steps | Where-Object { $_.name -eq 'ui-smoke' })
+    Assert-Check ($smokeStep.Count -eq 1 -and [int]$smokeStep[0].exit_code -ne 0) 'The run record preserves the real smoke exit code'
+    Assert-Check (@($runRecord.evidence_kinds) -contains 'offscreen') 'The run record names the offscreen evidence kind'
+    Assert-Check (@($runRecord.evidence_kinds) -contains 'fixture') 'The run record names the fixture evidence kind'
     Assert-Check (Test-Path -LiteralPath (Join-Path $retentionResults 'ui-smoke.exitcode')) 'Failing UI smoke saves its exit code'
     $savedSmokeExit = (Get-Content -LiteralPath (Join-Path $retentionResults 'ui-smoke.exitcode') -Raw).Trim()
     Assert-Check ($savedSmokeExit -ne '0' -and $savedSmokeExit -ne '') 'Saved UI smoke exit code is the real failure'
-    Assert-Check (Test-Path -LiteralPath (Join-Path $retentionResults 'ui-smoke-result.json')) 'Failing UI smoke keeps result.json'
+    Assert-Check (Test-Path -LiteralPath (Join-Path $retentionResults 'ui-smoke-result.json')) 'Failing UI smoke keeps this run result.json'
     $savedResult = [IO.File]::ReadAllText((Join-Path $retentionResults 'ui-smoke-result.json'))
     Assert-Check ($savedResult -match '"success"\s*:\s*false') 'Saved result.json records the failure'
+    Assert-Check (-not $savedResult.Contains('stale-fixture')) 'Saved result.json is this run result, not the stale file'
     $savedTestsExit = (Get-Content -LiteralPath (Join-Path $retentionResults 'tests.exitcode') -Raw).Trim()
     Assert-Check ($savedTestsExit -eq '0') 'Core test exit code is preserved separately'
     $savedTestsText = [IO.File]::ReadAllText((Join-Path $retentionResults 'tests.txt'))
     Assert-Check ($savedTestsText -match 'SUCCESS: \d+ assertions') 'Core test output is written to disk'
-    Assert-Check (Test-Path -LiteralPath (Join-Path $retentionSmoke 'popup.png')) 'An existing smoke PNG survives the failure'
     Assert-Check (Test-Path -LiteralPath (Join-Path $retentionResults 'ui-smoke.stdout.txt')) 'Failing smoke process output is captured'
+    Assert-Check (Test-PngSignature -Path (Join-Path $retentionSmoke 'popup.png')) 'The failing run produced a real WPF-rendered PNG'
+    $newPngHash = (Get-FileHash -LiteralPath (Join-Path $retentionSmoke 'popup.png') -Algorithm SHA256).Hash
+    Assert-Check ($newPngHash -ne $staleFakeHash) 'The current PNG replaced the stale text fixture'
+    $previousDirs = @(Get-ChildItem -LiteralPath (Join-Path $retentionSmoke 'previous') -Directory -Force -ErrorAction SilentlyContinue)
+    Assert-Check ($previousDirs.Count -ge 1) 'Stale smoke evidence is archived to an isolated run directory'
+    $archivedNames = @(Get-ChildItem -LiteralPath $previousDirs[0].FullName -File -Force | ForEach-Object { $_.Name })
+    Assert-Check ($archivedNames -contains 'popup.png' -and $archivedNames -contains 'result.json') 'Archived evidence keeps the stale files for reference'
+    $recordedPngs = @($runRecord.artifacts.smoke_pngs)
+    Assert-Check ($recordedPngs.Count -ge 1 -and $recordedPngs[0].sha256 -eq $newPngHash) 'The run record lists this run PNG hash'
+    Assert-Check ([IO.File]::ReadAllText((Join-Path $retentionResults 'run.json')).Contains('stale-fixture') -eq $false) 'The run record never reports stale content as this run output'
+
+    $noGitProbe = Join-Path $fixtureRoot 'evidence-no-git.ps1'
+    Write-FixtureScript -Path $noGitProbe -Content (
+        "`$env:PATH = `$env:LEAF_STRIPPED_PATH`r`n" +
+        ". '" + (Join-Path $PSScriptRoot 'evidence.ps1') + "'`r`n" +
+        "Write-Output ('commit=' + (Get-EvidenceRevision -ProjectRoot '" + $projectRoot + "').Commit)`r`n")
+    $env:LEAF_STRIPPED_PATH = (($env:PATH -split ';') | Where-Object { $_ -and ($_ -notmatch '(?i)git') }) -join ';'
+    $savedPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $noGitOutput = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $noGitProbe 2>&1) -join "`n"
+    } finally {
+        Remove-Item Env:\LEAF_STRIPPED_PATH -ErrorAction SilentlyContinue
+        $ErrorActionPreference = $savedPreference
+    }
+    Assert-Check ($noGitOutput -match 'commit=unknown') 'Without Git the evidence revision is explicitly unknown'
 
     $templatePath = Join-Path $projectRoot 'src\Leaf\app.manifest'
     [xml]$manifestTemplate = Get-Content -LiteralPath $templatePath -Raw
@@ -198,6 +421,7 @@ try {
     Assert-Check ($manifestSettings.dpiAwareness.InnerText -eq 'PerMonitorV2') 'Manifest keeps PerMonitorV2 awareness'
     Assert-Check ($manifestSettings.longPathAware.InnerText -eq 'true') 'Manifest keeps long path awareness'
 
+    # Item 5: version constants must be strict ASCII SemVer without leading zeros.
     . (Join-Path $PSScriptRoot 'version.ps1')
     $versionFixtureRoot = Join-Path $fixtureRoot 'version-fixture'
     $versionFile = Join-Path $versionFixtureRoot 'src\Leaf\Version.cs'
@@ -234,21 +458,36 @@ try {
     try { Get-LeafVersion -ProjectRoot $versionFixtureRoot | Out-Null } catch { $duplicateRejected = $true }
     Assert-Check $duplicateRejected 'Version helper rejects duplicate constants'
 
-    $invalidVersion = @(
-        'namespace Leaf',
-        '{',
-        '    internal static class LeafVersion',
-        '    {',
-        '        public const string SemVer = "1.2";',
-        '        public const string Assembly = SemVer + ".0";',
-        '    }',
-        '}',
-        ''
-    ) -join "`r`n"
-    [IO.File]::WriteAllText($versionFile, $invalidVersion)
-    $invalidRejected = $false
-    try { Get-LeafVersion -ProjectRoot $versionFixtureRoot | Out-Null } catch { $invalidRejected = $true }
-    Assert-Check $invalidRejected 'Version helper rejects an invalid version string'
+    $arabicDigits = ([char]0x0664).ToString() + '.' + ([char]0x0664).ToString() + '.' + ([char]0x0664).ToString()
+    $invalidConstants = @(
+        @{ Value = '1.2'; Label = 'an incomplete version' },
+        @{ Value = '00.4.1'; Label = 'a leading-zero major component' },
+        @{ Value = '1.02.3'; Label = 'a leading-zero minor component' },
+        @{ Value = '01.2.3'; Label = 'a leading-zero minor alias' },
+        @{ Value = '1.2.03'; Label = 'a leading-zero patch component' },
+        @{ Value = $arabicDigits; Label = 'non-ASCII digit components' },
+        @{ Value = '99999999999999999999.1.1'; Label = 'an overflowing numeric component' },
+        @{ Value = '1.65536.1'; Label = 'a component above the assembly range' },
+        @{ Value = '1.2.3.4'; Label = 'a fourth version component' },
+        @{ Value = '1..3'; Label = 'an empty component' }
+    )
+    foreach ($case in $invalidConstants) {
+        $constantText = @(
+            'namespace Leaf',
+            '{',
+            '    internal static class LeafVersion',
+            '    {',
+            ('        public const string SemVer = "' + $case.Value + '";'),
+            '        public const string Assembly = SemVer + ".0";',
+            '    }',
+            '}',
+            ''
+        ) -join "`r`n"
+        [IO.File]::WriteAllText($versionFile, $constantText)
+        $constantRejected = $false
+        try { Get-LeafVersion -ProjectRoot $versionFixtureRoot | Out-Null } catch { $constantRejected = $true }
+        Assert-Check $constantRejected ('Version helper rejects ' + $case.Label)
+    }
 
     $tamperedVersion = @(
         'namespace Leaf',
@@ -287,14 +526,64 @@ try {
     Assert-Check $packageRejected 'package rejects an explicit version that differs from the constant'
     Assert-Check (-not (Test-Path -LiteralPath (Join-Path $projectRoot 'dist\Leaf-v9.9.9-windows.zip'))) 'Rejected packaging wrote no archive'
     Assert-Check (-not (Test-Path -LiteralPath (Join-Path $projectRoot 'bin\package-v9.9.9'))) 'Rejected packaging did not build a mismatched bundle'
+    Assert-Check (-not (Test-Path -LiteralPath (Join-Path $projectRoot 'dist\Leaf-v00.4.1-windows.zip'))) 'No package exists for a leading-zero version'
+    Assert-Check (-not (Test-Path -LiteralPath (Join-Path $projectRoot 'dist\Leaf-v1.65536.1-windows.zip'))) 'No package exists for an out-of-range version'
 
     $savedPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     $badPublishOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'publish.ps1') -CheckOnly -Version '9.9.9' 2>&1
     $badPublishExit = $LASTEXITCODE
+    $leadingZeroOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'publish.ps1') -CheckOnly -Version '00.4.1' 2>&1
+    $leadingZeroExit = $LASTEXITCODE
     $ErrorActionPreference = $savedPreference
     Assert-Check ($badPublishExit -ne 0) 'publish rejects an explicit version that differs from the constant'
     Assert-Check (($badPublishOutput -join "`n") -match 'does not match') 'publish reports the version mismatch'
+    Assert-Check ($leadingZeroExit -ne 0) 'publish rejects an explicit leading-zero version'
+    Assert-Check (($leadingZeroOutput -join "`n") -notmatch 'Public source:') 'Rejected publish never walks the public manifest'
+
+    # Item 4: the native wrapper stores real evidence and preserves the native exit code.
+    $nativeHelper = Join-Path $PSScriptRoot 'native-checks.ps1'
+    $nativeEvidence = Join-Path $fixtureRoot 'native\evidence'
+    $fakeCleanup = 'NATIVE-EVIDENCE cleanup provider=regression-0123456789abcdef0123456789abcdef credential_present=false'
+    $fakeFail = Join-Path $fixtureRoot 'native\fake-native-fail.cmd'
+    Write-FixtureScript -Path $fakeFail -Content ("@echo off`r`necho " + $fakeCleanup + "`r`nexit /b 9`r`n")
+    $fakePassIncomplete = Join-Path $fixtureRoot 'native\fake-native-pass-incomplete.cmd'
+    Write-FixtureScript -Path $fakePassIncomplete -Content ("@echo off`r`nexit /b 0`r`n")
+    $fakePass = Join-Path $fixtureRoot 'native\fake-native-pass.cmd'
+    Write-FixtureScript -Path $fakePass -Content ("@echo off`r`necho " + $fakeCleanup + "`r`nexit /b 0`r`n")
+
+    $savedPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $nativeFailOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $nativeHelper -TestsExe $fakeFail -EvidenceDirectory $nativeEvidence 2>&1
+    $nativeFailExit = $LASTEXITCODE
+    $ErrorActionPreference = $savedPreference
+    Assert-Check ($nativeFailExit -eq 9) 'The native wrapper preserves a failing native exit code'
+    Assert-Check (Test-Path -LiteralPath (Join-Path $nativeEvidence 'native-result.json')) 'The native wrapper writes a report even when the native checks fail'
+    Assert-Check (Test-Path -LiteralPath (Join-Path $nativeEvidence 'native.log')) 'The native wrapper saves the native log'
+    Assert-Check (Test-Path -LiteralPath (Join-Path $nativeEvidence 'native.exitcode')) 'The native wrapper saves the native exit code file'
+    $nativeReport = [IO.File]::ReadAllText((Join-Path $nativeEvidence 'native-result.json')) | ConvertFrom-Json
+    Assert-Check ($nativeReport.category -eq 'native') 'The native report is categorized as native evidence'
+    Assert-Check ([int]$nativeReport.native_exit_code -eq 9 -and [int]$nativeReport.wrapper_exit_code -eq 9) 'The native report records the original failure'
+    Assert-Check (@($nativeReport.credential_cleanup).Count -eq 1 -and $nativeReport.credential_cleanup_verified) 'The native report carries GUID fake-credential cleanup evidence'
+
+    $savedPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $nativeIncompleteOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $nativeHelper -TestsExe $fakePassIncomplete -EvidenceDirectory $nativeEvidence 2>&1
+    $nativeIncompleteExit = $LASTEXITCODE
+    $ErrorActionPreference = $savedPreference
+    $incompleteReport = [IO.File]::ReadAllText((Join-Path $nativeEvidence 'native-result.json')) | ConvertFrom-Json
+    Assert-Check ($nativeIncompleteExit -eq 3) 'The native wrapper fails when passing checks omit cleanup evidence'
+    Assert-Check (-not $incompleteReport.credential_cleanup_verified) 'The native report marks missing cleanup evidence'
+
+    $savedPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $nativePassOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $nativeHelper -TestsExe $fakePass -EvidenceDirectory $nativeEvidence 2>&1
+    $nativePassExit = $LASTEXITCODE
+    $ErrorActionPreference = $savedPreference
+    $passReport = [IO.File]::ReadAllText((Join-Path $nativeEvidence 'native-result.json')) | ConvertFrom-Json
+    Assert-Check ($nativePassExit -eq 0) 'The native wrapper passes when evidence is complete'
+    Assert-Check ($passReport.credential_cleanup_verified) 'The passing native report verifies cleanup'
+    Assert-Check ([string]$passReport.note -match 'separate manual review') 'The native report scopes its limited checks explicitly'
 
     Write-Output ('SUCCESS: ' + $script:checks + ' publication checks')
 } finally {
