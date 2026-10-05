@@ -41,6 +41,7 @@ namespace Leaf
         private HistoryWindow historyWindow;
         private TextPiece selectedWord;
         private WordCard selectedCard;
+        private RetryOperation activeTranslation, activeWord, activeFollowup;
         private Action retry;
         private const int HotkeyId = 0x4C46;
 
@@ -324,6 +325,27 @@ namespace Leaf
             if (wordCancellation != null) wordCancellation.Cancel();
             if (chatCancellation != null) chatCancellation.Cancel();
             translating = wordBusy = chatBusy = false; Busy();
+        }
+        // Records what was running before cancelling it, so the single retry entry can
+        // repeat those operations instead of starting a new translation.
+        public void StopForRetry()
+        {
+            var bundle = new RetryBundle(new[] { activeTranslation, activeWord, activeFollowup });
+            CancelRequests();
+            DrawChat();
+            if (selectedCard != null) DrawCard(selectedCard);
+            else if (selectedWord != null) {
+                selectedWord = null; HighlightSource(); Topic();
+                Ui.Visible(Ui.Get<Border>(Popup, "WordPanel"), false);
+            }
+            Busy();
+            if (bundle.Count == 0) { ShowError("已停止。", null); return; }
+            ShowError("已停止。尚未完成的结果不会保存。", () => { var ignored = RetryAsync(bundle); });
+        }
+        private async Task RetryAsync(RetryBundle bundle)
+        {
+            var record = Current;
+            await bundle.RunAsync(record == null ? "" : record.Id);
         }
         private void Busy()
         {

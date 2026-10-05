@@ -34,7 +34,145 @@ internal static class PopupRegressionTests
         await InFlightReuse(Path.Combine(folder, "inflight"));
         await LeafForegroundShortcut(Path.Combine(folder, "leaf-front"));
         await DraftRetention(Path.Combine(folder, "draft"));
+        await StopAndRetryWord(Path.Combine(folder, "stop-word"));
+        await StopAndRetryFollowup(Path.Combine(folder, "stop-chat"));
+        await StopAndRetryParallel(Path.Combine(folder, "stop-both"));
         return assertions;
+    }
+
+    // Stopping a word lookup and retrying must repeat that lookup, not the translation.
+    private static async Task StopAndRetryWord(string folder)
+    {
+        var handler = new ControlledHandler();
+        using (var shell = new AppShell(ConfiguredStore(folder), false, new LlmClient(handler))) {
+            var translation = shell.TranslateAsync("A retry fixture sentence.", "选中文字", false);
+            handler.ReplyStream(0, "夹具译文");
+            await translation;
+            var record = shell.Current;
+            record.Chat.Add(new ChatTurn { Role = "user", Content = "older fixture", Topic = "原句" });
+            record.Chat.Add(new ChatTurn { Role = "assistant", Content = "older answer", Topic = "原句" });
+            var word = TextTools.Pieces(record.Source).First(p => p.IsWord);
+            var lookup = shell.SelectWordAsync(word, false);
+            Check(handler.Requests.Count == 2 && !handler.Requests[1].Cancellation.IsCancellationRequested,
+                "The word lookup is in flight with its own cancellation");
+            Click(shell.Popup, "CancelButton");
+            Check(handler.Requests[1].Cancellation.IsCancellationRequested, "Stopping cancels the word lookup");
+            Check(Ui.Get<Grid>(shell.Popup, "BusyPanel").Visibility == Visibility.Collapsed,
+                "Stopping clears the word lookup's busy state");
+            Click(shell.Popup, "RetryButton");
+            Check(handler.Requests.Count == 3, "Retrying a stopped word lookup issues exactly one new request");
+            Check(handler.Requests[2].Body.Contains("selected_text") && !handler.Requests[2].Body.Contains("source_text"),
+                "Retry repeats the word lookup rather than the whole translation [request kind=" +
+                (handler.Requests[2].Body.Contains("selected_text") ? "word" : "translation") + "]");
+            Check(ReferenceEquals(shell.Current, record) && record.Chat.Count == 2,
+                "Retrying a stopped word lookup keeps the conversation");
+            // The abandoned request still answers; it must not attach itself afterwards.
+            handler.ReplyJson(1, new { meaning = "过期词义", sections = new object[0] });
+            await lookup;
+            handler.ReplyJson(2, new { meaning = "新的词义", sections = new object[0] });
+            await Until(() => record.Cards.Count > 0);
+            Check(record.Cards.Count == 1 && record.Cards.Values.All(c => c.meaning == "新的词义"),
+                "Only the retried word lookup lands in the conversation");
+            Check(Ui.Get<TextBlock>(shell.Popup, "WordMeaning").Text == "新的词义",
+                "A retried word lookup settles on its card instead of staying busy");
+
+            // A retry stops mattering once another conversation replaces the stopped one.
+            var pending = shell.SelectWordAsync(TextTools.Pieces(record.Source).Last(p => p.IsWord), false);
+            Click(shell.Popup, "CancelButton");
+            shell.OpenRecord(TranslationRecord.Create("Another source", "选中文字", shell.Store.Settings));
+            int before = handler.Requests.Count;
+            Check(Ui.Get<Border>(shell.Popup, "ErrorPanel").Visibility == Visibility.Collapsed,
+                "Replacing the conversation clears the stopped state");
+            Click(shell.Popup, "RetryButton");
+            Check(handler.Requests.Count == before, "A retry tied to a replaced conversation does nothing");
+            handler.ReplyJson(3, new { meaning = "无关词义", sections = new object[0] });
+            await pending;
+        }
+    }
+
+    // Stopping a follow-up keeps the conversation and repeats the original question.
+    private static async Task StopAndRetryFollowup(string folder)
+    {
+        var handler = new ControlledHandler();
+        using (var shell = new AppShell(ConfiguredStore(folder), false, new LlmClient(handler))) {
+            var translation = shell.TranslateAsync("A follow-up retry sentence.", "选中文字", false);
+            handler.ReplyStream(0, "夹具译文");
+            await translation;
+            var record = shell.Current;
+            Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text = "original question";
+            var chat = shell.SendChatAsync();
+            Check(handler.Requests.Count == 2 && !handler.Requests[1].Cancellation.IsCancellationRequested,
+                "The follow-up is in flight with its own cancellation");
+            Click(shell.Popup, "CancelButton");
+            Check(handler.Requests[1].Cancellation.IsCancellationRequested, "Stopping cancels the follow-up");
+            Check(Ui.Get<Border>(shell.Popup, "ChatPanel").Visibility == Visibility.Collapsed,
+                "Stopping a follow-up removes its transient question and answer");
+            Check(record.Chat.Count == 0, "Nothing half-finished is added to the conversation");
+            Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text = "a later draft";
+            Click(shell.Popup, "RetryButton");
+            Check(handler.Requests.Count == 3 && handler.Requests[2].Body.Contains("original question") &&
+                !handler.Requests[2].Body.Contains("a later draft"),
+                "Retry repeats the original question instead of what was typed afterwards");
+            Check(Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text == "a later draft",
+                "An unsent draft survives the retry");
+            handler.ReplyStream(1, "迟到的回答");
+            await chat;
+            Check(record.Chat.Count == 0, "A late answer to a stopped follow-up is discarded");
+            handler.ReplyStream(2, "重试的回答");
+            await Until(() => record.Chat.Count == 2);
+            Check(record.Chat.Count == 2 && record.Chat[1].Content == "重试的回答",
+                "The retried follow-up lands in the existing conversation");
+            Check(Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text == "a later draft",
+                "The retried question does not clear a draft written afterwards");
+            // The input is cleared only when it still holds the question that was answered.
+            Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text = "second question";
+            var second = shell.SendChatAsync();
+            handler.ReplyStream(3, "第二个回答");
+            await second;
+            Check(Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text.Length == 0 && record.Chat.Count == 4,
+                "A finished follow-up clears the input only when it still holds its question");
+        }
+    }
+
+    // Stopping both at once offers one retry that restores both, and never a translation.
+    private static async Task StopAndRetryParallel(string folder)
+    {
+        var handler = new ControlledHandler();
+        using (var shell = new AppShell(ConfiguredStore(folder), false, new LlmClient(handler))) {
+            var translation = shell.TranslateAsync("A parallel fixture sentence.", "选中文字", false);
+            handler.ReplyStream(0, "夹具译文");
+            await translation;
+            var record = shell.Current;
+            var word = TextTools.Pieces(record.Source).First(p => p.IsWord);
+            var lookup = shell.SelectWordAsync(word, false);
+            Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text = "parallel question";
+            var chat = shell.SendChatAsync();
+            Check(handler.Requests.Count == 3, "A word lookup and a follow-up run together");
+            Click(shell.Popup, "CancelButton");
+            Check(handler.Requests[1].Cancellation.IsCancellationRequested && handler.Requests[2].Cancellation.IsCancellationRequested,
+                "Stopping cancels both active operations");
+            Click(shell.Popup, "RetryButton");
+            Check(handler.Requests.Count == 5, "One retry entry restores both stopped operations");
+            Check(handler.Requests.Skip(3).Count(r => r.Body.Contains("selected_text")) == 1 &&
+                handler.Requests.Skip(3).Count(r => r.Body.Contains("parallel question")) == 1,
+                "The retry keeps each operation's own kind");
+            Check(!handler.Requests.Skip(3).Any(r => r.Body.Contains("source_text")),
+                "Retrying stopped work never re-translates the whole sentence");
+            handler.ReplyJson(1, new { meaning = "过期词义", sections = new object[0] });
+            await lookup;
+            handler.ReplyStream(2, "迟到的回答");
+            await chat;
+            handler.ReplyJson(3, new { meaning = "并行词义", sections = new object[0] });
+            handler.ReplyStream(4, "并行回答");
+            await Until(() => record.Cards.Count > 0 && record.Chat.Count == 2);
+            Check(record.Cards.Values.Any(c => c.meaning == "并行词义") && record.Chat[1].Content == "并行回答",
+                "Both retried operations complete in the same conversation");
+        }
+    }
+    private static async Task Until(Func<bool> condition)
+    {
+        for (int i = 0; i < 300 && !condition(); i++) await Task.Delay(10);
+        if (!condition()) throw new Exception("Timed out waiting for the fixture to settle.");
     }
 
     // Clearing the editor is a draft action, not a request to forget the result.
@@ -189,6 +327,28 @@ internal static class PopupRegressionTests
                 new { message = new { content = Json.Write(card) }, finish_reason = "stop" }
             } }), Encoding.UTF8, "application/json")
         };
+    }
+    private sealed class PendingResponse
+    {
+        public Uri Uri; public string Body; public CancellationToken Cancellation;
+        public readonly TaskCompletionSource<HttpResponseMessage> Completion =
+            new TaskCompletionSource<HttpResponseMessage>();
+    }
+    // Keeps every answer open so a stopped request can be answered late on purpose.
+    private sealed class ControlledHandler : HttpMessageHandler
+    {
+        public readonly List<PendingResponse> Requests = new List<PendingResponse>();
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellation)
+        {
+            var pending = new PendingResponse {
+                Uri = request.RequestUri,
+                Body = request.Content.ReadAsStringAsync().GetAwaiter().GetResult(),
+                Cancellation = cancellation
+            };
+            Requests.Add(pending); return pending.Completion.Task;
+        }
+        public void ReplyStream(int index, string text) { Requests[index].Completion.TrySetResult(StreamReply(text)); }
+        public void ReplyJson(int index, object card) { Requests[index].Completion.TrySetResult(JsonReply(card)); }
     }
     private sealed class FixtureHandler : HttpMessageHandler
     {

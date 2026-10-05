@@ -96,7 +96,7 @@ Click **Ask (追问)** to reveal the input. Questions concern the selected word 
 
 ### 4. Type or edit your own text
 
-The shortcut immediately opens an editable popup when no text is captured. With existing text, click the pencil beside the source, or enable **Direct input on shortcut (快捷键唤起后直接输入)** to focus and select it automatically. `Enter` or **Translate ↵ (翻译 ↵)** submits a new conversation; `Shift+Enter` inserts a new line. Drag to select translated text, then use `Ctrl+C` or the copy context menu. There is no separate copy-translation button.
+The shortcut immediately opens an editable popup when no text is captured, without discarding an existing translation. With existing text, click the pencil beside the source, or enable **Direct input on shortcut (快捷键唤起后直接输入)** to focus and select it automatically. `Enter` or the arrow button at the right of the input submits a new conversation; `Shift+Enter` inserts a new line. Pressing the shortcut again on the same text returns to the existing translation, word card and follow-up draft without another request. Drag to select translated text, then use `Ctrl+C` or the copy context menu. There is no separate copy-translation button.
 
 [![Manual source editing and translation](docs/images/manual-input.png)](docs/images/manual-input.png)
 
@@ -184,6 +184,7 @@ The new option becomes selectable alongside the built-in options. **Preference p
 | `Ctrl+Alt+T` | Translate the selection or clipboard; configurable in settings |
 | Click a word in the original | Open its contextual word card |
 | `Enter` / `Shift+Enter` in the question input | Send / insert a new line |
+| **Retry (重试)** after **Stop (停止)** | Repeat only the stopped word lookup or follow-up, never the whole translation |
 | Click outside an unpinned popup | Hide it while keeping the conversation and draft |
 | Click the pin button | Keep it visible; asking a question does not pin automatically |
 | Click the hide button | Hide the popup while keeping Leaf in the tray |

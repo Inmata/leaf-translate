@@ -59,11 +59,7 @@ namespace Leaf
                 } catch (UserError error) { ShowError(error.Message, null); }
                 catch (InvalidOperationException) { }
             };
-            Ui.Click(Popup, "CancelButton", () => {
-                CancelRequests(); ShowError("已停止。尚未完成的结果不会保存。", () => {
-                    if (Current != null) { var task = TranslateAsync(Current.Source, Current.SourceKind, true); }
-                });
-            });
+            Ui.Click(Popup, "CancelButton", StopForRetry);
             Ui.Click(Popup, "RetryButton", () => { var action = retry; ClearError(); if (action != null) action(); });
             Ui.Click(Popup, "SetupButton", OpenSettings);
             Ui.Click(Popup, "AskButton", () => {
@@ -338,6 +334,13 @@ namespace Leaf
             Current = TranslationRecord.Create(text, sourceKind, Store.Settings);
             var record = Current; long version = generation.Next();
             mainCancellation = new CancellationTokenSource(); var cancellation = mainCancellation;
+            // A new conversation replaces every older retry entry.
+            activeWord = null; activeFollowup = null;
+            var operation = new RetryOperation {
+                Kind = RequestKind.Translation, RecordId = record.Id,
+                Run = () => TranslateAsync(record.Source, record.SourceKind, true)
+            };
+            activeTranslation = operation;
             translating = true; DisplayRecord(); ShowPopup(); Busy();
             long lastProgress = 0;
             try {
@@ -360,12 +363,14 @@ namespace Leaf
                 Log.Event("translation_failed", error);
                 if (generation.IsCurrent(version)) {
                     translating = false; Busy();
-                    ShowError(error is UserError ? error.Message : "翻译没有完成，请重试。", async () => await TranslateAsync(text, sourceKind, true));
+                    var bundle = new RetryBundle(new[] { operation });
+                    ShowError(error is UserError ? error.Message : "翻译没有完成，请重试。", () => { var ignored = RetryAsync(bundle); });
                 }
             } finally {
                 if (generation.IsCurrent(version)) { translating = false; Busy(); }
                 cancellation.Dispose();
                 if (ReferenceEquals(mainCancellation, cancellation)) mainCancellation = null;
+                if (ReferenceEquals(activeTranslation, operation)) activeTranslation = null;
             }
         }
 
@@ -393,6 +398,11 @@ namespace Leaf
                 selectedCard = DemoCard(word.Text); record.Cards[word.Key] = selectedCard; DrawCard(selectedCard); return;
             }
             wordCancellation = new CancellationTokenSource(); var cancellation = wordCancellation;
+            var operation = new RetryOperation {
+                Kind = RequestKind.Word, RecordId = record.Id,
+                Run = () => SelectWordAsync(word, true)
+            };
+            activeWord = operation;
             wordBusy = true; Busy();
             try {
                 string payload = await Client.CompleteAsync(provider, KeyFor(provider), Prompts.Word(record, word), false, true, null, cancellation.Token);
@@ -406,12 +416,14 @@ namespace Leaf
                 Log.Event("word_card_failed", error);
                 if (Current == record && wordGeneration.IsCurrent(version)) {
                     wordBusy = false; Busy(); Ui.Get<TextBlock>(Popup, "WordMeaning").Text = "词卡暂未完成。";
-                    ShowError(error is UserError ? error.Message : "查词没有完成，请重试。", async () => await SelectWordAsync(word, true));
+                    var bundle = new RetryBundle(new[] { operation });
+                    ShowError(error is UserError ? error.Message : "查词没有完成，请重试。", () => { var ignored = RetryAsync(bundle); });
                 }
             } finally {
                 if (Current == record && wordGeneration.IsCurrent(version)) { wordBusy = false; Busy(); }
                 cancellation.Dispose();
                 if (ReferenceEquals(wordCancellation, cancellation)) wordCancellation = null;
+                if (ReferenceEquals(activeWord, operation)) activeWord = null;
             }
         }
 
@@ -454,10 +466,21 @@ namespace Leaf
             if (question.Length == 0) return;
             if (demo) { ShowError("这是演示内容。配置 API 后可进行真实追问。", OpenSettings); return; }
             string topic = selectedWord == null ? "原句" : selectedWord.Text;
-            var record = Current; var card = selectedCard;
+            await SendChatForAsync(Current, topic, selectedCard, question);
+        }
+        // The question, topic and card are fixed here; a retry repeats those, not whatever
+        // the input happens to hold later. The saved provider is re-read for each attempt.
+        private async Task SendChatForAsync(TranslationRecord record, string topic, WordCard card, string question)
+        {
+            if (record == null || chatBusy) return;
             var provider = Json.Copy(Store.Settings.Provider);
             long version = generation.Next();
             chatCancellation = new CancellationTokenSource(); var cancellation = chatCancellation;
+            var operation = new RetryOperation {
+                Kind = RequestKind.Followup, RecordId = record.Id,
+                Run = () => SendChatForAsync(record, topic, card, question)
+            };
+            activeFollowup = operation;
             chatBusy = true; Busy(); ClearError();
             var panel = Ui.Get<StackPanel>(Popup, "ChatMessages");
             Ui.Visible(Ui.Get<Border>(Popup, "ChatPanel"), true);
@@ -472,6 +495,7 @@ namespace Leaf
                 record.Chat.Add(new ChatTurn { Role = "user", Content = question, Topic = topic });
                 record.Chat.Add(new ChatTurn { Role = "assistant", Content = result, Topic = topic });
                 while (record.Chat.Count > 24) record.Chat.RemoveRange(0, 2);
+                var input = Ui.Get<TextBox>(Popup, "QuestionInput");
                 if (input.Text.Trim() == question) input.Clear();
                 record.Draft = input.Text;
                 response.Text = result; chatBusy = false; DrawChat(); SaveCurrent(); Busy();
@@ -481,12 +505,14 @@ namespace Leaf
                 Log.Event("followup_failed", error);
                 if (Current == record && generation.IsCurrent(version)) {
                     chatBusy = false; DrawChat(); Busy();
-                    ShowError(error is UserError ? error.Message : "追问没有完成，请重试。", async () => await SendChatAsync());
+                    var bundle = new RetryBundle(new[] { operation });
+                    ShowError(error is UserError ? error.Message : "追问没有完成，请重试。", () => { var ignored = RetryAsync(bundle); });
                 }
             } finally {
                 if (Current == record && generation.IsCurrent(version)) { chatBusy = false; Busy(); }
                 cancellation.Dispose();
                 if (ReferenceEquals(chatCancellation, cancellation)) chatCancellation = null;
+                if (ReferenceEquals(activeFollowup, operation)) activeFollowup = null;
             }
         }
 
