@@ -87,6 +87,17 @@ namespace Leaf
                     payloads[AtomicFileBatch.SettingsName] = Json.Write(candidate);
                     List<TranslationRecord> candidateRecords = null;
                     bool disableBarrier = !candidate.HistoryEnabled && latest.HistoryEnabled;
+                    if (disableBarrier) {
+                        // Turning history off is the user's barrier: every snapshot captured
+                        // before this point is invalid even if this commit fails and history is
+                        // enabled again later. The settings candidate itself stays unpublished.
+                        List<FailedWrite> obsolete;
+                        lock (sync) {
+                            historyEpoch++; tombstones.Clear();
+                            obsolete = failedWrites.ToList(); failedWrites.Clear();
+                        }
+                        AcknowledgeHistoryFailures(obsolete);
+                    }
                     if (!candidate.HistoryEnabled) {
                         candidateRecords = new List<TranslationRecord>();
                         payloads[AtomicFileBatch.HistoryName] =
@@ -98,7 +109,6 @@ namespace Leaf
                         candidateRecords = encoded.Records;
                         payloads[AtomicFileBatch.HistoryName] = encoded.Json;
                     }
-                    List<FailedWrite> obsolete = null;
                     var batch = new AtomicFileBatch(folder, files);
                     try {
                         batch.Commit(payloads,
@@ -108,15 +118,8 @@ namespace Leaf
                                 lock (sync) {
                                     settings = candidate;
                                     if (candidateRecords != null) records = candidateRecords;
-                                    if (disableBarrier) {
-                                        // Turning history off is a barrier: every snapshot captured
-                                        // before this point is invalid even if it is enabled later.
-                                        historyEpoch++; tombstones.Clear();
-                                        obsolete = failedWrites.ToList(); failedWrites.Clear();
-                                    }
                                 }
                                 if (candidateRecords != null && !candidate.HistoryEnabled) DeleteHistoryBackups();
-                                if (obsolete != null) AcknowledgeHistoryFailures(obsolete);
                                 if (afterCommit != null) afterCommit();
                             }, resolveExternalPending);
                         lock (sync) { RecoveryBlocked = false; ExternalRollbackPending = false; }

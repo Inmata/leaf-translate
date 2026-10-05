@@ -32,6 +32,7 @@ public static class StorageRegressionTests
         await QueueScenarios();
         await QueueResolutionScenarios(folder);
         await SettingsFailureScopeScenarios(folder);
+        await FailedDisableBarrierScenarios(folder);
         await StructureScenarios(folder);
         await ByteLimitRegression(folder);
         await HistoryScenarios(folder);
@@ -592,6 +593,43 @@ public static class StorageRegressionTests
         bool modelResolved = true;
         try { await store.FlushAsync(); } catch (UserError) { modelResolved = false; }
         Check(modelResolved, "A same-provider model retry acknowledges that model failure");
+    }
+
+    // Turning history off is a durable user intent: a failed disable must still invalidate
+    // snapshots captured under the old epoch, and re-enabling must not revive them.
+    private static async Task FailedDisableBarrierScenarios(string folder)
+    {
+        string directory = NewDirectory(folder, "failed-disable");
+        var files = new FaultingFiles();
+        var store = new LocalStore(directory, files);
+        var seeded = Completed("disable seed", store.Settings);
+        await store.SaveAsync(seeded, store.HistoryEpoch);
+        await store.FlushAsync();
+        long oldEpoch = store.HistoryEpoch;
+
+        var pending = Completed("disable pending", store.Settings);
+        files.MatchingCalls = 0; files.FailOperation = "Replace"; files.FailAt = 1;
+        bool saveFailed = false;
+        try { await store.SaveAsync(pending, oldEpoch); } catch (UserError) { saveFailed = true; }
+        Check(saveFailed, "A history save fault is reported before the failed disable");
+
+        var disabled = Json.Copy(store.Settings); disabled.HistoryEnabled = false;
+        files.MatchingCalls = 0; files.FailAt = 1;
+        bool disableFailed = false;
+        try { await store.SaveSettingsAsync(SettingsUpdate.Preferences(disabled)); }
+        catch (UserError) { disableFailed = true; }
+        Check(disableFailed, "A failed history disable is reported instead of pretending success");
+
+        files.MatchingCalls = 0; files.FailAt = -1;
+        var enabled = Json.Copy(store.Settings); enabled.HistoryEnabled = true;
+        await store.SaveSettingsAsync(SettingsUpdate.Preferences(enabled));
+        await store.RetryFailedWritesAsync();
+        await store.SaveAsync(Completed("disable late", store.Settings), oldEpoch);
+        await store.FlushAsync();
+
+        var reloaded = new LocalStore(directory).History("");
+        Check(reloaded.Count == 1 && reloaded[0].Id == seeded.Id,
+            "A failed disable barrier prevents old-epoch saves and retries from reviving");
     }
 
     private static async Task CredentialAndPatchScenarios(string folder)
