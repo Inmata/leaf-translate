@@ -54,7 +54,7 @@ namespace Leaf
         private static async Task RunScenariosAsync(string folder, List<string> checks)
         {
             var store = new LocalStore(Path.Combine(folder, "data"));
-            store.Clear(); store.SaveSettings(Settings.Defaults());
+            await store.ClearAsync(); await store.SaveSettingsAsync(SettingsUpdate.Full(Settings.Defaults()));
             using (var shell = new AppShell(store, false)) {
                 shell.PopulateDemo();
                 Check(Ui.Get<Border>(shell.Popup, "InputPanel").Visibility == Visibility.Collapsed, "Input is hidden before Ask", checks);

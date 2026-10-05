@@ -88,7 +88,7 @@ namespace Leaf
             foreach (var provider in settings.Providers) provider.Id = prefix + provider.Id;
             settings.ProviderId = settings.Providers[0].Id;
             settings.Provider.Model = "benchmark-fixture"; settings.Provider.BaseUrl = "https://benchmark.invalid/v1";
-            settings.Shortcut = "Ctrl+Alt+Shift+F12"; store.SaveSettings(settings);
+            settings.Shortcut = "Ctrl+Alt+Shift+F12"; await store.SaveSettingsAsync(SettingsUpdate.Full(settings));
             var phases = new List<object>(); long ready;
             using (var shell = new AppShell(store, true, new LlmClient(new FixtureHandler()))) {
                 shell.CredentialReader = p => "isolated-benchmark-fixture";
