@@ -65,11 +65,22 @@ public static class WindowsNativeTests
                 Check(Credentials.Read(chosenId) == sampleKey && Credentials.Read(settings.Providers[0].Id) == "", "Credential Manager retains a Unicode key under the selected provider");
                 Check(!File.ReadAllText(Path.Combine(folder, "settings.json")).Contains(sampleKey), "Native credential saving never writes the key into local settings");
                 Check(Ui.Get<PasswordBox>(window.Window, "ApiKeyInput").Password.Length == 0 &&
-                    Ui.Get<TextBlock>(window.Window, "KeyPlaceholder").Text.Contains("已保存"), "Applying a key clears the editor and shows a saved placeholder without inserting a fake password");
+                    Ui.Get<TextBlock>(window.Window, "KeyPlaceholder").Text.Replace(" ", "") == "●●●●●●●●" &&
+                    Ui.Get<TextBlock>(window.Window, "KeyHint").Text.Contains("已保存密钥"), "Applying a key clears the editor, shows only password dots and places its saved status below");
                 window.Window.Close();
                 window = new SettingsWindow(shell);
                 Check(((ProviderProfile)Ui.Get<ComboBox>(window.Window, "ProviderCombo").SelectedItem).Id == chosenId &&
                     Ui.Get<TextBlock>(window.Window, "KeyHint").Text.Contains("已保存密钥"), "Reopened settings recognize the saved key for the active provider");
+                var keyEditor = Ui.Get<PasswordBox>(window.Window, "ApiKeyInput");
+                var mask = Ui.Get<TextBlock>(window.Window, "KeyPlaceholder");
+                Check(keyEditor.Password.Length == 0 && keyEditor.PasswordChar == '●' && mask.Visibility == Visibility.Visible,
+                    "Reopened saved credentials are represented by a visible separate dot mask, never filled back into the password editor");
+                keyEditor.Password = "replacement-fixture";
+                Check(mask.Visibility == Visibility.Collapsed && Credentials.Read(chosenId) == sampleKey,
+                    "Typing a replacement hides the mask and keeps the saved key until explicitly applied");
+                keyEditor.Clear();
+                Check(mask.Visibility == Visibility.Visible && !mask.Text.Contains("已保存") && mask.Text.Replace(" ", "") == "●●●●●●●●",
+                    "Clearing an uncommitted replacement restores a dots-only placeholder");
                 Ui.Get<Button>(window.Window, "SaveSettingsButton").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
                 Check(Credentials.Read(chosenId) == sampleKey, "Saving with a blank password preserves the existing credential");
                 Ui.Get<ComboBox>(window.Window, "ModelInput").Text = "fixture-model-2"; await Task.Delay(650);

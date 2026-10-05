@@ -102,7 +102,7 @@ The shortcut immediately opens an editable popup when no text is captured. With 
 
 ## Screenshots
 
-These views are rendered from the v0.4.0 windows. Text, model choices, conversations, and history are demonstration content; no live API was called. The app UI is currently Chinese. Click an image to view it at full size.
+These views are rendered from the v0.4.1 Clear paper interface. Text, model choices, conversations, saved-key state, and history are demonstration content; no live API was called. The app UI is currently Chinese. Click an image to view it at full size.
 
 <table>
   <tr>
@@ -219,7 +219,7 @@ Check that Leaf is running in the tray. If the shortcut is already in use, choos
 
 ### Why does my API request fail after entering a key?
 
-Check the provider, model, endpoint, and account quota. Leaf displays errors for network failures, timeouts, invalid keys, rate limits, and malformed responses. Apply service configuration after a successful connection test. A masked saved-key placeholder is normal: stored keys are not filled back into the input, and leaving it blank keeps the saved key. Changing the endpoint requires entering the key again. Applying keeps settings open; changes to a previously configured model apply automatically.
+Check the provider, model, endpoint, and account quota. Leaf displays errors for network failures, timeouts, invalid keys, rate limits, and malformed responses. Apply service configuration after a successful connection test. A stored key appears as dark password dots inside the field, with its saved status below. Stored keys are not filled back into the editor; typing replaces the key, while leaving it blank preserves it. The mask does not reveal key length. Changing the endpoint requires entering the key again. Applying keeps settings open; changes to a previously configured model apply automatically.
 
 ### Can I use another language or compatible service?
 

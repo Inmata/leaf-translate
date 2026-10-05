@@ -16,7 +16,7 @@ Choose an **API service (API 服务)**, then enter its **API Key**. Switching se
 
 Once the endpoint is known, Leaf automatically fetches models after you finish typing, with loading and result feedback. Choose a text-chat model or use **Refresh models (刷新模型)** to retry. Keys are never used to guess or probe providers. Catalog ownership is displayed when supplied, otherwise it is not guessed. A manual model ID remains available when a catalog is unsupported. Saving remembers the endpoint for subsequent key changes.
 
-A catalog entry does not establish account access or quota; test the connection after selecting it. A stored key is represented by a masked saved-key placeholder; the real key is never inserted into the editor. When **Key saved (已保存密钥)** appears below it, leaving the field empty continues using that key. Fetching a catalog authenticates with the configured service without sending your text or conversation.
+A catalog entry does not establish account access or quota; test the connection after selecting it. A stored key is represented only by dark password dots inside the field; its saved status appears below. The real key is never inserted into the editor, and the mask does not reveal its length. When **Key saved (已保存密钥)** appears below it, leaving the field empty continues using that key. Fetching a catalog authenticates with the configured service without sending your text or conversation.
 
 Expand **Endpoint (接口地址)** to change the URL or request deletion of a saved key. Changing the URL requires entering the key again. HTTPS endpoints are accepted; localhost HTTP is available for development.
 

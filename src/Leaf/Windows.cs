@@ -289,7 +289,9 @@ namespace Leaf
             var placeholder = Ui.Get<TextBlock>(Window, "KeyPlaceholder");
             bool saved = active != null && !deletedKeys.Contains(active.Id) && shell.NativeEnabled &&
                 original.Providers.Any(p => p.Id == active.Id && p.BaseUrl.TrimEnd('/') == Ui.Get<TextBox>(Window, "EndpointInput").Text.TrimEnd('/')) && Credentials.Read(active.Id).Length > 0;
-            placeholder.Text = saved ? "••••••••  已保存 · 点击更换" : "输入此服务的 API Key…";
+            placeholder.Text = saved ? "● ● ● ● ● ● ● ●" : "输入此服务的 API Key…";
+            placeholder.Foreground = Ui.Brush(saved ? "Ink" : "Muted");
+            placeholder.FontSize = saved ? 11 : 13;
             Ui.Visible(placeholder, input.Password.Length == 0 && !input.IsKeyboardFocused);
             if (active == null) {
                 Ui.Get<TextBlock>(Window, "KeyHint").Text = "先选择服务，密钥与模型随服务一起切换。"; return;
@@ -300,8 +302,9 @@ namespace Leaf
                 previous == null || url != previous.BaseUrl.TrimEnd('/') ?
                 "接口地址已变化，请重新填写密钥。" :
                 deletedKeys.Contains(active.Id) ? "应用服务配置后删除已存密钥。" :
-                saved ? "已保存密钥；点击可替换，留空继续使用。" : "保存在 Windows 凭据管理器。";
+                saved ? "已保存密钥 · 输入可更换，留空继续使用。" : "保存在 Windows 凭据管理器。";
             Ui.Get<TextBlock>(Window, "KeyHint").Text = hint;
+            System.Windows.Automation.AutomationProperties.SetHelpText(input, hint);
         }
         private void PopulatePreferences()
         {

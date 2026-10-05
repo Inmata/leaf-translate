@@ -49,7 +49,8 @@ namespace Leaf
             Ui.Click(Popup, "PinButton", () => {
                 pinned = !pinned;
                 var button = Ui.Get<Button>(Popup, "PinButton");
-                button.Foreground = pinned ? Ui.Brush("Accent") : Ui.Brush("Muted");
+                button.Foreground = pinned ? Ui.Brush("Accent") : Ui.Brush("Secondary");
+                button.Background = pinned ? Ui.Brush("Soft") : Brushes.Transparent;
                 button.ToolTip = pinned ? "取消置顶，窗口外点击会收起" : "置顶并保持显示";
             });
             Ui.Get<Grid>(Popup, "DragBar").MouseLeftButtonDown += (s, e) => {
@@ -210,7 +211,7 @@ namespace Leaf
             translation.FontSize = translation.Document.FontSize = Math.Max(14, 17 * scale);
             foreach (var paragraph in translation.Document.Blocks.OfType<Paragraph>()) paragraph.LineHeight = 27 * scale;
             Ui.Get<TextBox>(Popup, "SourceInput").FontSize = Math.Max(14, 16 * scale);
-            SetTypography("WordTitle", Math.Max(14, 17 * scale), 0);
+            SetTypography("WordTitle", Math.Max(14, 18 * scale), 0);
             SetTypography("WordMeaning", Math.Max(14, 16 * scale), 25 * scale);
             SetTypography("WordMeta", 12, 0);
             SetTypography("EmptyHint", 12, 0);
@@ -219,15 +220,15 @@ namespace Leaf
                 var children = Ui.Get<StackPanel>(Popup, name).Children.OfType<TextBlock>().ToArray();
                 for (int i = 0; i < children.Length; i++) {
                     bool label = i % 2 == 0;
-                    children[i].FontSize = label ? 12 : Math.Max(13, 14 * scale);
+                    children[i].FontSize = label ? 13 : Math.Max(13, 14 * scale);
                     if (!label) children[i].LineHeight = 24 * scale;
-                    children[i].Margin = new Thickness(0, 0, 0, (label ? 5 : 15) * scale);
+                    children[i].Margin = new Thickness(0, 0, 0, (label ? 7 : 20) * scale);
                 }
             }
             double compact = (scale - 0.84) / 0.16;
-            Ui.Get<Grid>(Popup, "PopupContent").Margin = new Thickness(16 + 6 * compact, 12, 16 + 6 * compact, 12 + 4 * compact);
-            Ui.Get<Border>(Popup, "SourcePanel").Padding = new Thickness(0, 8 + 4 * compact, 0, 12 + 6 * compact);
-            Ui.Get<ScrollViewer>(Popup, "BodyScroll").Margin = new Thickness(0, 12 + 6 * compact, 0, 0);
+            Ui.Get<Grid>(Popup, "PopupContent").Margin = new Thickness(18 + 8 * compact, 12, 18 + 8 * compact, 16 + 8 * compact);
+            Ui.Get<Border>(Popup, "SourcePanel").Padding = new Thickness(0, 8 + 4 * compact, 0, 6 + 6 * compact);
+            Ui.Get<ScrollViewer>(Popup, "BodyScroll").Margin = new Thickness(0, 16 + 4 * compact, 0, 0);
             var input = Ui.Get<TextBox>(Popup, "QuestionInput"); input.FontSize = Math.Max(12, 14 * scale); input.Height = 66 * scale;
         }
         private void SetTypography(string name, double font, double line)
@@ -406,8 +407,8 @@ namespace Leaf
             }.Where(x => !string.IsNullOrWhiteSpace(x)));
             var panel = Ui.Get<StackPanel>(Popup, "LearningSections"); panel.Children.Clear();
             foreach (var section in card.sections) {
-                panel.Children.Add(new TextBlock { Text = section.title, FontSize = 11, Foreground = Ui.Brush("Muted"), Margin = new Thickness(0, 0, 0, 5) });
-                panel.Children.Add(new TextBlock { Text = section.content, FontSize = 13, LineHeight = 22, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 15) });
+                panel.Children.Add(new TextBlock { Text = section.title, FontSize = 13, FontWeight = FontWeights.Medium, Foreground = Ui.Brush("Ink"), Margin = new Thickness(0, 0, 0, 7) });
+                panel.Children.Add(new TextBlock { Text = section.content, FontSize = 14, Foreground = Ui.Brush("Secondary"), LineHeight = 24, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 20) });
             }
             HighlightSource(); DrawTranslation(card.target_phrase); Topic();
             UpdatePopupTypography();
@@ -425,9 +426,8 @@ namespace Leaf
         }
         private TextBlock AddChat(StackPanel panel, string label, string content, bool user)
         {
-            panel.Children.Add(new TextBlock { Text = label, FontSize = 11, Foreground = Ui.Brush("Muted"), Margin = new Thickness(0, 0, 0, 6) });
-            var text = new TextBlock { Text = content, FontSize = 13, LineHeight = 23, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 18) };
-            if (user) text.Foreground = Ui.Brush("Accent");
+            panel.Children.Add(new TextBlock { Text = label, FontSize = 13, FontWeight = FontWeights.Medium, Foreground = Ui.Brush("Ink"), Margin = new Thickness(0, 0, 0, 7) });
+            var text = new TextBlock { Text = content, FontSize = 14, Foreground = Ui.Brush(user ? "Ink" : "Secondary"), LineHeight = 24, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 20) };
             panel.Children.Add(text); UpdatePopupTypography(); return text;
         }
         public async Task SendChatAsync()

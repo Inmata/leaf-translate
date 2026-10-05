@@ -8,8 +8,8 @@ using System.Security.Principal;
 
 [assembly: AssemblyTitle("Leaf")]
 [assembly: AssemblyDescription("A small Windows translator for reading and learning")]
-[assembly: AssemblyVersion("0.4.0.0")]
-[assembly: AssemblyFileVersion("0.4.0.0")]
+[assembly: AssemblyVersion("0.4.1.0")]
+[assembly: AssemblyFileVersion("0.4.1.0")]
 
 namespace Leaf
 {

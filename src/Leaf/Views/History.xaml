@@ -2,7 +2,7 @@
   <Grid Margin="28,24,28,20">
     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
     <Grid Margin="0,0,0,20">
-      <TextBlock Text="历史记录" FontSize="25" FontWeight="SemiBold"/>
+      <TextBlock Text="历史记录" FontSize="24" FontWeight="SemiBold"/>
       <TextBlock x:Name="HistoryCount" Text="最近 0 条" Foreground="{StaticResource Muted}" FontSize="12" HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,0,4"/>
     </Grid>
     <Grid Grid.Row="1" Margin="0,0,0,16">
@@ -23,8 +23,8 @@
             <Grid>
               <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
               <TextBlock Text="{Binding Preview}" FontSize="16" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"/>
-              <TextBlock Grid.Row="1" Text="{Binding Translation}" Foreground="{StaticResource Muted}" FontSize="13" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" Margin="0,6,0,0"/>
-              <TextBlock Grid.Row="2" Text="{Binding TimeLabel}" FontSize="11" Foreground="#A0A89D" Margin="0,8,0,0"/>
+              <TextBlock Grid.Row="1" Text="{Binding Translation}" Foreground="{StaticResource Secondary}" FontSize="14" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" Margin="0,6,0,0"/>
+              <TextBlock Grid.Row="2" Text="{Binding TimeLabel}" FontSize="12" Foreground="{StaticResource Muted}" Margin="0,8,0,0"/>
             </Grid>
           </DataTemplate>
         </ListBox.ItemTemplate>

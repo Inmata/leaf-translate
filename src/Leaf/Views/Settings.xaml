@@ -2,7 +2,7 @@
   <Grid Margin="32,26,32,20">
     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
     <StackPanel Margin="0,0,0,24">
-      <TextBlock Text="设置" FontSize="25" FontWeight="SemiBold"/>
+      <TextBlock Text="设置" FontSize="24" FontWeight="SemiBold"/>
       <TextBlock Text="按你的习惯翻译。" Foreground="{StaticResource Muted}" FontSize="13" Margin="0,7,0,0"/>
     </StackPanel>
     <ScrollViewer Style="{StaticResource SlimScrollViewer}" Grid.Row="1" VerticalScrollBarVisibility="Auto" Padding="0,0,10,0">
@@ -15,10 +15,10 @@
           </StackPanel>
         <TextBlock Text="API Key" Style="{StaticResource Caption}"/>
         <Grid>
-          <PasswordBox x:Name="ApiKeyInput" MaxLength="1000" Height="40"/>
+          <PasswordBox x:Name="ApiKeyInput" MaxLength="1000" Height="40" AutomationProperties.Name="API Key"/>
           <TextBlock x:Name="KeyPlaceholder" Text="输入此服务的 API Key…" IsHitTestVisible="False" Foreground="{StaticResource Muted}" FontSize="13" VerticalAlignment="Center" Margin="12,0"/>
         </Grid>
-        <TextBlock x:Name="KeyHint" Text="密钥保存在 Windows 凭据管理器。" TextWrapping="Wrap" Foreground="{StaticResource Muted}" FontSize="11" Margin="0,7,0,16"/>
+        <TextBlock x:Name="KeyHint" Text="密钥保存在 Windows 凭据管理器。" TextWrapping="Wrap" Foreground="{StaticResource Muted}" FontSize="12" Margin="0,7,0,16"/>
           <StackPanel Margin="0,0,0,15"><TextBlock Text="模型" Style="{StaticResource Caption}"/>
             <ComboBox x:Name="ModelInput" IsEditable="True" IsTextSearchEnabled="False" MaxDropDownHeight="260"/>
           </StackPanel>
@@ -58,7 +58,7 @@
             <Button x:Name="DeleteKey" Content="删除此服务的已存密钥" Style="{StaticResource GhostButton}" HorizontalAlignment="Left" Margin="-8,8,0,0"/>
           </StackPanel>
         </Expander>
-        <Button x:Name="SaveSettingsButton" Content="应用服务配置" HorizontalAlignment="Left" Padding="16,9" Margin="0,-6,0,28"/>
+        <Button x:Name="SaveSettingsButton" Content="应用服务配置" Style="{StaticResource PrimaryButton}" HorizontalAlignment="Left" Padding="16,9" Margin="0,-6,0,28"/>
         <TextBlock Text="阅读与翻译" Style="{StaticResource SectionTitle}"/>
         <Grid Margin="0,0,0,16">
           <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
