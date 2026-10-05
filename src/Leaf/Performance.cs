@@ -165,15 +165,24 @@ namespace Leaf
             var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(20) };
             timer.Tick += (s, e) => { long now = gapWatch.ElapsedMilliseconds; gaps.Add(now - lastBeat); lastBeat = now; };
             timer.Start();
+            HistorySnapshots.HistoryPayload encoded = null;
             try {
                 if (sequential) {
                     await Task.Yield();
                     foreach (var record in records) await store.SaveAsync(record, store.HistoryEpoch);
                     await store.FlushAsync();
                 } else {
-                    HistorySnapshots.ResetEncodeCalls();
-                    var payload = HistorySnapshots.Encode(records, records.Count);
-                    await Task.Run(() => File.WriteAllText(Path.Combine(directory, "history-encode.json"), payload.Json, new UTF8Encoding(false)));
+                    // One background pass: linear Encode of the 1000 candidates and a real atomic
+                    // file commit, while the dispatcher keeps its 20 ms heartbeat.
+                    encoded = await Task.Run(() => {
+                        HistorySnapshots.ResetEncodeCalls();
+                        var payload = HistorySnapshots.Encode(records, records.Count);
+                        var batch = new AtomicFileBatch(directory, new PhysicalStoreFiles());
+                        batch.Commit(new Dictionary<string, string> {
+                            { AtomicFileBatch.HistoryName, payload.Json }
+                        }, null, null, null);
+                        return payload;
+                    });
                 }
             } finally { timer.Stop(); }
             watch.Stop();
@@ -182,9 +191,11 @@ namespace Leaf
             return new {
                 phase = name, duration_ms = watch.ElapsedMilliseconds, samples = sampleCount,
                 sequential_saves = sequential, encode_calls = HistorySnapshots.EncodeCalls,
+                records_kept = encoded == null ? -1 : encoded.Records.Count,
+                utf8_bytes = encoded == null ? -1 : encoded.Utf8Bytes,
                 heartbeat_beats = gaps.Count, heartbeat_max_gap_ms = gaps.Count == 0 ? -1 : gaps.Max(),
                 history_file_bytes = historyBytes,
-                note = "Real PhysicalStoreFiles; LongRecord = 2000-char source + 2000-char translation + 24x600-char chat. The 1000-record phase measures one linear Encode plus one background write, not 1000 sequential rewrites."
+                note = "Real PhysicalStoreFiles; LongRecord = 2000-char source + 2000-char translation + 24x600-char chat. The 1000-record phase is one background linear Encode plus one real atomic commit, not 1000 sequential rewrites; heartbeat numbers are for this machine only."
             };
         }
         private static TranslationRecord LongRecord(int index, Settings context)
