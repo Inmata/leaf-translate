@@ -84,8 +84,10 @@ if ($WithRelease) {
     if (-not (Test-Path -LiteralPath $archive) -or -not (Test-Path -LiteralPath $checksumFile)) { throw 'Run scripts/package.ps1 before publishing a release.' }
     $expectedChecksum = (Get-Content -LiteralPath $checksumFile -Raw).Trim().Split(' ')[0]
     if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ine $expectedChecksum) { throw 'Package checksum mismatch.' }
-    & $ghPath release view v0.1.0 --repo $repository *> $null
-    if ($LASTEXITCODE -eq 0) { Write-Output 'Release v0.1.0 already exists; existing assets were kept.' }
+    $releasesJson = & $ghPath release list --repo $repository --limit 100 --json tagName
+    if ($LASTEXITCODE -ne 0) { throw 'Source is published, but the release list could not be read.' }
+    $existingReleases = ($releasesJson -join "`n") | ConvertFrom-Json
+    if (@($existingReleases | Where-Object { $_.tagName -eq 'v0.1.0' }).Count -gt 0) { Write-Output 'Release v0.1.0 already exists; existing assets were kept.' }
     else {
         & $ghPath release create v0.1.0 $archive $checksumFile --repo $repository --target $remoteSha --title 'Leaf v0.1.0' --notes-file (Join-Path $projectRoot 'docs\RELEASE-v0.1.0.md')
         if ($LASTEXITCODE -ne 0) { throw 'Source is published, but release creation failed.' }
