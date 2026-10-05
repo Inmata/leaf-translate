@@ -36,6 +36,7 @@ public static class StorageRegressionTests
         await ClearBoundaryScenarios(folder);
         await ExplicitRecoveryEvidenceScenarios(folder);
         await BackupCleanupScenarios(folder);
+        await PostCommitCleanupScenarios(folder);
         await StructureScenarios(folder);
         await ByteLimitRegression(folder);
         await HistoryScenarios(folder);
@@ -761,6 +762,63 @@ public static class StorageRegressionTests
         var reloaded = new LocalStore(directory).History("");
         Check(reloaded.Count == 1 && reloaded[0].Id == fresh.Id,
             "The retried backup cleanup does not delete the later-epoch record");
+    }
+
+    // Post-commit cleanup runs after the files and memory are published; a cleanup fault must
+    // be reported and retryable without rolling back the committed settings.
+    private static async Task PostCommitCleanupScenarios(string folder)
+    {
+        string directory = NewDirectory(folder, "post-commit");
+        var store = new LocalStore(directory);
+        await store.SaveSettingsAsync(SettingsUpdate.Full(
+            FixtureSettings("fixture", "https://old-api.invalid/v1", "fixture-model")));
+        await store.FlushAsync();
+        bool failCleanup = true, rolledBack = false;
+        var disabled = Json.Copy(store.Settings); disabled.HistoryEnabled = false;
+        bool failed = false;
+        try {
+            await store.CommitSettingsAsync(SettingsUpdate.Preferences(disabled), null,
+                (committed, candidate) => rolledBack = true, false,
+                () => { if (failCleanup) throw new UserError("storage", "cleanup fixture"); });
+        } catch (UserError) { failed = true; }
+        Check(failed, "A post-commit cleanup fault is reported");
+        Check(!rolledBack, "A post-commit cleanup fault never rolls back the durable settings commit");
+        Check(store.Settings.HistoryEnabled == false && new LocalStore(directory).Settings.HistoryEnabled == false,
+            "The committed settings stay applied despite the cleanup fault");
+        bool pending = false;
+        try { await store.FlushAsync(); } catch (UserError) { pending = true; }
+        Check(pending, "Flush keeps reporting the unresolved post-commit cleanup");
+        failCleanup = false;
+        await store.RetryFailedWritesAsync();
+        bool resolved = true;
+        try { await store.FlushAsync(); } catch (UserError) { resolved = false; }
+        Check(resolved, "Retrying the post-commit cleanup resolves the failure");
+
+        string backupDir = NewDirectory(folder, "post-commit-backup");
+        var backupFiles = new TargetedFaultingFiles();
+        var backupStore = new LocalStore(backupDir, backupFiles);
+        await backupStore.SaveSettingsAsync(SettingsUpdate.Full(
+            FixtureSettings("fixture", "https://old-api.invalid/v1", "fixture-model")));
+        string quarantine = Path.Combine(backupDir, "history.json.quarantine-fixture");
+        File.WriteAllText(quarantine, "sensitive fixture quarantine");
+        backupFiles.Fail = (operation, path) => operation == "Delete" &&
+            Path.GetFileName(path).StartsWith("history.json.quarantine-", StringComparison.Ordinal);
+        bool backupRolledBack = false;
+        var disableBackup = Json.Copy(backupStore.Settings); disableBackup.HistoryEnabled = false;
+        bool disableFailed = false;
+        try {
+            await backupStore.CommitSettingsAsync(SettingsUpdate.Preferences(disableBackup), null,
+                (committed, candidate) => backupRolledBack = true, false, null);
+        } catch (UserError) { disableFailed = true; }
+        Check(disableFailed && !backupRolledBack && backupStore.Settings.HistoryEnabled == false,
+            "A failed backup cleanup does not roll back the history-disable commit");
+        Check(File.Exists(quarantine), "The sensitive backup survives until the cleanup retry");
+        backupFiles.Fail = null;
+        await backupStore.RetryFailedWritesAsync();
+        bool backupResolved = true;
+        try { await backupStore.FlushAsync(); } catch (UserError) { backupResolved = false; }
+        Check(backupResolved && !File.Exists(quarantine),
+            "Retrying the post-commit cleanup removes the sensitive backup");
     }
 
     private static async Task CredentialAndPatchScenarios(string folder)

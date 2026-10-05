@@ -370,16 +370,22 @@ namespace Leaf
         }
         private void CleanupReplacedCredentials(List<KeyValuePair<ProviderProfile, ProviderProfile>> replaced, HashSet<string> deleted)
         {
+            var failures = new List<string>();
             foreach (var pair in replaced) {
                 string oldScoped, newScoped;
-                try { oldScoped = Credentials.ScopedId(pair.Key); newScoped = Credentials.ScopedId(pair.Value); } catch { continue; }
+                try { oldScoped = Credentials.ScopedId(pair.Key); newScoped = Credentials.ScopedId(pair.Value); }
+                catch { failures.Add("地址"); continue; }
                 if (oldScoped == newScoped) continue;
                 string newKey = "";
-                try { newKey = credentialProfiles.Read(pair.Value); } catch { }
+                try { newKey = credentialProfiles.Read(pair.Value); }
+                catch { failures.Add("读取"); continue; }
                 if (deleted.Contains(pair.Value.Id) || newKey.Length > 0) {
-                    try { credentialProfiles.Delete(pair.Key); } catch { }
+                    try { credentialProfiles.Delete(pair.Key); }
+                    catch { failures.Add("删除"); }
                 }
             }
+            if (failures.Count > 0)
+                throw new UserError("credentials", "未能清理不再使用的旧地址密钥，请重试。");
         }
         internal string ReadCredential(ProviderProfile profile)
         {

@@ -20,6 +20,7 @@ namespace Leaf
         private readonly HashSet<string> tombstones = new HashSet<string>(StringComparer.Ordinal);
         private readonly List<FailedWrite> failedWrites = new List<FailedWrite>();
         private readonly List<FailedSettings> failedSettings = new List<FailedSettings>();
+        private readonly List<FailedCleanup> failedCleanups = new List<FailedCleanup>();
         public Settings Settings { get { lock (sync) return settings; } }
         public string Warning { get; private set; }
         public bool RecoveryBlocked { get; private set; }
@@ -45,6 +46,14 @@ namespace Leaf
         {
             public long QueueId;
             public string Scope;
+        }
+
+        // A cleanup that runs after a durable commit; it is retried through the same ordered
+        // queue without ever being presented as a rolled-back settings commit.
+        private sealed class FailedCleanup
+        {
+            public Action Retry;
+            public long QueueId;
         }
 
         public LocalStore(string directory) : this(directory, new PhysicalStoreFiles()) { }
@@ -79,6 +88,7 @@ namespace Leaf
         {
             if (update == null) throw new ArgumentNullException("update");
             return queue.Enqueue(queueId => {
+                bool committed = false;
                 try {
                     Settings latest; List<TranslationRecord> currentRecords;
                     lock (sync) { latest = settings; currentRecords = records; }
@@ -115,26 +125,59 @@ namespace Leaf
                             applyExternal == null ? (Action)null : () => applyExternal(latest, candidate),
                             rollbackExternal == null ? (Action)null : () => rollbackExternal(latest, candidate),
                             () => {
+                                // Publish is memory-only: no file, credential or hotkey I/O here.
                                 lock (sync) {
                                     settings = candidate;
                                     if (candidateRecords != null) records = candidateRecords;
                                 }
-                                if (candidateRecords != null && !candidate.HistoryEnabled) DeleteHistoryBackups();
-                                if (afterCommit != null) afterCommit();
                             }, resolveExternalPending);
+                        committed = true;
                         lock (sync) { RecoveryBlocked = false; ExternalRollbackPending = false; }
                     } finally {
                         if (batch.RecoveryBlocked) RecoveryBlocked = true;
                         if (batch.ExternalRollbackPending) ExternalRollbackPending = true;
                     }
+                    // Only a commit in the same patch scope/target supersedes the matching failure;
+                    // an unrelated success leaves the lost user configuration unresolved.
+                    AcknowledgeSettingsFailures(update.Scope);
+                    RunPostCommitCleanups(queueId, candidate, candidateRecords, afterCommit);
                 } catch (Exception) {
-                    lock (sync) failedSettings.Add(new FailedSettings { QueueId = queueId, Scope = update.Scope });
+                    // A post-commit cleanup fault must not be recorded as a failed settings
+                    // commit; the files and memory are already durable.
+                    if (!committed)
+                        lock (sync) failedSettings.Add(new FailedSettings { QueueId = queueId, Scope = update.Scope });
                     throw;
                 }
-                // Only a commit in the same patch scope/target supersedes the matching failure;
-                // an unrelated success leaves the lost user configuration unresolved.
-                AcknowledgeSettingsFailures(update.Scope);
             });
+        }
+
+        // Cleanup runs after the settings files and memory are durable. A cleanup fault never
+        // presents the commit as rolled back, but it stays reported until an explicit retry.
+        private void RunPostCommitCleanups(long queueId, Settings candidate,
+            List<TranslationRecord> candidateRecords, Action afterCommit)
+        {
+            var cleanups = new List<Action>();
+            if (candidateRecords != null && !candidate.HistoryEnabled) cleanups.Add(DeleteHistoryBackups);
+            if (afterCommit != null) cleanups.Add(afterCommit);
+            if (cleanups.Count == 0) return;
+            Exception failure = RunCleanups(cleanups);
+            if (failure == null) return;
+            var retry = new Action(() => {
+                Exception remaining = RunCleanups(cleanups);
+                if (remaining != null) throw remaining;
+            });
+            lock (sync) failedCleanups.Add(new FailedCleanup { Retry = retry, QueueId = queueId });
+            throw new UserError("storage", "本地数据已保存，但清理未完成；请重试。", failure);
+        }
+
+        private static Exception RunCleanups(List<Action> cleanups)
+        {
+            Exception failure = null;
+            foreach (var cleanup in cleanups) {
+                try { cleanup(); }
+                catch (Exception error) { if (failure == null) failure = error; }
+            }
+            return failure;
         }
 
         private void AcknowledgeSettingsFailures(string scope)
@@ -175,7 +218,11 @@ namespace Leaf
         public async Task RetryFailedWritesAsync()
         {
             List<FailedWrite> pending;
-            lock (sync) pending = failedWrites.ToList();
+            List<FailedCleanup> cleanups;
+            lock (sync) {
+                pending = failedWrites.ToList();
+                cleanups = failedCleanups.ToList();
+            }
             foreach (var item in pending) {
                 var capture = item;
                 try {
@@ -186,6 +233,18 @@ namespace Leaf
                     }).ConfigureAwait(false);
                 } catch {
                     // The original failure entry stays until this snapshot is replayed successfully.
+                }
+            }
+            foreach (var item in cleanups) {
+                var capture = item;
+                try {
+                    await queue.EnqueueRetry(() => {
+                        capture.Retry();
+                        lock (sync) failedCleanups.Remove(capture);
+                        queue.AcknowledgeFailure(capture.QueueId);
+                    }).ConfigureAwait(false);
+                } catch {
+                    // The cleanup stays tracked until it succeeds.
                 }
             }
         }
