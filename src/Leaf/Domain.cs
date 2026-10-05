@@ -374,7 +374,8 @@ namespace Leaf
     public sealed class UserError : Exception
     {
         public string Code { get; private set; }
-        public UserError(string code, string message) : base(message) { Code = code; }
+        public UserError(string code, string message) : this(code, message, null) { }
+        public UserError(string code, string message, Exception inner) : base(message, inner) { Code = code; }
     }
     public sealed class RequestGate
     {

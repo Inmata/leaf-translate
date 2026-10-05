@@ -122,7 +122,7 @@ namespace Leaf
                 if (committed) {
                     // The new files are durable; the committed marker lets startup clean up.
                     if (error is UserError) throw;
-                    throw new UserError("storage", "本地数据已保存，但清理未完成；下次启动会自动处理。");
+                    throw new UserError("storage", "本地数据已保存，但清理未完成；下次启动会自动处理。", error);
                 }
                 // Without a prepared marker no target was replaced, so there is nothing to
                 // restore from a backup and missing staging backups must not block recovery.
@@ -144,9 +144,9 @@ namespace Leaf
                     ExternalRollbackPending = markedExternalApplied;
                 }
                 if (RecoveryBlocked || ExternalRollbackPending)
-                    throw new UserError("storage", "本地保存失败，且未能完全恢复原状态。请重新应用配置后重试。");
+                    throw new UserError("storage", "本地保存失败，且未能完全恢复原状态。请重新应用配置后重试。", error);
                 if (error is UserError) throw;
-                throw new UserError("storage", "无法保存本地数据。请检查磁盘空间或目录权限。");
+                throw new UserError("storage", "无法保存本地数据。请检查磁盘空间或目录权限。", error);
             }
         }
 
