@@ -33,6 +33,7 @@ public static class StorageRegressionTests
         await QueueResolutionScenarios(folder);
         await SettingsFailureScopeScenarios(folder);
         await FailedDisableBarrierScenarios(folder);
+        await ClearBoundaryScenarios(folder);
         await StructureScenarios(folder);
         await ByteLimitRegression(folder);
         await HistoryScenarios(folder);
@@ -630,6 +631,33 @@ public static class StorageRegressionTests
         var reloaded = new LocalStore(directory).History("");
         Check(reloaded.Count == 1 && reloaded[0].Id == seeded.Id,
             "A failed disable barrier prevents old-epoch saves and retries from reviving");
+    }
+
+    // A clear must remove every record that was published before the queued clear runs,
+    // including a save that already passed its epoch check and was still writing.
+    private static async Task ClearBoundaryScenarios(string folder)
+    {
+        string directory = NewDirectory(folder, "clear-boundary");
+        var files = new BlockingWriteFiles();
+        var store = new LocalStore(directory, files);
+        var seeded = Completed("clear boundary seed", store.Settings);
+        await store.SaveAsync(seeded, store.HistoryEpoch);
+        await store.FlushAsync();
+
+        var inFlight = Completed("clear boundary inflight", store.Settings);
+        files.BlockWrites = true;
+        var save = store.SaveAsync(inFlight, store.HistoryEpoch);
+        Check(files.Entered.Wait(10000), "The in-flight save reaches its background write window");
+        var clear = store.ClearAsync();
+        files.Release.Set();
+        await save;
+        await clear;
+        files.BlockWrites = false;
+        await store.FlushAsync();
+
+        var reloaded = new LocalStore(directory).History("");
+        Check(reloaded.Count == 0,
+            "A clear removes a record published by an in-flight save that passed its epoch check");
     }
 
     private static async Task CredentialAndPatchScenarios(string folder)
@@ -1450,6 +1478,28 @@ public static class StorageRegressionTests
         public void Replace(string source, string destination)
         { Before("Replace"); inner.Replace(source, destination); }
         public void Delete(string path) { Before("Delete"); inner.Delete(path); }
+    }
+    // Blocks the first background write so a test can interleave a clear with a save that
+    // already passed its epoch check but has not published yet.
+    private sealed class BlockingWriteFiles : IStoreFiles
+    {
+        private readonly IStoreFiles inner = new PhysicalStoreFiles();
+        public readonly ManualResetEventSlim Entered = new ManualResetEventSlim(false);
+        public readonly ManualResetEventSlim Release = new ManualResetEventSlim(false);
+        public bool BlockWrites;
+        public bool Exists(string path) { return inner.Exists(path); }
+        public long Length(string path) { return inner.Length(path); }
+        public string Read(string path) { return inner.Read(path); }
+        public void Write(string path, string payload)
+        {
+            if (BlockWrites) { Entered.Set(); Release.Wait(15000); }
+            inner.Write(path, payload);
+        }
+        public void Copy(string source, string destination, bool overwrite)
+        { inner.Copy(source, destination, overwrite); }
+        public void Move(string source, string destination) { inner.Move(source, destination); }
+        public void Replace(string source, string destination) { inner.Replace(source, destination); }
+        public void Delete(string path) { inner.Delete(path); }
     }
     private sealed class FakeCredentialProfiles : ICredentialProfiles
     {

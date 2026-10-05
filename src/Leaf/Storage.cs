@@ -231,16 +231,23 @@ namespace Leaf
         }
 
         public void Clear() { ClearAsync().GetAwaiter().GetResult(); }
+        // The boundary is frozen on the first queued execution so a retry cannot later wipe a
+        // record saved under the new epoch. Computing it at call time would miss a save that had
+        // already passed its epoch check and was still writing in the background.
+        private sealed class ClearBoundary
+        {
+            public HashSet<string> Ids;
+        }
         public Task ClearAsync()
         {
-            HashSet<string> clearedIds; long epoch; List<FailedWrite> resolved;
+            long epoch; List<FailedWrite> resolved;
             lock (sync) {
                 epoch = ++historyEpoch; tombstones.Clear();
                 resolved = failedWrites.ToList(); failedWrites.Clear();
-                clearedIds = new HashSet<string>(records.Select(r => r.Id), StringComparer.Ordinal);
             }
             AcknowledgeHistoryFailures(resolved);
-            return EnqueueHistory(() => ClearCore(clearedIds), null, epoch);
+            var boundary = new ClearBoundary();
+            return EnqueueHistory(() => ClearCore(boundary), null, epoch);
         }
 
         private Task EnqueueHistory(Action action, string id, long epoch)
@@ -283,13 +290,15 @@ namespace Leaf
             }
             CommitHistoryPayload(HistorySnapshots.Encode(candidate, limit));
         }
-        // A replayed clear removes exactly the records that existed when it was requested, so
-        // later successful saves in the same epoch are not wiped by a late retry.
-        private void ClearCore(HashSet<string> clearedIds)
+        // A replayed clear removes exactly the records that existed when the queued clear first
+        // ran, so later successful saves in the same epoch are not wiped by a late retry.
+        private void ClearCore(ClearBoundary boundary)
         {
             List<TranslationRecord> candidate; int limit;
             lock (sync) {
-                candidate = records.Where(r => !clearedIds.Contains(r.Id)).ToList();
+                if (boundary.Ids == null)
+                    boundary.Ids = new HashSet<string>(records.Select(r => r.Id), StringComparer.Ordinal);
+                candidate = records.Where(r => !boundary.Ids.Contains(r.Id)).ToList();
                 limit = settings.HistoryLimit;
             }
             CommitHistoryPayload(HistorySnapshots.Encode(candidate, limit));
