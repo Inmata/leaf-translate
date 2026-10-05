@@ -19,13 +19,31 @@ namespace Leaf
         public Task Enqueue(Action action)
         {
             if (action == null) throw new ArgumentNullException("action");
+            return EnqueueCore(id => action(), true);
+        }
+        // Receives the queue sequence so callers can acknowledge exactly one tracked failure later.
+        public Task Enqueue(Action<long> action)
+        {
+            if (action == null) throw new ArgumentNullException("action");
+            return EnqueueCore(action, true);
+        }
+        // Replaying an already tracked failure must not create a second failure entry.
+        public Task EnqueueRetry(Action action)
+        {
+            if (action == null) throw new ArgumentNullException("action");
+            return EnqueueCore(id => action(), false);
+        }
+        private Task EnqueueCore(Action<long> action, bool register)
+        {
             lock (sync) {
                 long id = ++sequence;
                 tail = tail.ContinueWith(previous => {
                     if (previous != null && previous.IsFaulted) { var observed = previous.Exception; }
-                    try { action(); }
+                    try { action(id); }
                     catch (Exception error) {
-                        lock (sync) failures.Add(new KeyValuePair<long, Exception>(id, error));
+                        if (register) {
+                            lock (sync) failures.Add(new KeyValuePair<long, Exception>(id, error));
+                        }
                         throw;
                     }
                 }, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
@@ -48,6 +66,10 @@ namespace Leaf
         public void AcknowledgeFailures(long through)
         {
             lock (sync) failures.RemoveAll(f => f.Key <= through);
+        }
+        public void AcknowledgeFailure(long id)
+        {
+            lock (sync) failures.RemoveAll(f => f.Key == id);
         }
     }
 }

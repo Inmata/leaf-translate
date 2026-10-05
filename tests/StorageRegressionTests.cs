@@ -356,6 +356,10 @@ public static class StorageRegressionTests
         await queue.FlushAsync();
         Check(order.SequenceEqual(new[] { 1, 2, 3, 4 }) && queue.FailureCount == 0,
             "Acknowledged failures let Flush succeed without losing later work");
+        var retryQueue = new StoreQueue();
+        try { await retryQueue.Enqueue(() => { throw new IOException("original fixture"); }); } catch { }
+        try { await retryQueue.EnqueueRetry(() => { throw new IOException("retry fixture"); }); } catch { }
+        Check(retryQueue.FailureCount == 1, "A failed replay does not add a duplicate failure entry");
     }
 
     private static TranslationRecord Completed(string source, Settings context)
@@ -549,6 +553,26 @@ public static class StorageRegressionTests
         string oversizePath = Path.Combine(oversizeDirectory, "history.json");
         Check(!File.Exists(oversizePath) || new FileInfo(oversizePath).Length < HistorySnapshots.HardLimit,
             "A refused oversized record cannot leave unreadable data on disk");
+
+        string mixedDirectory = NewDirectory(folder, "retry-mixed");
+        var mixedFiles = new FaultingFiles();
+        var mixedStore = new LocalStore(mixedDirectory, mixedFiles);
+        await mixedStore.SaveAsync(Completed("mixed seed", mixedStore.Settings), mixedStore.HistoryEpoch);
+        await mixedStore.FlushAsync();
+        var changedLimit = Json.Copy(mixedStore.Settings); changedLimit.HistoryLimit = 500;
+        mixedFiles.MatchingCalls = 0; mixedFiles.FailOperation = "Replace"; mixedFiles.FailAt = 1;
+        bool settingsFailed = false;
+        try { await mixedStore.SaveSettingsAsync(SettingsUpdate.Full(changedLimit)); }
+        catch (UserError) { settingsFailed = true; }
+        mixedFiles.MatchingCalls = 0; mixedFiles.FailOperation = "Replace"; mixedFiles.FailAt = 1;
+        bool saveFailed = false;
+        try { await mixedStore.SaveAsync(Completed("mixed retry", mixedStore.Settings), mixedStore.HistoryEpoch); }
+        catch (UserError) { saveFailed = true; }
+        await mixedStore.RetryFailedWritesAsync();
+        bool stillFailing = false;
+        try { await mixedStore.FlushAsync(); } catch (UserError) { stillFailing = true; }
+        Check(settingsFailed && saveFailed && stillFailing,
+            "Retrying a history failure does not clear an unresolved settings failure");
     }
     private static async Task ByteLimitRegression(string folder)
     {

@@ -30,6 +30,7 @@ namespace Leaf
             public Action Retry;
             public string Id;
             public long Epoch;
+            public long QueueId;
         }
 
         public LocalStore(string directory) : this(directory, new PhysicalStoreFiles()) { }
@@ -119,20 +120,18 @@ namespace Leaf
         {
             List<FailedWrite> pending;
             lock (sync) pending = failedWrites.ToList();
-            long through = queue.FailureWatermark;
-            bool allResolved = true;
             foreach (var item in pending) {
                 var capture = item;
                 try {
-                    await queue.Enqueue(() => {
+                    await queue.EnqueueRetry(() => {
                         capture.Retry();
                         lock (sync) failedWrites.Remove(capture);
+                        queue.AcknowledgeFailure(capture.QueueId);
                     }).ConfigureAwait(false);
                 } catch {
-                    allResolved = false;
+                    // The original failure entry stays until this snapshot is replayed successfully.
                 }
             }
-            if (allResolved) queue.AcknowledgeFailures(through);
         }
 
         public TranslationRecord Find(string key)
@@ -181,10 +180,12 @@ namespace Leaf
 
         private Task EnqueueHistory(Action action, string id, long epoch)
         {
-            return queue.Enqueue(() => {
+            return queue.Enqueue(queueId => {
                 try { action(); }
                 catch (Exception) {
-                    lock (sync) failedWrites.Add(new FailedWrite { Retry = action, Id = id, Epoch = epoch });
+                    lock (sync) failedWrites.Add(new FailedWrite {
+                        Retry = action, Id = id, Epoch = epoch, QueueId = queueId
+                    });
                     throw;
                 }
             });
