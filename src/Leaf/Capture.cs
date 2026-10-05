@@ -108,6 +108,37 @@ namespace Leaf
         Task<SelectionCaptureResult> ReadClipboardAsync(CaptureTarget target, CancellationToken cancellation);
     }
 
+    // Short, concrete feedback for a definite failure, plus the on-demand hint used by
+    // the source badge when a capture is merely inconclusive.
+    public static class CaptureMessages
+    {
+        public static string For(CaptureReason reason)
+        {
+            switch (reason) {
+                case CaptureReason.InputDenied: return "当前程序不允许读取选区，请手动复制后使用剪贴板模式。";
+                case CaptureReason.ClipboardBusy: return "剪贴板暂时不可用，可稍后再试。";
+                default: return "取词未完成，可重试或手动输入。";
+            }
+        }
+        // Shown on demand from the source badge, never as a permanent line.
+        public static string Hint(CaptureReason reason)
+        {
+            string detail;
+            switch (reason) {
+                case CaptureReason.ClipboardBusy: detail = "剪贴板暂时不可用。"; break;
+                case CaptureReason.CopyNoUpdate: detail = "没有读到可用的文字。"; break;
+                case CaptureReason.ModifiersHeld: detail = "按键还没有松开，请松开快捷键后重试。"; break;
+                case CaptureReason.ForegroundChanged: detail = "前台窗口已经变化，取词已取消。"; break;
+                case CaptureReason.AutomationBusy: detail = "上一次取词还没有结束。"; break;
+                case CaptureReason.AutomationTimeout: detail = "读取选中文字超时。"; break;
+                case CaptureReason.ClipboardOriginUnknown: detail = "无法确认剪贴板来源，未使用其中内容。"; break;
+                case CaptureReason.InputDenied: detail = "当前程序不允许读取选区。"; break;
+                default: detail = "可直接输入要翻译的文字。"; break;
+            }
+            return "未取得选区：" + detail;
+        }
+    }
+
     // Decides the order of attempts and turns every outcome into a typed result.
     // The probe owns the platform detail; this type owns the policy.
     public sealed class SelectionAcquirer

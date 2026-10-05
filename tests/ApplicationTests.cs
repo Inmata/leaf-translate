@@ -220,6 +220,125 @@ public static class ApplicationTests
             Check(shell.Store.Settings.Provider.Id == "custom" && shell.Store.Settings.Provider.BaseUrl == "https://example.invalid/v1",
                 "Custom service configuration is retained for the next launch");
         }
+        await CaptureRouting(folder);
+    }
+    // Typed capture outcomes must reach the popup as different, non-destructive states.
+    private static async Task CaptureRouting(string folder)
+    {
+        // A confirmed empty selection is an answer, not an error.
+        var emptyProbe = new FakeSelectionProbe();
+        var emptyStore = ConfiguredStore(Path.Combine(folder, "capture-empty"));
+        using (var shell = new AppShell(emptyStore, false, new LlmClient(new ImmediateHandler()))) {
+            shell.Selection = new SelectionAcquirer(emptyProbe);
+            await shell.TranslateAsync("A captured sentence.", "选中文字", false);
+            var record = shell.Current;
+            Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text = "unsent question";
+            emptyProbe.Automation = SelectionCaptureResult.NoText(CaptureStatus.Empty, CaptureReason.EmptySelection);
+            await shell.InvokeShortcutAsync();
+            Check(ReferenceEquals(shell.Current, record), "A confirmed empty selection keeps the existing conversation");
+            Check(Ui.Get<Border>(shell.Popup, "ErrorPanel").Visibility == Visibility.Collapsed, "An empty selection shows no generic error");
+            Check(Ui.Get<Grid>(shell.Popup, "SourceEditor").Visibility == Visibility.Visible, "An empty selection prepares manual input");
+            Check(Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text == "unsent question", "An empty selection keeps the follow-up draft");
+            Check(emptyProbe.CopyCalls == 0, "A confirmed empty selection never simulates a copy");
+            string emptyLog = CaptureLog(emptyStore);
+            Check(emptyLog.Contains("capture_result") && emptyLog.Contains("\"status\":\"Empty\"") && emptyLog.Contains("\"reason\":\"EmptySelection\""),
+                "An empty selection is recorded as a normal capture result");
+            Check(!emptyLog.Contains("capture_failed"), "An empty selection is never logged as a capture failure");
+            Check(!emptyLog.Contains("A captured sentence.") && !emptyLog.Contains("unsent question"),
+                "Capture diagnostics never contain the reading text or a draft");
+        }
+
+        // Unknown capability is not "no selection": manual input without a red error.
+        var unknownProbe = new FakeSelectionProbe();
+        var unknownStore = ConfiguredStore(Path.Combine(folder, "capture-unknown"));
+        using (var shell = new AppShell(unknownStore, false, new LlmClient(new ImmediateHandler()))) {
+            shell.Selection = new SelectionAcquirer(unknownProbe);
+            await shell.TranslateAsync("Another captured sentence.", "选中文字", false);
+            var record = shell.Current;
+            unknownProbe.Automation = SelectionCaptureResult.NoText(CaptureStatus.Unavailable, CaptureReason.UnsupportedPattern);
+            unknownProbe.Copy = SelectionCaptureResult.NoText(CaptureStatus.Unavailable, CaptureReason.CopyNoUpdate);
+            await shell.InvokeShortcutAsync();
+            Check(ReferenceEquals(shell.Current, record), "An inconclusive capture keeps the existing conversation");
+            Check(Ui.Get<Border>(shell.Popup, "ErrorPanel").Visibility == Visibility.Collapsed, "An inconclusive capture shows no generic error");
+            Check(Ui.Get<Grid>(shell.Popup, "SourceEditor").Visibility == Visibility.Visible, "An inconclusive capture prepares manual input");
+            var badge = Ui.Get<TextBlock>(shell.Popup, "SourceBadge");
+            Check(badge.Text.Contains("未取得选区") || Convert.ToString(badge.ToolTip).Contains("未取得选区"),
+                "An inconclusive capture is described by the source badge for the user to inspect");
+            string unknownLog = CaptureLog(unknownStore);
+            Check(unknownLog.Contains("\"status\":\"Unavailable\"") && unknownLog.Contains("capture_result"),
+                "An inconclusive capture is recorded as a normal result");
+            Check(!unknownLog.Contains("capture_failed"), "An inconclusive capture is not logged as a capture failure");
+        }
+
+        // A foreground change revokes the injected copy instead of reading the old clipboard.
+        var movedProbe = new FakeSelectionProbe { Current = false };
+        var movedStore = ConfiguredStore(Path.Combine(folder, "capture-moved"));
+        using (var shell = new AppShell(movedStore, false, new LlmClient(new ImmediateHandler()))) {
+            shell.Selection = new SelectionAcquirer(movedProbe);
+            await shell.TranslateAsync("Moved target sentence.", "选中文字", false);
+            var record = shell.Current;
+            await shell.InvokeShortcutAsync();
+            Check(movedProbe.CopyCalls == 0, "A changed foreground window prevents the simulated copy");
+            Check(ReferenceEquals(shell.Current, record), "A changed foreground window keeps the existing conversation");
+            Check(Ui.Get<Border>(shell.Popup, "ErrorPanel").Visibility == Visibility.Collapsed, "A changed foreground window shows no generic error");
+        }
+
+        // A definite system failure keeps the existing session and reports it specifically.
+        var failedProbe = new FakeSelectionProbe();
+        var failedStore = ConfiguredStore(Path.Combine(folder, "capture-failed"));
+        using (var shell = new AppShell(failedStore, false, new LlmClient(new ImmediateHandler()))) {
+            shell.Selection = new SelectionAcquirer(failedProbe);
+            await shell.TranslateAsync("A failing capture sentence.", "选中文字", false);
+            var record = shell.Current;
+            failedProbe.Automation = SelectionCaptureResult.NoText(CaptureStatus.Unavailable, CaptureReason.UnsupportedPattern);
+            failedProbe.Copy = SelectionCaptureResult.NoText(CaptureStatus.Failed, CaptureReason.InputDenied);
+            await shell.InvokeShortcutAsync();
+            Check(ReferenceEquals(shell.Current, record), "A definite capture failure keeps the existing conversation");
+            Check(Ui.Get<Border>(shell.Popup, "ErrorPanel").Visibility == Visibility.Visible &&
+                Ui.Get<TextBlock>(shell.Popup, "ErrorText").Text.Contains("当前程序不允许读取选区"),
+                "A definite capture failure shows one short specific message");
+            Check(CaptureLog(failedStore).Contains("capture_failed"), "A definite capture failure is logged as capture_failed");
+        }
+
+        // Clipboard mode reads only for this invocation and is never skipped by the Leaf branch.
+        var clipboardProbe = new FakeSelectionProbe();
+        clipboardProbe.Target.IsLeaf = true;
+        var clipboardStore = ConfiguredStore(Path.Combine(folder, "capture-clipboard"));
+        var clipboardSettings = Json.Copy(clipboardStore.Settings); clipboardSettings.ClipboardMode = true; clipboardStore.SaveSettings(clipboardSettings);
+        using (var shell = new AppShell(clipboardStore, false, new LlmClient(new ImmediateHandler()))) {
+            shell.Selection = new SelectionAcquirer(clipboardProbe);
+            clipboardProbe.Clipboard = SelectionCaptureResult.Success("fresh clipboard fixture");
+            await shell.InvokeShortcutAsync();
+            Check(clipboardProbe.ClipboardCalls == 1 && clipboardProbe.AutomationCalls == 0 && clipboardProbe.CopyCalls == 0,
+                "Clipboard mode reads the clipboard once and never queries the desktop");
+            Check(shell.Current != null && shell.Current.Source == "fresh clipboard fixture" && shell.Current.SourceKind == "剪贴板",
+                "Clipboard mode translates this invocation's clipboard text even while Leaf is in front");
+        }
+
+        // A capture that finishes after the user started typing must change nothing.
+        var lateProbe = new FakeSelectionProbe();
+        var lateStore = ConfiguredStore(Path.Combine(folder, "capture-late"));
+        var lateHandler = new ImmediateHandler();
+        using (var shell = new AppShell(lateStore, false, new LlmClient(lateHandler))) {
+            shell.Selection = new SelectionAcquirer(lateProbe);
+            await shell.TranslateAsync("A stable sentence.", "选中文字", false);
+            var record = shell.Current;
+            lateProbe.AutomationPending = new TaskCompletionSource<SelectionCaptureResult>();
+            var invocation = shell.InvokeShortcutAsync();
+            await Task.Delay(20);
+            Ui.Get<TextBox>(shell.Popup, "SourceInput").Text = "typed while capture was pending";
+            lateProbe.AutomationPending.TrySetResult(SelectionCaptureResult.Success("late capture"));
+            await invocation;
+            Check(ReferenceEquals(shell.Current, record) && Ui.Get<TextBox>(shell.Popup, "SourceInput").Text == "typed while capture was pending",
+                "A late capture cannot overwrite what the user typed");
+            Check(shell.Current.Translation == "完整译文", "A late capture does not replace the visible translation");
+            lateProbe.AutomationPending = null;
+        }
+    }
+    private static string CaptureLog(LocalStore store)
+    {
+        string logs = Path.Combine(store.Folder, "logs");
+        return Directory.Exists(logs) ? string.Concat(Directory.GetFiles(logs).Select(File.ReadAllText)) : "";
     }
     private static LocalStore ConfiguredStore(string directory)
     {

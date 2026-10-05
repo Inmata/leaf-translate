@@ -31,7 +31,7 @@ namespace Leaf
             sourceInput.TextChanged += (s, e) => {
                 Ui.Visible(Ui.Get<TextBlock>(Popup, "SourcePlaceholder"), sourceInput.Text.Length == 0);
                 Ui.Get<Button>(Popup, "TranslateButton").IsEnabled = !string.IsNullOrWhiteSpace(sourceInput.Text);
-                if (!fillingSource) sourceRevision++;
+                if (!fillingSource) { CancelCapture(); sourceRevision++; }
                 Ui.Get<TextBlock>(Popup, "SourceEditHint").Text = Current != null && sourceInput.Text != Current.Source ? "原文已修改 · Enter 翻译" : "Enter 翻译 · Shift+Enter 换行";
             };
             sourceInput.PreviewKeyDown += async (s, e) => {
@@ -159,6 +159,7 @@ namespace Leaf
         }
         public void BeginSourceEdit(bool focus)
         {
+            CancelCapture();
             if (focus) sourceRevision++;
             var input = Ui.Get<TextBox>(Popup, "SourceInput");
             if (Ui.Get<Grid>(Popup, "SourceEditor").Visibility != Visibility.Visible) {
@@ -191,6 +192,7 @@ namespace Leaf
         }
         public async Task SubmitSourceAsync()
         {
+            CancelCapture();
             sourceRevision++;
             string text = Ui.Get<TextBox>(Popup, "SourceInput").Text;
             if (string.IsNullOrWhiteSpace(text)) return;

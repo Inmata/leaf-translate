@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -83,6 +84,7 @@ namespace Leaf
         [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr window, out Rect rect);
         [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr window, IntPtr after, int x, int y, int width, int height, uint flags);
         [DllImport("user32.dll")] public static extern uint GetClipboardSequenceNumber();
+        [DllImport("user32.dll")] private static extern IntPtr GetClipboardOwner();
         [DllImport("user32.dll")] private static extern bool IsClipboardFormatAvailable(uint format);
         [DllImport("user32.dll")] private static extern short GetAsyncKeyState(int key);
         [DllImport("user32.dll", SetLastError = true)] private static extern uint SendInput(uint count, Input[] inputs, int size);
@@ -97,7 +99,6 @@ namespace Leaf
         [DllImport("user32.dll")] public static extern bool DestroyIcon(IntPtr icon);
         [DllImport("shcore.dll")] private static extern int GetDpiForMonitor(IntPtr monitor, int type, out uint x, out uint y);
         [DllImport("user32.dll")] private static extern IntPtr MonitorFromPoint(Point point, uint flags);
-        private static int automationRunning;
         private static int clipboardWriting;
         private static int captureRunning;
 
@@ -146,14 +147,14 @@ namespace Leaf
             if (!IsClipboardFormatAvailable(13) && !IsClipboardFormatAvailable(1)) return Task.FromResult("");
             return StaCapture(() => Forms.Clipboard.GetText(Forms.TextDataFormat.UnicodeText), false);
         }
-        private sealed class CaptureResult { public string Text; public Exception Error; }
+        private sealed class StaCaptureResult { public string Text; public Exception Error; }
         private static async Task<string> StaCapture(Func<string> action, bool selection)
         {
             if (Interlocked.CompareExchange(ref captureRunning, 1, 0) != 0)
                 throw new UserError("clipboard_busy", "取词尚未完成，可直接输入或稍后再试。");
-            var result = new TaskCompletionSource<CaptureResult>();
+            var result = new TaskCompletionSource<StaCaptureResult>();
             var worker = new Thread(() => {
-                var captured = new CaptureResult();
+                var captured = new StaCaptureResult();
                 try { captured.Text = action(); } catch (Exception error) { captured.Error = error; }
                 finally { Interlocked.Exchange(ref captureRunning, 0); result.TrySetResult(captured); }
             }) { IsBackground = true, Name = "Leaf capture" };
@@ -165,61 +166,181 @@ namespace Leaf
             return value.Text;
         }
 
-        public static async Task<string> SelectedTextAsync()
+        // One safe simulated copy against the window this invocation was started for.
+        // The worker owns the deadline source, so a worker that finishes after the
+        // caller gave up still sees a revoked token and never injects a late copy.
+        public static Task<SelectionCaptureResult> CopySelectionAsync(CaptureTarget target, CancellationToken cancellation)
         {
-            IntPtr foreground = GetForegroundWindow();
-            if (IsDesktop(foreground)) return "";
-            var automation = System.Threading.Interlocked.CompareExchange(ref automationRunning, 1, 0) == 0 ? Task.Run(() => {
-                try {
-                    var focused = AutomationElement.FocusedElement; object pattern;
-                    if (focused != null && focused.TryGetCurrentPattern(TextPattern.Pattern, out pattern)) {
-                        uint process; GetWindowThreadProcessId(foreground, out process);
-                        if (focused.Current.ProcessId != process) return null;
-                        return string.Join("", ((TextPattern)pattern).GetSelection().Select(range => range.GetText(6001)));
-                    }
-                } catch { }
-                finally { System.Threading.Interlocked.Exchange(ref automationRunning, 0); }
-                return null;
-            }) : Task.FromResult<string>(null);
-            if (await Task.WhenAny(automation, Task.Delay(180)) == automation) {
-                string selected = await automation;
-                if (selected != null && GetForegroundWindow() == foreground)
-                    return string.IsNullOrWhiteSpace(selected) ? "" : TextTools.ValidateInput(selected);
-            }
-            return await StaCapture(() => CopySelection(foreground), true);
+            if (Stopped(cancellation))
+                return Task.FromResult(SelectionCaptureResult.NoText(CaptureStatus.Cancelled, CaptureReason.Cancelled));
+            if (Interlocked.CompareExchange(ref captureRunning, 1, 0) != 0)
+                return Task.FromResult(Step(CaptureStatus.Unavailable, CaptureReason.CaptureBusy, "copy_wait", CaptureReason.CaptureBusy));
+            var completion = new TaskCompletionSource<SelectionCaptureResult>();
+            var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
+            var worker = new Thread(() => {
+                var steps = new List<CaptureStep>();
+                SelectionCaptureResult outcome;
+                try { outcome = CopyOnSta(target, deadline, steps); }
+                catch (Exception error) { outcome = CopyFailure(error, steps); }
+                finally { Interlocked.Exchange(ref captureRunning, 0); }
+                completion.TrySetResult(outcome);
+                deadline.Dispose();
+            }) { IsBackground = true, Name = "Leaf capture" };
+            worker.SetApartmentState(ApartmentState.STA); worker.Start();
+            return AwaitCopyAsync(completion.Task, deadline);
         }
-        private static string CopySelection(IntPtr foreground)
+
+        private static async Task<SelectionCaptureResult> AwaitCopyAsync(Task<SelectionCaptureResult> worker, CancellationTokenSource deadline)
         {
-            for (int i = 0; i < 30 && ModifiersHeld(); i++) Thread.Sleep(20);
-            if (ModifiersHeld() || GetForegroundWindow() != foreground)
-                throw new UserError("selection", "没有取得选中文字。请松开快捷键重试，或切到剪贴板模式。");
-            Forms.IDataObject previous;
-            try { previous = Forms.Clipboard.GetDataObject(); }
-            catch { throw new UserError("clipboard", "剪贴板暂时不可用。请稍候再试。"); }
+            if (await Task.WhenAny(worker, Task.Delay(1600)) == worker) return await worker;
+            // Revoke the token first so the worker cannot inject anything it had not sent yet.
+            try { deadline.Cancel(); } catch (ObjectDisposedException) { }
+            return Step(CaptureStatus.Unavailable, CaptureReason.ClipboardBusy, "copy_wait", CaptureReason.ClipboardBusy);
+        }
+
+        private static SelectionCaptureResult CopyOnSta(CaptureTarget target, CancellationTokenSource deadline, List<CaptureStep> steps)
+        {
+            var watch = Stopwatch.StartNew();
+            // Wait for the shortcut keys to come up, but never release the user's own keys.
+            bool released = WaitForModifiers(deadline.Token, 600);
+            steps.Add(new CaptureStep {
+                Stage = "copy_wait", Reason = released ? CaptureReason.None : CaptureReason.ModifiersHeld,
+                ModifiersReleased = released, ForegroundSame = GetForegroundWindow() == target.Window,
+                ElapsedMs = watch.ElapsedMilliseconds
+            });
+            if (Stopped(deadline.Token)) return Stopped(steps);
+            if (!released) return Stepped(CaptureStatus.Unavailable, CaptureReason.ModifiersHeld, steps);
+            if (GetForegroundWindow() != target.Window) return Stepped(CaptureStatus.Unavailable, CaptureReason.ForegroundChanged, steps);
+
+            Forms.IDataObject previous = null;
+            try { previous = Forms.Clipboard.GetDataObject(); } catch { }
             uint before = GetClipboardSequenceNumber();
+            if (Stopped(deadline.Token)) return Stopped(steps);
+            if (GetForegroundWindow() != target.Window) return Stepped(CaptureStatus.Unavailable, CaptureReason.ForegroundChanged, steps);
+
             var inputs = new[] { KeyInput(17, false), KeyInput(67, false), KeyInput(67, true), KeyInput(17, true) };
-            if (SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(Input))) != inputs.Length)
-                throw new UserError("selection", "当前程序不允许读取选区。请复制文字后使用剪贴板模式。");
-            uint copied = before; string text = "";
-            try {
-                for (int i = 0; i < 20; i++) {
-                    Thread.Sleep(20);
-                    copied = GetClipboardSequenceNumber();
-                    if (copied == before) continue;
-                    if (GetForegroundWindow() != foreground) break;
-                    try { if (IsClipboardFormatAvailable(13)) text = Forms.Clipboard.GetText(Forms.TextDataFormat.UnicodeText); } catch { }
-                    if (!string.IsNullOrWhiteSpace(text)) break;
-                }
-            } finally {
-                // Never overwrite a newer copy performed by the user or a different foreground app.
-                if (copied != before && GetClipboardSequenceNumber() == copied && GetForegroundWindow() == foreground) {
-                    try { if (previous == null) Forms.Clipboard.Clear(); else Forms.Clipboard.SetDataObject(previous, true, 0, 0); } catch { }
-                }
+            uint sent = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(Input)));
+            int sendError = sent == inputs.Length ? 0 : Marshal.GetLastWin32Error();
+            steps.Add(new CaptureStep {
+                Stage = "copy_send", Reason = sent == inputs.Length ? CaptureReason.None : CaptureReason.InputDenied,
+                NativeError = sendError, ForegroundSame = GetForegroundWindow() == target.Window,
+                ElapsedMs = watch.ElapsedMilliseconds
+            });
+            if (sent != inputs.Length) return Stepped(CaptureStatus.Failed, CaptureReason.InputDenied, steps);
+
+            // Only a new sequence owned by the captured process may be read as this copy.
+            uint captured = 0; string text = "";
+            var copyWatch = Stopwatch.StartNew();
+            while (copyWatch.ElapsedMilliseconds < 400) {
+                Thread.Sleep(20);
+                uint observed = GetClipboardSequenceNumber();
+                if (observed == before) continue;
+                bool foregroundSame = GetForegroundWindow() == target.Window;
+                if (!WindowsSelectionProbe.CanReadFreshCopy(before, observed, foregroundSame, Stopped(deadline.Token))) break;
+                if (!WindowsSelectionProbe.CanTrustOrigin(ClipboardOwnerProcess(), target.ProcessId)) break;
+                captured = observed;
+                try { if (IsClipboardFormatAvailable(13)) text = Forms.Clipboard.GetText(Forms.TextDataFormat.UnicodeText); } catch { }
+                if (!string.IsNullOrWhiteSpace(text)) break;
             }
-            if (string.IsNullOrWhiteSpace(text)) throw new UserError("selection", "未取得选中文字。当前软件可能不支持选区复制，请试试剪贴板模式。");
-            return TextTools.ValidateInput(text);
+            steps.Add(new CaptureStep {
+                Stage = "clipboard_read", Reason = captured == 0 ? CaptureReason.ClipboardOriginUnknown : CaptureReason.None,
+                ClipboardChanged = captured != 0, ForegroundSame = GetForegroundWindow() == target.Window,
+                ElapsedMs = watch.ElapsedMilliseconds
+            });
+
+            // Put the saved clipboard back only while this capture is still the newest one.
+            if (captured != 0 && WindowsSelectionProbe.CanRestoreCopy(captured, GetClipboardSequenceNumber(), GetForegroundWindow() == target.Window)) {
+                bool restored = false;
+                try { if (previous == null) Forms.Clipboard.Clear(); else Forms.Clipboard.SetDataObject(previous, true, 0, 0); restored = true; } catch { }
+                steps.Add(new CaptureStep { Stage = "clipboard_restore", Reason = CaptureReason.None, ClipboardChanged = restored, ElapsedMs = watch.ElapsedMilliseconds });
+            }
+            if (captured == 0) return Stepped(CaptureStatus.Unavailable, CaptureReason.ClipboardOriginUnknown, steps);
+            if (string.IsNullOrWhiteSpace(text)) return Stepped(CaptureStatus.Unavailable, CaptureReason.CopyNoUpdate, steps);
+            return SelectionCaptureResult.Create(CaptureStatus.Text, CaptureReason.None,
+                text.Length > 6001 ? text.Substring(0, 6001) : text, steps);
+        }
+
+        private static bool WaitForModifiers(CancellationToken cancellation, int limitMs)
+        {
+            var watch = Stopwatch.StartNew();
+            while (ModifiersHeld()) {
+                if (Stopped(cancellation) || watch.ElapsedMilliseconds >= limitMs) return false;
+                Thread.Sleep(20);
+            }
+            return true;
+        }
+        private static uint ClipboardOwnerProcess()
+        {
+            IntPtr owner = GetClipboardOwner();
+            if (owner == IntPtr.Zero) return 0;
+            uint process; GetWindowThreadProcessId(owner, out process);
+            return process;
+        }
+        private static bool Stopped(CancellationToken token)
+        {
+            try { return token.IsCancellationRequested; } catch (ObjectDisposedException) { return true; }
+        }
+        private static SelectionCaptureResult Stopped(List<CaptureStep> steps)
+        {
+            return SelectionCaptureResult.Create(CaptureStatus.Cancelled, CaptureReason.Cancelled, "", steps);
+        }
+        private static SelectionCaptureResult Stepped(CaptureStatus status, CaptureReason reason, List<CaptureStep> steps)
+        {
+            return SelectionCaptureResult.Create(status, reason, "", steps);
+        }
+        private static SelectionCaptureResult Step(CaptureStatus status, CaptureReason reason, string stage, CaptureReason stepReason)
+        {
+            return SelectionCaptureResult.Create(status, reason, "", new List<CaptureStep> {
+                new CaptureStep { Stage = stage, Reason = stepReason }
+            });
+        }
+        private static SelectionCaptureResult CopyFailure(Exception error, List<CaptureStep> steps)
+        {
+            var user = error as UserError;
+            bool clipboard = user != null && (user.Code == "clipboard" || user.Code == "clipboard_busy");
+            steps.Add(new CaptureStep {
+                Stage = clipboard ? "clipboard_read" : "copy_send",
+                Reason = clipboard ? CaptureReason.ClipboardBusy : CaptureReason.SystemFailure,
+                HResult = error.HResult
+            });
+            return SelectionCaptureResult.Create(CaptureStatus.Failed,
+                clipboard ? CaptureReason.ClipboardBusy : CaptureReason.SystemFailure, "", steps);
         }
         private static bool ModifiersHeld() { return new[] { 16, 17, 18, 91, 92 }.Any(key => (GetAsyncKeyState(key) & 0x8000) != 0); }
+
+        // Clipboard mode reads the clipboard only for the invocation that asked for it.
+        public static async Task<SelectionCaptureResult> ReadClipboardAsync(CaptureTarget target, CancellationToken cancellation)
+        {
+            if (Stopped(cancellation)) return SelectionCaptureResult.NoText(CaptureStatus.Cancelled, CaptureReason.Cancelled);
+            try {
+                string text = await ClipboardTextAsync();
+                if (string.IsNullOrWhiteSpace(text))
+                    return Step(CaptureStatus.Unavailable, CaptureReason.CopyNoUpdate, "clipboard_read", CaptureReason.CopyNoUpdate);
+                return SelectionCaptureResult.Create(CaptureStatus.Text, CaptureReason.None, text, new List<CaptureStep> {
+                    new CaptureStep { Stage = "clipboard_read", Reason = CaptureReason.None, ClipboardChanged = true }
+                });
+            } catch (OperationCanceledException) {
+                return SelectionCaptureResult.NoText(CaptureStatus.Cancelled, CaptureReason.Cancelled);
+            } catch (UserError error) {
+                var steps = new List<CaptureStep>();
+                return CopyFailure(error, steps);
+            } catch (Exception error) {
+                var steps = new List<CaptureStep>();
+                return CopyFailure(error, steps);
+            }
+        }
+
+        // Compatibility wrapper: the shortcut path uses SelectionAcquirer, but the old
+        // entry point keeps its contract for callers that still expect a string.
+        public static async Task<string> SelectedTextAsync()
+        {
+            var target = new WindowsSelectionProbe().Snapshot();
+            if (target.IsDesktop) return "";
+            var result = await CopySelectionAsync(target, CancellationToken.None);
+            if (result.Status == CaptureStatus.Text) return result.Text;
+            if (result.Status == CaptureStatus.Empty) return "";
+            throw new UserError("selection", "没有取得选中文字。请松开快捷键重试，或切到剪贴板模式。");
+        }
         private static Input KeyInput(ushort key, bool up)
         {
             return new Input { Type = 1, Data = new InputUnion { Keyboard = new KeyboardInput { Key = key, Flags = up ? 2u : 0u } } };

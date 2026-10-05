@@ -116,7 +116,29 @@ internal static class SelectionTests
             "An unvalidated shortcut never reaches capture or the log");
 
         await Diagnostics(reader, probe);
+        CopyStateMachine();
         return count + assertions;
+    }
+
+    // Reading the old clipboard, trusting another process's copy or restoring over a
+    // newer copy are all decided by pure predicates so they can be checked off-desktop.
+    private static void CopyStateMachine()
+    {
+        Check(!WindowsSelectionProbe.CanReadFreshCopy(10, 10, true, false),
+            "Old clipboard sequence cannot become selection text");
+        Check(!WindowsSelectionProbe.CanReadFreshCopy(10, 11, false, false),
+            "Another foreground window cannot supply selection text");
+        Check(!WindowsSelectionProbe.CanReadFreshCopy(10, 11, true, true),
+            "Cancellation prevents delayed capture side effects");
+        Check(WindowsSelectionProbe.CanReadFreshCopy(10, 11, true, false),
+            "A current copy can be read");
+        Check(!WindowsSelectionProbe.CanRestoreCopy(11, 12, true),
+            "A newer user copy must survive restoration");
+        Check(WindowsSelectionProbe.CanRestoreCopy(11, 11, true) && !WindowsSelectionProbe.CanRestoreCopy(11, 11, false),
+            "The saved clipboard is restored only while its sequence and foreground still match");
+        Check(!WindowsSelectionProbe.CanTrustOrigin(0, 456) && !WindowsSelectionProbe.CanTrustOrigin(789, 456) &&
+            WindowsSelectionProbe.CanTrustOrigin(456, 456),
+            "Clipboard content is used only when its owner is the captured process");
     }
 
     // The log records fixed stage names and typed reasons only, never content.
