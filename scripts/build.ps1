@@ -7,10 +7,20 @@ if (-not (Test-Path -LiteralPath $compiler)) { throw '.NET Framework 4.8 is requ
 $outputRoot = [IO.Path]::GetFullPath((Join-Path $projectRoot $OutputDirectory))
 if (-not $outputRoot.StartsWith($projectRoot.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Build output must stay inside the project.' }
 New-Item -ItemType Directory -Force -Path $outputRoot | Out-Null
+. (Join-Path $PSScriptRoot 'version.ps1')
+$versionInfo = Get-LeafVersion -ProjectRoot $projectRoot
+$manifestTemplate = Join-Path $projectRoot 'src\Leaf\app.manifest'
+if (-not (Test-Path -LiteralPath $manifestTemplate)) { throw 'Manifest template not found: src/Leaf/app.manifest' }
+[xml]$manifestDocument = Get-Content -LiteralPath $manifestTemplate -Raw
+$manifestIdentity = $manifestDocument.assembly.assemblyIdentity
+if ($null -eq $manifestIdentity) { throw 'Manifest template has no assemblyIdentity.' }
+$manifestIdentity.SetAttribute('version', $versionInfo.Assembly)
+$generatedManifest = Join-Path $outputRoot 'Leaf.generated.manifest'
+$manifestDocument.Save($generatedManifest)
 $references = @('System.dll','System.Core.dll','System.Net.Http.dll','System.Web.Extensions.dll','System.Windows.Forms.dll','System.Drawing.dll','System.Security.dll','System.Xaml.dll')
 $arguments = @('/nologo','/target:winexe','/platform:anycpu','/optimize+','/utf8output','/codepage:65001','/main:Leaf.Program')
 $arguments += '/out:' + (Join-Path $outputRoot 'Leaf.exe')
-$arguments += '/win32manifest:' + (Join-Path $projectRoot 'src\Leaf\app.manifest')
+$arguments += '/win32manifest:' + $generatedManifest
 $iconPath = Join-Path $projectRoot 'src\Leaf\Assets\Leaf.ico'
 $arguments += '/win32icon:' + $iconPath
 $arguments += '/resource:' + $iconPath + ',Leaf.Assets.Leaf.ico'
@@ -34,7 +44,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Build failed.' }
 if ($Tests) {
     $testArguments = @('/nologo','/target:exe','/platform:anycpu','/utf8output','/codepage:65001')
     $testArguments += '/out:' + (Join-Path $outputRoot 'Leaf.Tests.exe')
-    $testArguments += '/win32manifest:' + (Join-Path $projectRoot 'src\Leaf\app.manifest')
+    $testArguments += '/win32manifest:' + $generatedManifest
     $testArguments += '/reference:' + (Join-Path $outputRoot 'Leaf.exe')
     foreach ($reference in @('System.dll','System.Core.dll','System.Net.Http.dll','System.Web.Extensions.dll','System.Xaml.dll')) { $testArguments += '/reference:' + (Join-Path $frameworkRoot $reference) }
     foreach ($reference in @('WindowsBase.dll','PresentationCore.dll','PresentationFramework.dll')) { $testArguments += '/reference:' + (Join-Path (Join-Path $frameworkRoot 'WPF') $reference) }

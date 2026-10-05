@@ -160,6 +160,106 @@ try {
     $mirrorsAfter = @(Get-ChildItem -LiteralPath (Join-Path $projectRoot 'work') -Directory -Filter 'publish-*' -ErrorAction SilentlyContinue).Count
     Assert-Check ($mirrorsAfter -eq $mirrorsBefore) 'publish -CheckOnly created no checkout'
 
+    $templatePath = Join-Path $projectRoot 'src\Leaf\app.manifest'
+    [xml]$manifestTemplate = Get-Content -LiteralPath $templatePath -Raw
+    $templateIdentity = $manifestTemplate.assembly.assemblyIdentity
+    Assert-Check ($null -eq $templateIdentity.version) 'Tracked manifest template carries no pinned version'
+    Assert-Check ($manifestTemplate.assembly.trustInfo.security.requestedPrivileges.requestedExecutionLevel.level -eq 'asInvoker') 'Manifest keeps asInvoker'
+    $manifestSettings = $manifestTemplate.assembly.application.windowsSettings
+    Assert-Check ($manifestSettings.dpiAware.InnerText -eq 'true/pm') 'Manifest keeps PerMonitor DPI awareness'
+    Assert-Check ($manifestSettings.dpiAwareness.InnerText -eq 'PerMonitorV2') 'Manifest keeps PerMonitorV2 awareness'
+    Assert-Check ($manifestSettings.longPathAware.InnerText -eq 'true') 'Manifest keeps long path awareness'
+
+    . (Join-Path $PSScriptRoot 'version.ps1')
+    $versionFixtureRoot = Join-Path $fixtureRoot 'version-fixture'
+    $versionFile = Join-Path $versionFixtureRoot 'src\Leaf\Version.cs'
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $versionFile) | Out-Null
+    $validVersion = @(
+        'namespace Leaf',
+        '{',
+        '    internal static class LeafVersion',
+        '    {',
+        '        public const string SemVer = "1.2.3";',
+        '        public const string Assembly = SemVer + ".0";',
+        '    }',
+        '}',
+        ''
+    ) -join "`r`n"
+    [IO.File]::WriteAllText($versionFile, $validVersion)
+    $fixtureVersion = Get-LeafVersion -ProjectRoot $versionFixtureRoot
+    Assert-Check ($fixtureVersion.SemVer -eq '1.2.3' -and $fixtureVersion.Assembly -eq '1.2.3.0') 'Version helper reads a valid constant'
+
+    $duplicateVersion = @(
+        'namespace Leaf',
+        '{',
+        '    internal static class LeafVersion',
+        '    {',
+        '        public const string SemVer = "1.2.3";',
+        '        public const string Assembly = SemVer + ".0";',
+        '        public const string SemVer = "9.9.9";',
+        '    }',
+        '}',
+        ''
+    ) -join "`r`n"
+    [IO.File]::WriteAllText($versionFile, $duplicateVersion)
+    $duplicateRejected = $false
+    try { Get-LeafVersion -ProjectRoot $versionFixtureRoot | Out-Null } catch { $duplicateRejected = $true }
+    Assert-Check $duplicateRejected 'Version helper rejects duplicate constants'
+
+    $invalidVersion = @(
+        'namespace Leaf',
+        '{',
+        '    internal static class LeafVersion',
+        '    {',
+        '        public const string SemVer = "1.2";',
+        '        public const string Assembly = SemVer + ".0";',
+        '    }',
+        '}',
+        ''
+    ) -join "`r`n"
+    [IO.File]::WriteAllText($versionFile, $invalidVersion)
+    $invalidRejected = $false
+    try { Get-LeafVersion -ProjectRoot $versionFixtureRoot | Out-Null } catch { $invalidRejected = $true }
+    Assert-Check $invalidRejected 'Version helper rejects an invalid version string'
+
+    $tamperedVersion = @(
+        'namespace Leaf',
+        '{',
+        '    internal static class LeafVersion',
+        '    {',
+        '        public const string SemVer = "1.2.3";',
+        '        public const string Assembly = "1.2.4.0";',
+        '    }',
+        '}',
+        ''
+    ) -join "`r`n"
+    [IO.File]::WriteAllText($versionFile, $tamperedVersion)
+    $tamperedRejected = $false
+    try { Get-LeafVersion -ProjectRoot $versionFixtureRoot | Out-Null } catch { $tamperedRejected = $true }
+    Assert-Check $tamperedRejected 'Version helper rejects an Assembly constant not derived from SemVer'
+
+    $projectVersion = Get-LeafVersion -ProjectRoot $projectRoot
+    Assert-Check ($projectVersion.SemVer -eq '0.4.1') 'Project keeps the approved SemVer version'
+    Assert-Check ($projectVersion.Assembly -eq '0.4.1.0') 'Assembly version derives the approved value'
+
+    $verificationRoot = Join-Path $projectRoot 'work\verification'
+    $exePath = Join-Path $verificationRoot 'Leaf.exe'
+    $generatedManifest = Join-Path $verificationRoot 'Leaf.generated.manifest'
+    if (-not (Test-Path -LiteralPath $exePath) -or -not (Test-Path -LiteralPath $generatedManifest)) {
+        & (Join-Path $PSScriptRoot 'build.ps1') -OutputDirectory 'work/verification'
+    }
+    $actualFileVersion = [Diagnostics.FileVersionInfo]::GetVersionInfo($exePath).FileVersion
+    Assert-Check ($actualFileVersion -eq $projectVersion.Assembly) ('Executable file version matches the constant, got ' + $actualFileVersion)
+    [xml]$runtimeManifest = Get-Content -LiteralPath $generatedManifest -Raw
+    Assert-Check ($runtimeManifest.assembly.assemblyIdentity.version -eq $projectVersion.Assembly) 'Generated runtime manifest matches the constant'
+
+    $packageScript = Join-Path $PSScriptRoot 'package.ps1'
+    $packageRejected = $false
+    try { & $packageScript -Version '9.9.9' | Out-Null } catch { $packageRejected = $true }
+    Assert-Check $packageRejected 'package rejects an explicit version that differs from the constant'
+    Assert-Check (-not (Test-Path -LiteralPath (Join-Path $projectRoot 'dist\Leaf-v9.9.9-windows.zip'))) 'Rejected packaging wrote no archive'
+    Assert-Check (-not (Test-Path -LiteralPath (Join-Path $projectRoot 'bin\package-v9.9.9'))) 'Rejected packaging did not build a mismatched bundle'
+
     Write-Output ('SUCCESS: ' + $script:checks + ' publication checks')
 } finally {
     Remove-FixtureTree -Root $fixtureRoot

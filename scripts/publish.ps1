@@ -1,9 +1,15 @@
-param([switch]$CheckOnly, [switch]$WithRelease, [string]$Version = '0.4.1')
+param([switch]$CheckOnly, [switch]$WithRelease, [string]$Version)
 $ErrorActionPreference = 'Stop'
-if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid version.' }
+. (Join-Path $PSScriptRoot 'version.ps1')
 . (Join-Path $PSScriptRoot 'public-source.ps1')
 . (Join-Path $PSScriptRoot 'sync-public-source.ps1')
 $projectRoot = Split-Path -Parent $PSScriptRoot
+$versionInfo = Get-LeafVersion -ProjectRoot $projectRoot
+if ([string]::IsNullOrWhiteSpace($Version)) { $Version = $versionInfo.SemVer }
+elseif ($Version -cne $versionInfo.SemVer) {
+    throw ('Explicit version ' + $Version + ' does not match the version constant ' + $versionInfo.SemVer + '.')
+}
+if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid version.' }
 $repository = 'Inmata/leaf-translate'
 $manifest = Get-PublicSourceManifest -ProjectRoot $projectRoot
 Write-Output ('Public source: ' + $manifest.Files.Count + ' files; repository: ' + $repository)
