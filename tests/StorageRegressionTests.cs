@@ -623,6 +623,8 @@ public static class StorageRegressionTests
         try { await store.SaveSettingsAsync(SettingsUpdate.Preferences(disabled)); }
         catch (UserError) { disableFailed = true; }
         Check(disableFailed, "A failed history disable is reported instead of pretending success");
+        Check(store.Settings.HistoryEnabled,
+            "A failed history disable never publishes the disabled candidate");
 
         files.MatchingCalls = 0; files.FailAt = -1;
         var enabled = Json.Copy(store.Settings); enabled.HistoryEnabled = true;
