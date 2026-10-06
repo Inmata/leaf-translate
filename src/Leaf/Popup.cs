@@ -218,7 +218,7 @@ namespace Leaf
             var page = Ui.Get<Grid>(Popup, "TranslatePage");
             page.AddHandler(UIElement.PreviewMouseWheelEvent, new MouseWheelEventHandler((s, e) => {
                 var body = Ui.Get<ScrollViewer>(Popup, "BodyScroll");
-                var inner = WheelTargetUnder(e.OriginalSource as DependencyObject, body);
+                var inner = WheelTargetUnder(page.InputHitTest(Mouse.GetPosition(page)) as DependencyObject, body);
                 if (inner != null && CanSpendWheel(inner, e.Delta)) return;
                 // The body's own offsets are read after its pending layout, so a burst of
                 // notches cannot compute the same target twice from a stale offset.
@@ -563,7 +563,7 @@ namespace Leaf
             Ui.Visible(Ui.Get<Button>(Popup, "ExpandWordButton"), Current != null && Current.Completed && TextTools.IsWordInput(Current.Source));
             if (Current == null) {
                 if (displayedSource != null) { source.Clear(); displayedSource = null; }
-                DrawTranslation(""); BeginSourceEdit(false);
+                DrawTranslation("");
                 Ui.Get<TextBox>(Popup, "QuestionInput").Clear();
                 Ui.Visible(Ui.Get<Border>(Popup, "ChatPanel"), false); Busy(); UpdateBackEntry(); return;
             }

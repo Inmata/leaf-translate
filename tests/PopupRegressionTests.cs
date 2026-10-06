@@ -1388,6 +1388,11 @@ internal static class PopupRegressionTests
             Check(probe.AutomationCalls == 0 && probe.CopyCalls == 0 && handler.Calls == 1,
                 "Recovering in front of Leaf never re-reads a selection or calls the API");
 
+            var direct = Json.Copy(shell.Store.Settings); direct.FocusInputOnShortcut = true; shell.Store.SaveSettings(direct);
+            await shell.InvokeShortcutAsync();
+            Check(ReferenceEquals(shell.Current, record) && Ui.Get<Grid>(shell.Popup, "SourceEditor").Visibility == Visibility.Collapsed,
+                "An internal shortcut without a selection keeps the result even with direct input enabled");
+
             // A real, uncommitted draft is not what the shortcut asked to replace.
             shell.BeginSourceEdit(false);
             Ui.Get<TextBox>(shell.Popup, "SourceInput").Text = "a different uncommitted draft";
@@ -1422,9 +1427,8 @@ internal static class PopupRegressionTests
         using (var shell = new AppShell(ConfiguredStore(folder), false, new LlmClient(new FixtureHandler()))) {
             shell.Selection = new SelectionAcquirer(probe);
             Check(shell.Current == null, "A fresh shell has no result to recover");
-            // A reading page without a result has its editor collapsed.
-            Ui.Visible(Ui.Get<TextBox>(shell.Popup, "SourceText"), true);
-            Ui.Visible(Ui.Get<Grid>(shell.Popup, "SourceEditor"), false);
+            Check(Ui.Get<Grid>(shell.Popup, "SourceEditor").Visibility == Visibility.Collapsed,
+                "The first empty page starts in reading mode");
             await shell.InvokeShortcutAsync();
             Check(Ui.Get<Grid>(shell.Popup, "SourceEditor").Visibility == Visibility.Collapsed,
                 "A shortcut with no result keeps the empty reading page instead of opening the editor");
@@ -1504,7 +1508,7 @@ internal static class PopupRegressionTests
                 "Submitting returns to the reading page");
         }
 
-        // The direct-input preference refills and selects the recovered original without calling again.
+        // With no actual selection, the direct-input preference keeps the recovered reading page.
         var directProbe = new FakeSelectionProbe();
         directProbe.Target.IsLeaf = true;
         var directHandler = new FixtureHandler();
@@ -1517,9 +1521,9 @@ internal static class PopupRegressionTests
             var input = Ui.Get<TextBox>(shell.Popup, "SourceInput");
             Check(ReferenceEquals(shell.Current, record) && directHandler.Calls == 1,
                 "The direct-input preference recovers the existing result without a new request");
-            Check(Ui.Get<Grid>(shell.Popup, "SourceEditor").Visibility == Visibility.Visible &&
-                input.Text == record.Source && input.SelectedText == record.Source,
-                "The direct-input preference refills the whole original and selects it for replacement");
+            Check(Ui.Get<Grid>(shell.Popup, "SourceEditor").Visibility == Visibility.Collapsed &&
+                input.Text == record.Source,
+                "Without a selection, the direct-input preference preserves the original in reading mode");
         }
     }
 

@@ -239,8 +239,8 @@ namespace Leaf
         private void HandleLeafSelectionShortcut(bool directInput)
         {
             if (Current == null) { MarkInconclusiveCapture(CaptureReason.None, false); ShowPopup(); return; }
-            if (HasPendingDraft()) { ShowPopup(); BeginSourceEdit(directInput); return; }
-            RestoreCurrentPresentation(directInput);
+            if (HasPendingDraft()) { ShowPopup(); return; }
+            RestoreCurrentPresentation(false);
         }
         // A cleared editor is a draft action, not a new session; an unchanged prefill is not a draft.
         private bool HasPendingDraft()
