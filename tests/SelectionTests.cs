@@ -278,6 +278,18 @@ internal static class SelectionTests
             "A document whose selection query failed is unavailable with its HResult, not an empty selection (was "
                 + unreadableResult.Status + "/" + unreadableResult.Reason + ")");
 
+        // A sibling call that blocks the same way is bounded too: the enumeration is abandoned
+        // and the scan stays inconclusive instead of concluding anything from a partial list.
+        var slowSibling = new ScriptedUiTree();
+        var siblingRoot = slowSibling.WindowRoot = new ScriptedUiNode { ControlTypeIdValue = WindowsSelectionProbe.DocumentTypeId, Selection = "", WindowHandle = 123 };
+        var firstChild = siblingRoot.Add(new ScriptedUiNode { Selection = null });
+        siblingRoot.Add(new ScriptedUiNode { Selection = null });
+        slowSibling.Focus = siblingRoot;
+        slowSibling.OnSibling = node => { if (node == firstChild) Thread.Sleep(WindowsSelectionProbe.AutomationBudgetMs + 80); };
+        var slowSiblingResult = await new WindowsSelectionProbe(slowSibling).ReadAutomationAsync(target, CancellationToken.None);
+        Check(slowSiblingResult.Status == CaptureStatus.Unavailable && slowSiblingResult.Reason == CaptureReason.AutomationBudget,
+            "A sibling enumeration that ran out of budget is inconclusive as well (was " + slowSiblingResult.Status + "/" + slowSiblingResult.Reason + ")");
+
         // Foreground metadata is a real comparison, not "some foreground window exists".
         Check(!WindowsSelectionProbe.ForegroundIs(new CaptureTarget { Window = new IntPtr(123) }),
             "A window that is not in front is never reported as the same foreground");
@@ -725,19 +737,24 @@ internal sealed class ScriptedUiTree : IUiTree
         get { return ScriptedUiNode.OnChild; }
         set { ScriptedUiNode.OnChild = value; }
     }
+    public Action<ScriptedUiNode> OnSibling
+    {
+        get { return ScriptedUiNode.OnSibling; }
+        set { ScriptedUiNode.OnSibling = value; }
+    }
     public int TotalReads { get { return ScriptedUiNode.TotalReads; } }
     public int SiblingCalls { get { return ScriptedUiNode.SiblingCalls; } }
     public ScriptedUiTree()
     {
         ScriptedUiNode.TotalReads = 0; ScriptedUiNode.SiblingCalls = 0;
-        ScriptedUiNode.OnRead = null; ScriptedUiNode.OnChild = null;
+        ScriptedUiNode.OnRead = null; ScriptedUiNode.OnChild = null; ScriptedUiNode.OnSibling = null;
     }
 }
 
 internal sealed class ScriptedUiNode : IUiNode
 {
     public static int TotalReads, SiblingCalls;
-    public static Action<ScriptedUiNode> OnRead, OnChild;
+    public static Action<ScriptedUiNode> OnRead, OnChild, OnSibling;
     public int ProcessIdValue = 456;
     public int ControlTypeIdValue = 50004;
     public long WindowHandle;
@@ -776,6 +793,7 @@ internal sealed class ScriptedUiNode : IUiNode
     {
         get {
             SiblingCalls++;
+            if (OnSibling != null) OnSibling(this);
             ScriptedUiNode parent = ParentNode;
             return parent != null && index + 1 < parent.Children.Count ? parent.Children[index + 1] : null;
         }
