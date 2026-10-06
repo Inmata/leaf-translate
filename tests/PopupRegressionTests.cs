@@ -46,6 +46,7 @@ internal static class PopupRegressionTests
         await RetryUsesLatestProvider(Path.Combine(folder, "retry-provider"));
         await CachedRestoreKeepsWordCard(Path.Combine(folder, "cached-card"));
         await WordCardRefreshKeepsSelection(Path.Combine(folder, "card-refresh"));
+        await ExpandEntryRestoresAfterCollapse(Path.Combine(folder, "expand-entry"));
         await FailedFollowupRetriesOriginalQuestion(Path.Combine(folder, "failed-followup"));
         await RecoveryBarrierBlocksFollowupRetry(Path.Combine(folder, "barrier-retry"));
         await FollowupRetryWorksAfterRecovery(Path.Combine(folder, "barrier-cleared"));
@@ -623,15 +624,14 @@ internal static class PopupRegressionTests
         }
     }
 
-    // Real layout inside a hidden host reproduces the ArgumentOutOfRangeException the
-    // headless zero-width box skipped: a highlight over a laid-out single line and over the
-    // last line of a multi-line box must compute without throwing or interrupting the
-    // learner. The host is off-screen and never shown, so only the layer runs here.
+    // Reuse the existing hidden host to give the TextBoxes valid line geometry. Inspect the
+    // queued state, not pixels or a detached visual's drawing: clearing before the deferred
+    // callback must leave the layer empty, while a subsequent selection must work again.
     private static async Task HighlightBandsUnderRealLayout()
     {
         var parameters = new HwndSourceParameters("highlight-band-check");
         parameters.SetPosition(-32000, -32000); parameters.SetSize(340, 260);
-        parameters.WindowStyle = unchecked((int)0x80000000); // WS_POPUP: a window that never shows
+        parameters.WindowStyle = unchecked((int)0x80000000); // WS_POPUP: never shown
         using (var host = new HwndSource(parameters)) {
             var canvas = new Canvas();
             var single = new TextBox { Text = "alpha beta gamma", Width = 300 };
@@ -643,14 +643,34 @@ internal static class PopupRegressionTests
             canvas.UpdateLayout();
             Check(single.LineCount == 1 && multiline.LineCount == 3,
                 "The hidden host gives the real TextBox lines to highlight");
+            int beta = single.Text.IndexOf("beta");
             var singleLayer = new SourceHighlightLayer();
             singleLayer.Bind(single);
-            singleLayer.Show(single.Text.IndexOf("beta"), single.Text.IndexOf("beta") + 4);
+            singleLayer.Show(beta, beta + 4);
             int last = multiline.Text.IndexOf("three");
             var multilineLayer = new SourceHighlightLayer();
             multilineLayer.Bind(multiline);
             multilineLayer.Show(last, last + 5);
+            var bandsField = typeof(SourceHighlightLayer).GetField("bands", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            var queuedField = typeof(SourceHighlightLayer).GetField("recomputeQueued", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
             await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            Check(((System.Collections.ICollection)bandsField.GetValue(singleLayer)).Count > 0 &&
+                ((System.Collections.ICollection)bandsField.GetValue(multilineLayer)).Count > 0,
+                "Deferred highlights compute nonempty geometry under valid layout");
+            singleLayer.Show(beta, beta + 4); multilineLayer.Show(last, last + 5);
+            Check((bool)queuedField.GetValue(singleLayer) && (bool)queuedField.GetValue(multilineLayer),
+                "The clear regression has pending highlight work before clearing");
+            singleLayer.Clear(); multilineLayer.Clear();
+            canvas.UpdateLayout();
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            Check(((System.Collections.ICollection)bandsField.GetValue(singleLayer)).Count == 0 &&
+                ((System.Collections.ICollection)bandsField.GetValue(multilineLayer)).Count == 0 &&
+                !(bool)queuedField.GetValue(singleLayer) && !(bool)queuedField.GetValue(multilineLayer),
+                "Queued work finishes without restoring a cleared highlight");
+            singleLayer.Show(beta, beta + 4);
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            Check(((System.Collections.ICollection)bandsField.GetValue(singleLayer)).Count > 0,
+                "A new selection computes its highlight after a clear");
         }
     }
 
@@ -737,7 +757,8 @@ internal static class PopupRegressionTests
 
     // The learning card is one document the reader selects in: a refresh that does not change
     // its typography - a chat message, a repeated layout pass - hands back the same document
-    // with the selection still in it, while a real scale change still rebuilds it.
+    // with the selection still in it, and a real scale change rewrites that document's ladder
+    // in place rather than rebuilding it, so a window drag keeps the selection too.
     private static async Task WordCardRefreshKeepsSelection(string folder)
     {
         var handler = new FixtureHandler();
@@ -755,13 +776,60 @@ internal static class PopupRegressionTests
             await shell.SendChatAsync();
             Check(shell.Current.Chat.Count == 2 && ReferenceEquals(card.Document, document) && !card.Selection.IsEmpty,
                 "A chat refresh at the same scale does not rebuild the card or clear the selection");
-            // A genuinely different window size is still a real typography change.
+            // A genuinely different window size is a real typography change: the card's own
+            // ladder is written again in place, so the document and the selection stay.
             shell.Popup.Width = 360; shell.Popup.Height = 380; shell.UpdatePopupTypography();
-            Check(!ReferenceEquals(card.Document, document) &&
+            double small = AppShell.TypographyScale(360, 380);
+            var entry = card.Document.Blocks.OfType<Paragraph>().First();
+            Check(ReferenceEquals(card.Document, document) && !card.Selection.IsEmpty,
+                "A smaller window keeps the card document and the reader's selection");
+            Check(Math.Abs(entry.FontSize - Math.Max(14, 22 * small)) < 0.01 &&
+                Math.Abs(card.Document.FontSize - Math.Max(13, 16 * small)) < 0.01 &&
                 card.Document.Blocks.OfType<Paragraph>().All(p => p.FontSize >= 11) &&
                 CardHeadword(shell.Popup) == word.Text,
-                "A smaller window rebuilds the card at the new scale, still under the selected word");
+                "A smaller window rewrites the card's ladder in place, still under the selected word");
             shell.Popup.Width = 456; shell.Popup.Height = 620; shell.UpdatePopupTypography();
+            Check(ReferenceEquals(card.Document, document) && Math.Abs(entry.FontSize - 22) < 0.01,
+                "Restoring the window restores the card's full-size ladder without rebuilding it");
+        }
+    }
+
+    // Collapsing a word card puts the expansion entry back; expanding again reuses the card
+    // the session already holds, and the translation, the session and the follow-up draft all
+    // stay where they were.
+    private static async Task ExpandEntryRestoresAfterCollapse(string folder)
+    {
+        var handler = new FixtureHandler();
+        using (var shell = new AppShell(ConfiguredStore(folder), false, new LlmClient(handler))) {
+            await shell.TranslateAsync("prowess", "选中文字", false);
+            var record = shell.Current;
+            var entry = Ui.Get<Button>(shell.Popup, "ExpandWordButton");
+            Check(entry.Visibility == Visibility.Visible,
+                "A finished single-word session offers the expansion entry");
+            Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text = "a kept draft";
+            Click(shell.Popup, "ExpandWordButton");
+            await Until(() => record.Cards.Count > 0);
+            Check(Ui.Get<Border>(shell.Popup, "WordPanel").Visibility == Visibility.Visible &&
+                entry.Visibility == Visibility.Collapsed,
+                "Expanding shows the card and steps the entry aside");
+            int looked = handler.Calls;
+            Click(shell.Popup, "BackToSentence");
+            Check(entry.Visibility == Visibility.Visible,
+                "Collapsing the card restores the expansion entry");
+            Check(Ui.Get<Border>(shell.Popup, "WordPanel").Visibility == Visibility.Collapsed,
+                "Collapsing hides the card");
+            Check(ReferenceEquals(shell.Current, record) && record.Completed &&
+                Reading(shell.Popup, "TranslationText") == "夹具译文",
+                "Collapsing keeps the session and its translation");
+            Check(Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text == "a kept draft",
+                "Collapsing keeps the follow-up draft");
+            Click(shell.Popup, "ExpandWordButton");
+            await Until(() => Ui.Get<Border>(shell.Popup, "WordPanel").Visibility == Visibility.Visible &&
+                Reading(shell.Popup, "WordCard").Contains("夹具词义"));
+            Check(handler.Calls == looked,
+                "Expanding again reuses the session's cached card instead of calling the API");
+            Check(ReferenceEquals(shell.Current, record) && CardHeadword(shell.Popup) == "prowess",
+                "The re-expanded card still belongs to the same session and word");
         }
     }
 

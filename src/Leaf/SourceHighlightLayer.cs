@@ -4,14 +4,16 @@ using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
+using System.Windows.Threading;
 
 namespace Leaf
 {
     // One background visual under the transparent reading box: the selected piece is
     // drawn as rounded, padded bands BEHIND the glyphs — the box paints its own text
     // over them — and the drawing is clipped to the box's viewport. Scrolling and real
-    // layout changes recompute only the piece's own bands; layout ticks that change
-    // nothing keep the cached drawing. A top-level type so the XAML reader can bind it.
+    // layout changes recompute only the piece's own bands, once per render cycle however
+    // many ticks asked, and only after the box's layout has settled; layout ticks that
+    // change nothing keep the cached drawing. A top-level type so the XAML reader can bind it.
     public sealed class SourceHighlightLayer : FrameworkElement
     {
         private static readonly Brush Fill = CreateFill();
@@ -20,6 +22,11 @@ namespace Leaf
         private int start = -1, end = -1;
         private readonly List<Rect> bands = new List<Rect>();
         private double laidOutWidth = -1, laidOutHeight = -1;
+        // A tick that needs new geometry leaves one request behind instead of querying: a
+        // window drag fires SizeChanged and LayoutUpdated for every pass, and asking the box
+        // for line rectangles each time reformats it. Many ticks therefore collapse into one
+        // query per render cycle.
+        private bool recomputeQueued;
 
         public SourceHighlightLayer() { IsHitTestVisible = false; ClipToBounds = true; }
 
@@ -40,17 +47,19 @@ namespace Leaf
                 inner = scroll;
                 inner.ScrollChanged += OnScrollChanged;
             };
-            box.SizeChanged += (s, e) => Recompute();
+            box.SizeChanged += (s, e) => RequestRecompute();
             box.LayoutUpdated += OnBoxLayout;
         }
         public void Show(int newStart, int newEnd)
         {
             start = newStart; end = newEnd;
-            Recompute();
+            RequestRecompute();
         }
         public void Clear()
         {
             start = -1; end = -1;
+            // The layer's own range is the pending request's protection too: the queued pass
+            // re-reads it, so a highlight cleared before that pass runs is never painted back.
             if (bands.Count == 0) return;
             bands.Clear();
             InvalidateVisual();
@@ -58,19 +67,38 @@ namespace Leaf
         private void OnScrollChanged(object sender, ScrollChangedEventArgs e)
         {
             if (e.VerticalChange == 0 && e.HorizontalChange == 0) return;
-            Recompute();
+            RequestRecompute();
         }
         private void OnBoxLayout(object sender, EventArgs e)
         {
             // Layout ticks run for every ancestor pass; only an extent change — or the
-            // first layout that gives the box real geometry — may recompute the bands.
+            // first layout that gives the box real geometry — asks for new bands.
             if (box == null || start < 0 || end <= start) return;
             if (bands.Count > 0 && box.ActualWidth == laidOutWidth && box.ActualHeight == laidOutHeight) return;
-            Recompute();
+            RequestRecompute();
+        }
+        private void RequestRecompute()
+        {
+            if (recomputeQueued) return;
+            recomputeQueued = true;
+            // Waiting for render priority means the pass runs after the layout that produced
+            // the geometry, so a resize reads each settled size once rather than a half-arranged
+            // box on every tick.
+            Dispatcher.BeginInvoke(DispatcherPriority.Render, new Action(() => {
+                recomputeQueued = false;
+                // A clear between the request and this pass owns the state now; the removed
+                // highlight is not painted back.
+                if (box == null || start < 0 || end <= start) return;
+                Recompute();
+            }));
         }
         private void Recompute()
         {
             if (box == null) return;
+            // Only a box whose layout has settled is asked for line rectangles: a query into
+            // a half-arranged box is what makes a drag stutter, and Bands would only find the
+            // empty geometry it already knows about.
+            if (!box.IsArrangeValid || box.ActualWidth <= 0) return;
             laidOutWidth = box.ActualWidth; laidOutHeight = box.ActualHeight;
             var next = Bands().ToList();
             if (next.Count == bands.Count && next.Zip(bands, (a, b) => a.Equals(b)).All(equal => equal)) return;
