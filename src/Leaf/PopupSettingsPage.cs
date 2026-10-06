@@ -50,7 +50,8 @@ namespace Leaf
             bodyScrollBackup = body.VerticalOffset;
             Ui.Visible(Ui.Get<Grid>(Popup, "TranslatePage"), false);
             Ui.Visible(Ui.Get<Grid>(Popup, "SettingsPage"), true);
-            Ui.Get<TextBlock>(Popup, "SourceBadge").Text = "";
+            // The source badge stays as it is on the reading page: the origin survives
+            // entering settings and is recomputed on the way back out.
             settingsController.Activate();
             ShowPopup();
         }

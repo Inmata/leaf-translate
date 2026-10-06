@@ -37,9 +37,9 @@ namespace Leaf
         private List<TextPiece> displayedPieces;
         private int[] displayToSource;
         private int[] sourceToDisplay;
-        private WordHighlightAdorner wordHighlight;
-        // The piece waiting to be painted: a window that has never rendered has no adorner
-        // layer yet, so the highlight intent is kept and attached once one exists.
+        private SourceHighlightLayer highlightLayer;
+        // The piece waiting to be painted, in the reading box's display offsets: the layer
+        // keeps it and paints once the box has real geometry, so no re-attach pass exists.
         private int pendingHighlightStart = -1, pendingHighlightEnd = -1;
         private double bodyScrollBackup;
         private PreviousSessionSnapshot previousSession;
@@ -86,6 +86,13 @@ namespace Leaf
                 if (e.Key == Key.Back || e.Key == Key.Delete) {
                     e.Handled = true; BeginSourceEdit(true); sourceInput.Clear();
                 }
+                else if (e.Key == Key.Enter && (Keyboard.Modifiers & ModifierKeys.Shift) == 0) {
+                    // The keyboard reaches the same explanation the pointer has: Enter
+                    // explains the selected range, or the word under the caret when
+                    // nothing is selected. Navigation and copy stay untouched.
+                    e.Handled = true;
+                    var ignored = ExplainSelectionOrCaretAsync(true);
+                }
             };
             Ui.Get<TextBox>(Popup, "SourceText").PreviewTextInput += (s, e) => {
                 e.Handled = true; BeginSourceEdit(true); sourceInput.Text = e.Text; sourceInput.CaretIndex = sourceInput.Text.Length;
@@ -106,14 +113,11 @@ namespace Leaf
                 e.Handled = true;
                 var ignored = SelectWordAsync(piece, false);
             };
-            // A highlight recorded before the window ever rendered attaches at the first
-            // layout that gives the box an adorner layer; later layouts short-circuit on
-            // the existing adorner.
-            sourceReading.LayoutUpdated += (s, e) => {
-                if (wordHighlight != null || pendingHighlightEnd <= pendingHighlightStart) return;
-                var layer = AdornerLayer.GetAdornerLayer(sourceReading);
-                if (layer != null) AttachPendingHighlight(sourceReading, layer);
-            };
+            // The highlight paints in one background layer under the reading box; the
+            // layer defers its own geometry until the box has real layout, so a highlight
+            // recorded before the window ever renders needs no re-attach pass.
+            highlightLayer = Ui.Get<SourceHighlightLayer>(Popup, "SourceHighlight");
+            highlightLayer.Bind(sourceReading);
             Ui.Click(Popup, "PinButton", () => {
                 pinned = !pinned;
                 var button = Ui.Get<Button>(Popup, "PinButton");
@@ -160,17 +164,7 @@ namespace Leaf
             });
             var contextMenu = new ContextMenu();
             var explain = new MenuItem { Header = "解释选中片段" };
-            explain.Click += async (s, e) => {
-                var source = Ui.Get<TextBox>(Popup, "SourceText");
-                if (Current == null || !Current.Completed || source.SelectionLength == 0) return;
-                if (string.IsNullOrWhiteSpace(source.SelectedText)) return;
-                // The box's display offsets map straight back to the record's own text, so
-                // no guessing about line endings is needed.
-                int start = DisplayToSourceOffset(source.SelectionStart);
-                int end = DisplayToSourceOffset(source.SelectionStart + source.SelectionLength);
-                if (end <= start) return;
-                await SelectWordAsync(new TextPiece { Start = start, Length = end - start, Text = Current.Source.Substring(start, end - start), IsWord = true }, false);
-            };
+            explain.Click += async (s, e) => { await ExplainSelectionOrCaretAsync(false); };
             contextMenu.Items.Add(explain);
             var copySource = new MenuItem { Header = "复制选中内容", Command = ApplicationCommands.Copy };
             contextMenu.Items.Add(copySource);
@@ -244,19 +238,41 @@ namespace Leaf
         {
             var forward = new int[display.Length + 1];
             var backward = new int[source.Length + 1];
+            BuildOffsetMaps(source, display, forward, backward);
+            displayToSource = forward; sourceToDisplay = backward;
+        }
+        // The pure map walk, split from the fill so the regression checks can ask for maps
+        // over any text pair without a window: both arrays are sized one past their text,
+        // every index is written and each sequence is monotone, so a lookup can never read
+        // a default 0.
+        public static void BuildOffsetMaps(string source, string display, int[] displayToSource, int[] sourceToDisplay)
+        {
             int d = 0, s = 0;
             while (d < display.Length && s < source.Length) {
-                forward[d] = s; backward[s] = d;
+                displayToSource[d] = s; sourceToDisplay[s] = d;
                 bool displayPair = display[d] == '\r' && d + 1 < display.Length && display[d + 1] == '\n';
                 bool sourcePair = source[s] == '\r' && s + 1 < source.Length && source[s + 1] == '\n';
-                if (displayPair && sourcePair) { d += 2; s += 2; }
-                else if (displayPair) { d += 2; s += 1; }
-                else if (sourcePair) { forward[d] = s + 1; d += 1; s += 2; }
+                if (displayPair && sourcePair) {
+                    // The pair interiors keep both maps total and monotone: the box never
+                    // queries them, but a gap would read as offset 0.
+                    displayToSource[d + 1] = s + 1; sourceToDisplay[s + 1] = d + 1;
+                    d += 2; s += 2;
+                }
+                else if (displayPair) {
+                    // The box turned one source "\n" into a "\r\n" pair: the pair's tail
+                    // closes that source line, and the next source char sits after the pair.
+                    displayToSource[d + 1] = s + 1;
+                    d += 2; s += 1;
+                }
+                else if (sourcePair) {
+                    sourceToDisplay[s + 1] = d + 1;
+                    displayToSource[d] = s + 1;
+                    d += 1; s += 2;
+                }
                 else { d += 1; s += 1; }
             }
-            for (; d <= display.Length; d++) forward[d] = Math.Min(s, source.Length);
-            for (; s <= source.Length; s++) backward[s] = Math.Min(d, display.Length);
-            displayToSource = forward; sourceToDisplay = backward;
+            for (; d <= display.Length; d++) displayToSource[d] = Math.Min(s, source.Length);
+            for (; s <= source.Length; s++) sourceToDisplay[s] = Math.Min(d, display.Length);
         }
         private int DisplayToSourceOffset(int index)
         {
@@ -393,7 +409,7 @@ namespace Leaf
             var translation = Ui.Get<RichTextBox>(Popup, "TranslationText");
             translation.FontSize = translation.Document.FontSize = Math.Max(14, 20 * scale);
             foreach (var paragraph in translation.Document.Blocks.OfType<Paragraph>()) paragraph.LineHeight = 30 * scale;
-            Ui.Get<TextBox>(Popup, "SourceInput").FontSize = Math.Max(14, 16 * scale);
+            Ui.Get<TextBox>(Popup, "SourceInput").FontSize = Math.Max(14, 18 * scale);
             SetTypography("WordTitle", Math.Max(14, 20 * scale), 0);
             ApplyReadingTypography(Ui.Get<RichTextBox>(Popup, "WordMeaning"), Math.Max(14, 17 * scale), 27 * scale);
             ApplyReadingTypography(Ui.Get<RichTextBox>(Popup, "WordMeta"), 13, 0);
@@ -476,9 +492,10 @@ namespace Leaf
             UpdateBackEntry();
         }
 
-        // The one selected piece is painted onto the reading box as a rounded band per line
-        // it touches. Nothing is rebuilt on scroll or re-layout; the adorner only repaints
-        // that piece's own visible rectangles.
+        // The one selected piece is painted as a rounded band per line it touches. The
+        // bands live in one background layer under the transparent reading box — behind
+        // the glyphs, clipped to the box's viewport — and only that piece's own rectangles
+        // are ever recomputed, on scroll or a real layout change.
         private void HighlightSource()
         {
             if (selectedWord == null) { DetachWordHighlight(); return; }
@@ -488,103 +505,87 @@ namespace Leaf
             int end = SourceToDisplayOffset(selectedWord.Start + selectedWord.Length);
             if (end <= start) { DetachWordHighlight(); return; }
             pendingHighlightStart = start; pendingHighlightEnd = end;
-            var layer = AdornerLayer.GetAdornerLayer(box);
-            if (layer == null) return;
-            AttachPendingHighlight(box, layer);
-        }
-        private void AttachPendingHighlight(TextBox box, AdornerLayer layer)
-        {
-            if (pendingHighlightEnd <= pendingHighlightStart) return;
-            // The same piece keeps its adorner; only a different piece is rebuilt.
-            if (wordHighlight != null && ReferenceEquals(wordHighlight.AdornedElement, box) && wordHighlight.Matches(pendingHighlightStart, pendingHighlightEnd)) {
-                wordHighlight.InvalidateVisual();
-                return;
-            }
-            DetachWordHighlight();
-            wordHighlight = new WordHighlightAdorner(box, pendingHighlightStart, pendingHighlightEnd);
-            layer.Add(wordHighlight);
+            if (highlightLayer != null) highlightLayer.Show(start, end);
         }
         private void DetachWordHighlight()
         {
             pendingHighlightStart = -1; pendingHighlightEnd = -1;
-            if (wordHighlight == null) return;
-            var layer = AdornerLayer.GetAdornerLayer(wordHighlight.AdornedElement);
-            wordHighlight.Detach();
-            if (layer != null) layer.Remove(wordHighlight);
-            wordHighlight = null;
+            if (highlightLayer != null) highlightLayer.Clear();
         }
-        // Test seam: the highlight is a visual layer, so the checks read the state instead
-        // of walking the adorner layer themselves.
-        public bool WordHighlighted { get { return wordHighlight != null || pendingHighlightEnd > pendingHighlightStart; } }
-
-        // Paints one selected source piece as rounded, padded bands. It lives over the
-        // reading box, follows its inner scroll and re-layout, and repaints only the piece's
-        // own rectangles — never the whole text.
-        private sealed class WordHighlightAdorner : Adorner
+        // Test seams: the highlight paints in a background layer, so the checks read the
+        // piece range and the painted bands instead of walking a visual tree themselves.
+        public bool WordHighlighted { get { return pendingHighlightEnd > pendingHighlightStart; } }
+        // The painted bands in the reading box's coordinate space; empty before the first
+        // real layout (and in headless checks). The smoke screenshots and the native
+        // checks read this.
+        public IReadOnlyList<System.Windows.Rect> HighlightGeometryForTest()
         {
-            private readonly TextBox box;
-            private readonly int start, end;
-            private readonly ScrollViewer inner;
-            private readonly Brush fill;
-            public WordHighlightAdorner(TextBox box, int start, int end) : base(box)
-            {
-                this.box = box; this.start = start; this.end = end;
-                IsHitTestVisible = false;
-                fill = new SolidColorBrush(Color.FromRgb(0xF4, 0xEA, 0xCD)); fill.Freeze();
-                inner = InnerScroll(box);
-                if (inner != null) inner.ScrollChanged += OnScrollChanged;
-                box.LayoutUpdated += OnLayoutUpdated;
+            return highlightLayer != null ? highlightLayer.BandsForTest() : new System.Windows.Rect[0];
+        }
+        // One path for explaining text from the keyboard and the context menu: a
+        // non-whitespace selection explains the selected range; Enter additionally falls
+        // back to the word under the caret. The box's display offsets map straight back
+        // to the record's own text, so no guessing about line endings is needed.
+        private async Task ExplainSelectionOrCaretAsync(bool caretFallback)
+        {
+            var source = Ui.Get<TextBox>(Popup, "SourceText");
+            if (Current == null || !Current.Completed) return;
+            int start, end;
+            if (source.SelectionLength > 0 && !string.IsNullOrWhiteSpace(source.SelectedText)) {
+                start = DisplayToSourceOffset(source.SelectionStart);
+                end = DisplayToSourceOffset(source.SelectionStart + source.SelectionLength);
             }
-            public bool Matches(int newStart, int newEnd) { return newStart == start && newEnd == end; }
-            public void Detach()
-            {
-                box.LayoutUpdated -= OnLayoutUpdated;
-                if (inner != null) inner.ScrollChanged -= OnScrollChanged;
+            else {
+                if (!caretFallback) return;
+                var piece = WordHitAt(source.CaretIndex);
+                if (piece == null) return;
+                await SelectWordAsync(piece, false);
+                return;
             }
-            private void OnScrollChanged(object sender, ScrollChangedEventArgs e) { InvalidateVisual(); }
-            private void OnLayoutUpdated(object sender, EventArgs e) { InvalidateVisual(); }
-            protected override void OnRender(DrawingContext context)
-            {
-                foreach (var rect in PieceRects()) context.DrawRoundedRectangle(fill, null, rect, 4, 4);
-            }
-            private IEnumerable<Rect> PieceRects()
-            {
-                int from = Math.Max(0, Math.Min(start, box.Text.Length));
-                int to = Math.Max(from, Math.Min(end, box.Text.Length));
-                if (to <= from) yield break;
-                int line = box.GetLineIndexFromCharacterIndex(from);
-                while (line >= 0) {
-                    int lineStart = box.GetCharacterIndexFromLineIndex(line);
-                    int next = box.GetCharacterIndexFromLineIndex(line + 1);
-                    int lineEnd = next < 0 ? box.Text.Length : next;
-                    int pieceStart = Math.Max(from, lineStart);
-                    int pieceEnd = Math.Min(to, lineEnd);
-                    if (pieceEnd > pieceStart) {
-                        var head = box.GetRectFromCharacterIndex(pieceStart);
-                        var tail = box.GetRectFromCharacterIndex(Math.Max(pieceStart, pieceEnd - 1));
-                        double width = Math.Max(4, tail.Location.X + tail.Width - head.Location.X);
-                        // 左右 3、上下 2:高亮块比字形大一圈,贴合纸面留白。
-                        yield return new Rect(head.Location.X - 3, head.Location.Y - 2, width + 6, head.Height + 4);
-                    }
-                    if (next < 0 || to <= lineEnd) break;
-                    line++;
-                }
-            }
+            if (end <= start) return;
+            await SelectWordAsync(new TextPiece { Start = start, Length = end - start, Text = Current.Source.Substring(start, end - start), IsWord = true }, false);
         }
 
         private void DrawTranslation(string target)
         {
             var box = Ui.Get<RichTextBox>(Popup, "TranslationText");
             box.Document.Blocks.Clear();
-            var block = new Paragraph { Margin = new Thickness(0), LineHeight = 27 * TypographyScale(Popup.Width, Popup.Height) };
+            var block = new Paragraph { Margin = new Thickness(0), LineHeight = 30 * TypographyScale(Popup.Width, Popup.Height) };
             box.Document.Blocks.Add(block);
             string translation = Current == null ? "" : Current.Translation;
             if (string.IsNullOrWhiteSpace(translation)) { block.Inlines.Add(new Run(Current != null ? "正在翻译…" : "译文会显示在这里。")); return; }
-            int index = string.IsNullOrEmpty(target) ? -1 : translation.IndexOf(target, StringComparison.Ordinal);
-            if (index < 0) { block.Inlines.Add(new Run(translation)); return; }
-            block.Inlines.Add(new Run(translation.Substring(0, index)));
-            block.Inlines.Add(new Run(target) { Background = Ui.Brush("WordHighlight") });
-            block.Inlines.Add(new Run(translation.Substring(index + target.Length)));
+            // The model answer is parsed into presentation spans: **paired** markers become
+            // bold runs, escapes and code spans stay literal. Copy, history and the LLM
+            // context keep the raw text; only this reading view shows the emphasis.
+            var spans = TranslationPresentation.Parse(translation);
+            string display = string.Concat(spans.Select(span => span.Text));
+            int index = string.IsNullOrEmpty(target) ? -1 : display.IndexOf(target, StringComparison.Ordinal);
+            if (index < 0) { AddTranslationRuns(block, spans, -1, -1); return; }
+            AddTranslationRuns(block, spans, index, index + target.Length);
+        }
+        // One run per parsed span; the highlighted piece is cut out at display offsets so
+        // the highlight always lands on the text the user actually reads.
+        private static void AddTranslationRuns(Paragraph block, IReadOnlyList<TranslationSpan> spans, int highlightStart, int highlightEnd)
+        {
+            int offset = 0;
+            foreach (var span in spans) {
+                int spanStart = offset, spanEnd = offset + span.Text.Length;
+                offset = spanEnd;
+                if (spanEnd <= highlightStart || spanStart >= highlightEnd) { AddEmphasisRun(block, span.Text, span.Bold, false); continue; }
+                int cutStart = Math.Max(spanStart, highlightStart) - spanStart;
+                int cutEnd = Math.Min(spanEnd, highlightEnd) - spanStart;
+                AddEmphasisRun(block, span.Text.Substring(0, cutStart), span.Bold, false);
+                AddEmphasisRun(block, span.Text.Substring(cutStart, cutEnd - cutStart), span.Bold, true);
+                AddEmphasisRun(block, span.Text.Substring(cutEnd), span.Bold, false);
+            }
+        }
+        private static void AddEmphasisRun(Paragraph block, string text, bool bold, bool highlight)
+        {
+            if (text.Length == 0) return;
+            var run = new Run(text);
+            if (bold) run.FontWeight = FontWeights.Bold;
+            if (highlight) run.Background = Ui.Brush("WordHighlight");
+            block.Inlines.Add(run);
         }
         public void ShowError(string text, Action retryAction)
         {
@@ -637,8 +638,15 @@ namespace Leaf
             CancelRequests();
             // A root conversation starts here: whatever return relation the reading page
             // held is gone, because the replaced session is no longer reachable from the
-            // new conversation. Retry and internal children keep their anchor.
+            // new conversation. Retry and internal children keep their anchor — unless the
+            // retry/regenerate lands on the root itself, which then stays the root.
             if (intent == SessionIntent.Root) { previousSession = null; UpdateBackEntry(); }
+            else if (intent == SessionIntent.Inherit && previousSession != null && ReferenceEquals(Current, previousSession.Record)) {
+                // Regenerating or retrying the root replaces the root: the old record is no
+                // longer a distinct page to return to, so the new one inherits the root
+                // position and every internal anchor of the old record dies with it.
+                previousSession = null; UpdateBackEntry();
+            }
             Current = TranslationRecord.Create(text, sourceKind, Store.Settings);
             currentHistoryEpoch = Store.HistoryEpoch;
             var record = Current; long version = generation.Next();
@@ -994,6 +1002,112 @@ namespace Leaf
                     }
                 }
             }), DispatcherPriority.Loaded);
+        }
+    }
+
+    // One background visual under the transparent reading box: the selected piece is
+    // drawn as rounded, padded bands BEHIND the glyphs — the box paints its own text
+    // over them — and the drawing is clipped to the box's viewport. Scrolling and real
+    // layout changes recompute only the piece's own bands; layout ticks that change
+    // nothing keep the cached drawing. A top-level type so the XAML reader can bind it.
+    public sealed class SourceHighlightLayer : FrameworkElement
+    {
+        private static readonly Brush Fill = CreateFill();
+        private TextBox box;
+        private ScrollViewer inner;
+        private int start = -1, end = -1;
+        private readonly List<Rect> bands = new List<Rect>();
+        private double laidOutWidth = -1, laidOutHeight = -1;
+
+        public SourceHighlightLayer() { IsHitTestVisible = false; ClipToBounds = true; }
+
+        private static Brush CreateFill()
+        {
+            var brush = new SolidColorBrush(Color.FromRgb(0xF4, 0xEA, 0xCD));
+            brush.Freeze(); return brush;
+        }
+        public void Bind(TextBox reading)
+        {
+            box = reading;
+            // The inner scroll host only exists once the template is applied; scrolling is
+            // what shifts the bands, so it is re-subscribed whenever the box comes alive.
+            box.Loaded += (s, e) => {
+                var scroll = AppShell.InnerScroll(box);
+                if (scroll == null || ReferenceEquals(scroll, inner)) return;
+                if (inner != null) inner.ScrollChanged -= OnScrollChanged;
+                inner = scroll;
+                inner.ScrollChanged += OnScrollChanged;
+            };
+            box.SizeChanged += (s, e) => Recompute();
+            box.LayoutUpdated += OnBoxLayout;
+        }
+        public void Show(int newStart, int newEnd)
+        {
+            start = newStart; end = newEnd;
+            Recompute();
+        }
+        public void Clear()
+        {
+            start = -1; end = -1;
+            if (bands.Count == 0) return;
+            bands.Clear();
+            InvalidateVisual();
+        }
+        public IReadOnlyList<Rect> BandsForTest() { return bands.ToArray(); }
+        private void OnScrollChanged(object sender, ScrollChangedEventArgs e)
+        {
+            if (e.VerticalChange == 0 && e.HorizontalChange == 0) return;
+            Recompute();
+        }
+        private void OnBoxLayout(object sender, EventArgs e)
+        {
+            // Layout ticks run for every ancestor pass; only an extent change — or the
+            // first layout that gives the box real geometry — may recompute the bands.
+            if (box == null || start < 0 || end <= start) return;
+            if (bands.Count > 0 && box.ActualWidth == laidOutWidth && box.ActualHeight == laidOutHeight) return;
+            Recompute();
+        }
+        private void Recompute()
+        {
+            if (box == null) return;
+            laidOutWidth = box.ActualWidth; laidOutHeight = box.ActualHeight;
+            var next = Bands().ToList();
+            if (next.Count == bands.Count && next.Zip(bands, (a, b) => a.Equals(b)).All(equal => equal)) return;
+            bands.Clear(); bands.AddRange(next);
+            InvalidateVisual();
+        }
+        // One band per line the piece touches: 左右 3、上下 2,圆角 4,贴合纸面留白。The
+        // band ends at the trailing edge of the line's last real glyph, so the final
+        // character keeps its own width and a break pair — which has no glyph — never
+        // poisons the geometry.
+        private IEnumerable<Rect> Bands()
+        {
+            string text = box.Text;
+            int from = Math.Max(0, Math.Min(start, text.Length));
+            int to = Math.Max(from, Math.Min(end, text.Length));
+            if (to <= from || box.ActualWidth <= 0) yield break;
+            int line = box.GetLineIndexFromCharacterIndex(from);
+            while (line >= 0) {
+                int lineStart = box.GetCharacterIndexFromLineIndex(line);
+                int next = box.GetCharacterIndexFromLineIndex(line + 1);
+                int lineEnd = next < 0 ? text.Length : next;
+                int pieceStart = Math.Max(from, lineStart);
+                int pieceEnd = Math.Min(to, lineEnd);
+                if (pieceEnd > pieceStart) {
+                    var head = box.GetRectFromCharacterIndex(pieceStart);
+                    int tailIndex = pieceEnd - 1;
+                    while (tailIndex > pieceStart && tailIndex < text.Length && (text[tailIndex] == '\r' || text[tailIndex] == '\n')) tailIndex--;
+                    var tail = box.GetRectFromCharacterIndex(tailIndex, true);
+                    double width = Math.Max(4, tail.Location.X + tail.Width - head.Location.X);
+                    yield return new Rect(head.Location.X - 3, head.Location.Y - 2, width + 6, head.Height + 4);
+                }
+                if (next < 0 || to <= lineEnd) break;
+                line++;
+            }
+        }
+        protected override void OnRender(DrawingContext context)
+        {
+            foreach (var rect in bands) context.DrawRoundedRectangle(Fill, null, rect, 4, 4);
         }
     }
 }

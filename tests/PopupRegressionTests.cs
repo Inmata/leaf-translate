@@ -53,6 +53,10 @@ internal static class PopupRegressionTests
         await ExplicitApplySurvivesPageLeave(Path.Combine(folder, "settings-apply-leave"));
         await InternalSelectionReturn(Path.Combine(folder, "internal-return"));
         await InternalChildChain(Path.Combine(folder, "internal-chain"));
+        await RootRetryReanchorsAfterReturn(Path.Combine(folder, "root-retry-reanchor"));
+        await HighlightPendingClearsOnDetach(Path.Combine(folder, "highlight-detach"));
+        await TranslationDisplayDropsMarkers(Path.Combine(folder, "marker-display"));
+        SourceOffsetMapsStayTotalAndMonotone();
         await SameSourceInternalSelectionReuse(Path.Combine(folder, "internal-reuse"));
         await RootEntriesClearAnchor(Path.Combine(folder, "root-entries"));
         await LateChildCannotTouchRoot(Path.Combine(folder, "late-child"));
@@ -385,8 +389,8 @@ internal static class PopupRegressionTests
                 Ui.Get<Grid>(shell.Popup, "TranslatePage").Visibility == Visibility.Collapsed &&
                 Ui.Get<Grid>(shell.Popup, "SettingsPage").Visibility == Visibility.Visible,
                 "Opening settings shows the settings page over the reading page");
-            Check(Ui.Get<TextBlock>(shell.Popup, "SourceBadge").Text.Length == 0,
-                "The reading badge does not show through the settings page");
+            Check(Ui.Get<TextBlock>(shell.Popup, "SourceBadge").Text == "选中文本",
+                "The reading badge keeps its source label over the settings page");
             shell.ShowSettingsPage();
             Check(shell.IsSettingsPageOpen && ReferenceEquals(shell.Current, record),
                 "Opening settings twice keeps one page over the live session");
@@ -539,6 +543,118 @@ internal static class PopupRegressionTests
             await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
             Check(ReferenceEquals(shell.Current, root),
                 "Leaving the root again stays anchored to the same root");
+        }
+    }
+
+    // Returning to a root and then retrying it replaces that root: the stale return entry
+    // dies with the old record, and a child opened over the retried root comes back to it.
+    // Regenerating shares the same inherit path, so the retry covers both entries.
+    private static async Task RootRetryReanchorsAfterReturn(string folder)
+    {
+        var handler = new ControlledHandler();
+        using (var shell = new AppShell(ConfiguredStore(folder), false, new LlmClient(handler))) {
+            var firstRoot = shell.TranslateAsync("The root that will be retried.", "选中文字", false);
+            handler.ReplyError(0, HttpStatusCode.InternalServerError);
+            await firstRoot;
+            var root = shell.Current;
+            Check(Ui.Get<Button>(shell.Popup, "RetryButton").Visibility == Visibility.Visible,
+                "The failed root offers its retry entry");
+            var child = shell.TranslateInternalSelectionAsync("A child over the failed root.");
+            handler.ReplyStream(1, "child 译文");
+            await child;
+            Check(shell.CanReturnToPreviousSession, "The child over the failed root keeps the return entry");
+            shell.ReturnToPreviousSession();
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            Check(ReferenceEquals(shell.Current, root) &&
+                Ui.Get<Button>(shell.Popup, "RetryButton").Visibility == Visibility.Visible,
+                "Returning to the failed root restores its error and its retry entry");
+            Click(shell.Popup, "RetryButton");
+            handler.ReplyStream(2, "retried 译文");
+            await Until(() => shell.Current != null && shell.Current.Completed);
+            var retriedRoot = shell.Current;
+            Check(!ReferenceEquals(retriedRoot, root) && !shell.CanReturnToPreviousSession &&
+                Ui.Get<Button>(shell.Popup, "BackToPreviousButton").Visibility == Visibility.Collapsed,
+                "Retrying the root after returning replaces it and drops the stale return entry");
+            var deeper = shell.TranslateInternalSelectionAsync("A child over the retried root.");
+            handler.ReplyStream(3, "child 译文");
+            await deeper;
+            Check(shell.CanReturnToPreviousSession &&
+                Ui.Get<Button>(shell.Popup, "BackToPreviousButton").Visibility == Visibility.Visible,
+                "A child opened over the retried root anchors to it");
+            shell.ReturnToPreviousSession();
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            Check(ReferenceEquals(shell.Current, retriedRoot) && !ReferenceEquals(shell.Current, root),
+                "Returning from that child comes back to the retried root, never the replaced one");
+        }
+    }
+
+    // The pending highlight is state the reading box paints from, so every detach path
+    // clears it: a collapsed word card and a refilled source must leave nothing behind.
+    private static async Task HighlightPendingClearsOnDetach(string folder)
+    {
+        var handler = new FixtureHandler();
+        using (var shell = new AppShell(ConfiguredStore(folder), false, new LlmClient(handler))) {
+            await shell.TranslateAsync("A highlight detach sentence.", "选中文字", false);
+            var word = TextTools.Pieces(shell.Current.Source).First(p => p.IsWord);
+            await shell.SelectWordAsync(word, false);
+            Check(shell.WordHighlighted, "Selecting a word records its highlight");
+            Click(shell.Popup, "BackToSentence");
+            Check(!shell.WordHighlighted, "Collapsing the word card detaches the pending highlight");
+            await shell.SelectWordAsync(word, false);
+            Check(shell.WordHighlighted, "The same word can be explained again after collapsing");
+            shell.OpenRecord(TranslationRecord.Create("Another source for the detach check.", "选中文字", shell.Store.Settings));
+            Check(!shell.WordHighlighted, "Filling a new source detaches the previous highlight");
+        }
+    }
+
+    // The reading view renders the parsed presentation of the model answer: paired markers
+    // become emphasis and never leak into the displayed text, while the record itself keeps
+    // the raw answer for copy, history and the LLM context.
+    private static async Task TranslationDisplayDropsMarkers(string folder)
+    {
+        var handler = new ControlledHandler();
+        using (var shell = new AppShell(ConfiguredStore(folder), false, new LlmClient(handler))) {
+            var translation = shell.TranslateAsync("A marker display sentence.", "选中文字", false);
+            handler.ReplyStream(0, "前缀 **加粗** 后缀 \\* 转义");
+            await translation;
+            Check(Reading(shell.Popup, "TranslationText") == "前缀 加粗 后缀 * 转义",
+                "The translation view shows the parsed emphasis instead of the raw markers");
+            Check(shell.Current.Translation == "前缀 **加粗** 后缀 \\* 转义",
+                "The record keeps the raw answer for copy, history and the LLM context");
+        }
+    }
+
+    // The box normalizes line breaks to "\r\n", so both offset maps have to stay total and
+    // monotone across every boundary: a hole would read as the default 0 and silently
+    // explain, highlight or copy the wrong text.
+    private static void SourceOffsetMapsStayTotalAndMonotone()
+    {
+        var box = new TextBox();
+        var sources = new[] {
+            new { Tag = "plain", Text = "A plain sentence without breaks." },
+            new { Tag = "crlf-pair", Text = "First line\r\nsecond line" },
+            new { Tag = "lf", Text = "First line\nsecond line" },
+            new { Tag = "cr", Text = "Odd\rbreak inside" },
+            new { Tag = "mixed", Text = "Mixed\nbreaks\r\nand\rlast" },
+            new { Tag = "leading-lf", Text = "\nleading break" },
+            new { Tag = "trailing-lf", Text = "trailing break\n" },
+            new { Tag = "blank-line", Text = "a\n\nb" },
+            new { Tag = "many", Text = "one\ntwo\r\nthree\nfour" }
+        };
+        foreach (var fixture in sources) {
+            box.Text = fixture.Text;
+            string display = box.Text;
+            var displayToSource = new int[display.Length + 1];
+            var sourceToDisplay = new int[fixture.Text.Length + 1];
+            AppShell.BuildOffsetMaps(fixture.Text, display, displayToSource, sourceToDisplay);
+            Check(displayToSource[0] == 0 && sourceToDisplay[0] == 0 &&
+                displayToSource[display.Length] == fixture.Text.Length &&
+                sourceToDisplay[fixture.Text.Length] == display.Length,
+                "The offset maps of [" + fixture.Tag + "] anchor both ends of both texts");
+            bool monotone = true;
+            for (int i = 1; i < displayToSource.Length; i++) monotone &= displayToSource[i] >= displayToSource[i - 1];
+            for (int i = 1; i < sourceToDisplay.Length; i++) monotone &= sourceToDisplay[i] >= sourceToDisplay[i - 1];
+            Check(monotone, "The offset maps of [" + fixture.Tag + "] never step back, so no boundary reads a default 0");
         }
     }
 

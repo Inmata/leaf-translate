@@ -1,4 +1,4 @@
-<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Title="Leaf" Width="456" Height="620" MinWidth="360" MinHeight="380" WindowStyle="None" AllowsTransparency="True" Background="Transparent" ResizeMode="CanResizeWithGrip" ShowInTaskbar="True" ShowActivated="False" Topmost="True">
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:leaf="clr-namespace:Leaf;assembly=Leaf" Title="Leaf" Width="456" Height="620" MinWidth="360" MinHeight="380" WindowStyle="None" AllowsTransparency="True" Background="Transparent" ResizeMode="CanResizeWithGrip" ShowInTaskbar="True" ShowActivated="False" Topmost="True">
   <Window.Resources>
     <!-- The reading page reuses the editor's plain text engine: a borderless, top-aligned
          TextBox whose scrollbars stay inside its own template binding. -->
@@ -22,9 +22,12 @@
       </Setter>
     </Style>
     <!-- Paper top-bar icons drawn as strokes: the settings entry sits on a dark rounded
-         chip with white sliders, while pin and collapse stay plain. -->
-    <Geometry x:Key="SlidersIcon">M4,6 H20 M4,12 H20 M4,18 H20 M15,6 m-2.4,0 a2.4,2.4 0 1,0 4.8,0 a2.4,2.4 0 1,0 -4.8,0 M8.5,12 m-2.4,0 a2.4,2.4 0 1,0 4.8,0 a2.4,2.4 0 1,0 -4.8,0 M17,18 m-2.4,0 a2.4,2.4 0 1,0 4.8,0 a2.4,2.4 0 1,0 -4.8,0</Geometry>
-    <Geometry x:Key="PinIcon">M12,10.5 V21 M12,7 m-3.2,0 a3.2,3.2 0 1,0 6.4,0 a3.2,3.2 0 1,0 -6.4,0</Geometry>
+         chip with two slider rows — a knob opening left on the upper row, right on the
+         lower — while pin and collapse stay plain. -->
+    <Geometry x:Key="SlidersIcon">M8,7.2 H20 M4,16.8 H14.8 M5.4,7.2 m-2.2,0 a2.2,2.2 0 1,0 4.4,0 a2.2,2.2 0 1,0 -4.4,0 M17.4,16.8 m-2.2,0 a2.2,2.2 0 1,0 4.4,0 a2.2,2.2 0 1,0 -4.4,0</Geometry>
+    <!-- The pin reads as a pushpin: a wide rounded head that tapers inward to a narrow
+         base, with the thin needle below. -->
+    <Geometry x:Key="PinIcon">M12,14 V21 M9.1,3.5 H14.9 C16.9,3.5 18.2,4.9 17.9,6.7 C17.7,8.2 17,9.4 16,10.4 C15.2,11.2 14.8,12.1 14.7,13.1 L14.6,14.5 H9.4 L9.3,13.1 C9.2,12.1 8.8,11.2 8,10.4 C7,9.4 6.3,8.2 6.1,6.7 C5.8,4.9 7.1,3.5 9.1,3.5 Z</Geometry>
     <Geometry x:Key="HideIcon">M4,12 H20</Geometry>
     <Style x:Key="PaperTopButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
       <Setter Property="Width" Value="32"/>
@@ -40,7 +43,7 @@
       <Grid.RowDefinitions><RowDefinition Height="34"/><RowDefinition Height="*"/></Grid.RowDefinitions>
       <Grid x:Name="DragBar" Grid.Row="0" Background="Transparent">
         <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-          <TextBlock x:Name="SourceBadge" Text="来自剪贴板" FontSize="12" Foreground="{StaticResource Secondary}"/>
+          <TextBlock x:Name="SourceBadge" Text="剪贴板" FontSize="12" Foreground="{StaticResource Secondary}"/>
         </StackPanel>
         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
           <Button x:Name="SettingsButton" Style="{StaticResource PaperTopButton}" ToolTip="设置" AutomationProperties.Name="设置">
@@ -76,15 +79,21 @@
               </StackPanel>
               <Button x:Name="EditSourceButton" Content="&#xE70F;" Style="{StaticResource IconButton}" HorizontalAlignment="Right" Height="24" Width="24" ToolTip="编辑原文" AutomationProperties.Name="编辑原文"/>
             </Grid>
-            <TextBox x:Name="SourceText" Style="{StaticResource PaperReader}"
-                     TextWrapping="Wrap" AcceptsReturn="True" MaxHeight="100" FontSize="18"
-                     Foreground="{StaticResource Secondary}" VerticalScrollBarVisibility="Auto"
-                     AutomationProperties.Name="原文"/>
+            <!-- The highlight is one background layer in the same cell, under the
+                 transparent reading box: bands render behind the glyphs and are clipped
+                 to this cell, instead of an adorner layer painting over the text. -->
+            <Grid>
+              <leaf:SourceHighlightLayer x:Name="SourceHighlight"/>
+              <TextBox x:Name="SourceText" Style="{StaticResource PaperReader}"
+                       TextWrapping="Wrap" AcceptsReturn="True" MaxHeight="100" FontSize="18"
+                       Foreground="{StaticResource Secondary}" VerticalScrollBarVisibility="Auto"
+                       AutomationProperties.Name="原文"/>
+            </Grid>
             <Grid x:Name="SourceEditor" Visibility="Collapsed">
               <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
               <TextBox x:Name="SourceInput" Grid.Column="0" Style="{StaticResource PopupEditor}"
                        AcceptsReturn="True" TextWrapping="Wrap" MinHeight="38" MaxHeight="110"
-                       FontSize="16" MaxLength="6000" VerticalScrollBarVisibility="Auto"
+                       FontSize="18" MaxLength="6000" VerticalScrollBarVisibility="Auto"
                        AutomationProperties.Name="原文"/>
               <TextBox x:Name="SourcePlaceholder" Grid.Column="0" Text="输入要翻译的文字…"
                        Style="{StaticResource PopupEditor}" IsReadOnly="True" Focusable="False"
@@ -155,7 +164,10 @@
           <Button x:Name="AskButton" Style="{StaticResource GhostButton}" HorizontalAlignment="Left" FontSize="14" Foreground="{StaticResource Ink}" Padding="8,7" Margin="-8,0,0,0" ToolTip="追问这段原文或当前词" AutomationProperties.Name="追问">
             <StackPanel Orientation="Horizontal">
               <Viewbox Width="18" Height="18" Margin="0,0,7,0" VerticalAlignment="Center">
-                <Path Data="{StaticResource ChatOutline}" Stroke="{StaticResource Secondary}"
+                <!-- A round follow-up bubble with its tail at the lower left, matching the
+                     paper's rounded forms; the shared ChatOutline stays square-cornered. -->
+                <Path Data="M12,3.5 C16.7,3.5 20.5,7 20.5,11.5 C20.5,16 16.7,19.5 12,19.5 C10.6,19.5 9.3,19.2 8.1,18.6 L3.5,20.5 L5.4,16.2 C4.2,14.9 3.5,13.3 3.5,11.5 C3.5,7 7.3,3.5 12,3.5 Z"
+                      Stroke="{StaticResource Secondary}"
                       StrokeThickness="1.5" StrokeStartLineCap="Round"
                       StrokeEndLineCap="Round" StrokeLineJoin="Round"/>
               </Viewbox>
