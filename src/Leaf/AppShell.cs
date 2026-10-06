@@ -294,6 +294,9 @@ namespace Leaf
         public void ShowPopup()
         {
             if (exiting) return;
+            // A show that follows a drag interrupted by a hide pays the pass that drag never
+            // wrote before anything is displayed; every other show pays one false read.
+            if (resizeTypographyPending) ApplyPendingResizeTypography();
             if (NativeEnabled) {
                 if (Popup.IsVisible) { Native.Reveal(Popup); return; }
                 restoringPlacement = true;
@@ -697,6 +700,15 @@ namespace Leaf
             // timer is stopped here, and the fallback persists one placement only once.
             if (placementTimer != null) placementTimer.Stop();
             disposed = true;
+            // A window that is closing for good owes nothing: the drag's freeze is released
+            // and the pass it left owing is abandoned, the typography pass refuses every later
+            // call, and the highlight layer stops watching its box - so the layout, size and
+            // scroll ticks the close itself raises neither rebuild the reading page nor ask
+            // for geometry.
+            interactiveResize = false;
+            resizeFrozenScale = double.NaN;
+            resizeTypographyPending = false;
+            if (highlightLayer != null) highlightLayer.Stop();
             if (copyFeedback != null) copyFeedback.Stop();
             Log.Event("app_exit", null);
             // The fallback path must never block the UI thread on the ordered queue and must

@@ -727,6 +727,16 @@ internal static class PopupRegressionTests
             layer.Show(beta, beta + 4);
             await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
             Check(HighlightBands(layer) > 0, "The next selection draws again after that drop");
+            layer.Show(gamma, gamma + 5);
+            Check(HighlightQueued(layer), "The stop regression starts with pending work");
+            PauseHighlight(layer, "Stop");
+            layer.Show(beta, beta + 4);
+            box.Width = 280;
+            canvas.UpdateLayout();
+            Check(!HighlightQueued(layer), "A stopped layer refuses subsequent selection and size requests");
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            Check(HighlightBands(layer) == 0 && !HighlightQueued(layer),
+                "Stopping discards the pending callback without restoring a highlight");
         }
     }
 
@@ -817,6 +827,25 @@ internal static class PopupRegressionTests
             shell.UpdatePopupTypography();
             Check(Math.Abs(source.FontSize - Math.Max(13, 19 * AppShell.TypographyScale(400, 500))) < 0.01,
                 "A size set without a drag still applies the window's own scale");
+            var record = shell.Current;
+            shell.Popup.Width = 456; shell.Popup.Height = 620; shell.UpdatePopupTypography();
+            SendMessage(shell, WmSizing);
+            shell.Popup.Width = 380; shell.Popup.Height = 420;
+            shell.HidePopup();
+            Check(!HighlightSuspended(HighlightLayerOf(shell)), "Hiding releases an interrupted drag");
+            shell.ShowPopup();
+            Check(Math.Abs(source.FontSize - Math.Max(13, 19 * small)) < 0.01 &&
+                ReferenceEquals(shell.Current, record) && ReferenceEquals(card.Document, document),
+                "Reopening applies the interrupted drag's final scale without replacing the session or card");
+            SendMessage(shell, WmSizing);
+            shell.Dispose();
+            SendMessage(shell, WmSizing);
+            shell.UpdatePopupTypography();
+            var layer = HighlightLayerOf(shell);
+            layer.Show(0, 1);
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            Check(!HighlightSuspended(layer) && !HighlightQueued(layer) && HighlightBands(layer) == 0,
+                "Disposal ends the drag and prevents late messages or selections restarting highlight work");
         }
     }
 

@@ -62,6 +62,11 @@ namespace Leaf
         // typography pass. A programmatic resize never reaches this state at all.
         private bool interactiveResize;
         private double resizeFrozenScale = double.NaN;
+        // A drag that a hide interrupted never wrote the size it ended at. The drag's ticks
+        // write nothing at all, so this one flag is all that is left to carry: the next show
+        // spends it on a single pass at the window's real size, and an ordinary show - the
+        // overwhelming case - reads it once and does nothing else.
+        private bool resizeTypographyPending;
         // The column the floating collapse action occupies over the card's first line: the
         // button's own width - a 14 dip label with an 8,6 padding on each side - with enough
         // clearance left that the entry can never run under it. Only the first paragraph
@@ -638,7 +643,7 @@ namespace Leaf
         // here: the scale is frozen for the whole drag and the highlight stops drawing.
         private void BeginInteractiveResize()
         {
-            if (interactiveResize) return;
+            if (disposed || interactiveResize) return;
             interactiveResize = true;
             resizeFrozenScale = TypographyScale(Popup.Width, Popup.Height);
             if (highlightLayer != null) highlightLayer.Suspend();
@@ -656,16 +661,35 @@ namespace Leaf
         }
         // The popup is going away mid-drag: the frozen scale is released so the next show
         // reads the window's own size, and the pass the paused layer had queued is dropped
-        // instead of painted on a window that is no longer shown.
+        // instead of painted on a window that is no longer shown. Nothing is redrawn here -
+        // a window nobody is looking at is not worth a layout - so the release also records
+        // that the reading page still owes itself one pass at that final size.
         private void CancelInteractiveResize()
         {
             if (!interactiveResize) return;
             interactiveResize = false;
             resizeFrozenScale = double.NaN;
+            resizeTypographyPending = true;
             if (highlightLayer != null) highlightLayer.CancelPending();
+        }
+        // What the interrupted drag left owing: the reading page is written once for the size
+        // the window has now, and the highlight comes back from the selection that is current
+        // - the one the check the reader is on really is - rather than from a range a paused
+        // layer happened to keep.
+        private void ApplyPendingResizeTypography()
+        {
+            resizeTypographyPending = false;
+            UpdatePopupTypography();
+            HighlightSource();
         }
         public void UpdatePopupTypography()
         {
+            // Two states write nothing here. A hand-dragged window edge writes the ladder once,
+            // when the drag ends, so every size change in between skips this pass entirely
+            // instead of walking the paragraphs and controls per tick; content a drag builds -
+            // a translation, a card - reads the frozen scale by itself. And a window closing
+            // for good must not rebuild the reading page from a layout the close itself raised.
+            if (interactiveResize || disposed) return;
             double scale = CurrentTypographyScale();
             // The ladder is fixed: a 19 dip original, a 22 dip translation and a 22 dip bold
             // card entry at full size, then 16 dip section headings and reading body over a

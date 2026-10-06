@@ -37,6 +37,10 @@ namespace Leaf
         // nothing. The range is kept, so the highlight comes back from whichever selection
         // is current when the drag ends.
         private bool suspended;
+        // The popup is closing for good and this layer will never be looked at again: the
+        // ticks the close itself raises - a size change, a last layout pass, a scroll reset -
+        // are answered with nothing rather than with a geometry query into a dying box.
+        private bool stopped;
 
         public SourceHighlightLayer() { IsHitTestVisible = false; ClipToBounds = true; }
 
@@ -106,6 +110,19 @@ namespace Leaf
             recomputeQueued = false;
             pass++;
         }
+        // The popup is closing for good: the layer draws nothing more, drops the pass it had
+        // queued, and refuses every later request - including the ones the close's own last
+        // layout and scroll ticks raise.
+        internal void Stop()
+        {
+            stopped = true;
+            suspended = false;
+            recomputeQueued = false;
+            pass++;
+            if (bands.Count == 0) return;
+            bands.Clear();
+            InvalidateVisual();
+        }
         private void OnScrollChanged(object sender, ScrollChangedEventArgs e)
         {
             if (e.VerticalChange == 0 && e.HorizontalChange == 0) return;
@@ -114,8 +131,9 @@ namespace Leaf
         private void OnBoxLayout(object sender, EventArgs e)
         {
             // Layout ticks run for every ancestor pass; only an extent change — or the
-            // first layout that gives the box real geometry — asks for new bands.
-            if (box == null || start < 0 || end <= start) return;
+            // first layout that gives the box real geometry — asks for new bands. A stopped
+            // layer answers none of them, so a closing window's last passes stay silent.
+            if (stopped || box == null || start < 0 || end <= start) return;
             if (bands.Count > 0 && box.ActualWidth == laidOutWidth && box.ActualHeight == laidOutHeight) return;
             RequestRecompute();
         }
@@ -123,7 +141,7 @@ namespace Leaf
         {
             // A suspended layer asks for nothing: the drag's own ticks would otherwise queue
             // a pass for every pass of the window's loop.
-            if (suspended || recomputeQueued) return;
+            if (stopped || suspended || recomputeQueued) return;
             recomputeQueued = true;
             int current = ++pass;
             // Waiting for render priority means the pass runs after the layout that produced
@@ -136,7 +154,7 @@ namespace Leaf
                 recomputeQueued = false;
                 // A clear between the request and this pass owns the state now; the removed
                 // highlight is not painted back.
-                if (box == null || start < 0 || end <= start || suspended) return;
+                if (stopped || box == null || start < 0 || end <= start || suspended) return;
                 Recompute();
             }));
         }
