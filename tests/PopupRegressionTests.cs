@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
+using System.Reflection;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -52,10 +53,12 @@ internal static class PopupRegressionTests
         await ExplicitApplySurvivesPageLeave(Path.Combine(folder, "settings-apply-leave"));
         await InternalSelectionReturn(Path.Combine(folder, "internal-return"));
         await ReturnAfterClearDoesNotResurrect(Path.Combine(folder, "return-cleared"));
+        await OpenRecordDuringClearDoesNotResurrect(Path.Combine(folder, "open-record-cleared"));
         await LearningContentSelectable(Path.Combine(folder, "selectable"));
         await SettingsEntryUsesPopupPage(Path.Combine(folder, "settings-entry"));
         await InternalSelectionShortcutRouting(Path.Combine(folder, "internal-shortcut"));
         await InternalSelectionInSettingsIsNotRead(Path.Combine(folder, "settings-focus"));
+        await ShortcutRecordingEndsWhenHostDeactivates(Path.Combine(folder, "shortcut-deactivated"));
         await ExternalShortcutLeavesSettingsPage(Path.Combine(folder, "external-settings-leave"));
         await FailedSettingsLeaveBlocksCapture(Path.Combine(folder, "settings-leave-blocks"));
         await ExitKeepsAppOnFailedSettingsLeave(Path.Combine(folder, "exit-settings-leave"));
@@ -528,6 +531,41 @@ internal static class PopupRegressionTests
         }
     }
 
+    // Opening a record while the settings page is still flushing keeps the epoch it was opened
+    // under: a clear that lands during that wait must not let the delayed entry write the record
+    // back under the newer one. The record itself stays on screen from memory.
+    private static async Task OpenRecordDuringClearDoesNotResurrect(string folder)
+    {
+        var store = new LocalStore(folder, new DelayedWrites());
+        var seed = Json.Copy(store.Settings); seed.Provider.Model = "fixture-model"; store.SaveSettings(seed);
+        using (var shell = new AppShell(store, false, new LlmClient(new FixtureHandler()))) {
+            await shell.TranslateAsync("A record from before the clear.", "选中文字", false);
+            var record = TranslationRecord.Create("A record opened while the page was still flushing.", "选中文字", store.Settings);
+            record.Translation = "清空后不应重新写入。"; record.Completed = true;
+            await store.SaveAsync(record, store.HistoryEpoch);
+            Check(store.History("").Any(r => r.Id == record.Id), "The record is in the history that is about to be cleared");
+            shell.ShowSettingsPage();
+            var panel = SettingsPanel(shell);
+            // A real pending preference makes the leave before the open take its delayed write.
+            Ui.Get<TextBox>(panel, "TargetInput").Text = "英语";
+            shell.OpenRecord(record);
+            // The clear lands while that leave is still writing, so the epoch moves under the
+            // entry that was already queued.
+            await store.ClearAsync();
+            await Until(() => ReferenceEquals(shell.Current, record));
+            Check(ReferenceEquals(shell.Current, record) && !shell.IsSettingsPageOpen &&
+                Ui.Get<TextBox>(shell.Popup, "SourceInput").Text == record.Source,
+                "The record opened before the clear still shows on the reading page from memory");
+            await shell.SaveCurrentAsync();
+            await store.FlushAsync();
+            Check(store.History("").Count == 0,
+                "A record opened before the clear cannot be written back under the newer epoch");
+            // This store's writes are slowed on purpose; take the exit snapshot before the scope ends.
+            shell.Dispose();
+            try { await store.FlushAsync(); } catch { }
+        }
+    }
+
     // Selecting text inside Leaf starts its own conversation, and the light back entry
     // returns to the previous one without any request.
     private static async Task InternalSelectionReturn(string folder)
@@ -679,6 +717,8 @@ internal static class PopupRegressionTests
 
     // The settings page is not a selection source: a real selected settings field stays a
     // settings value, the page and the session behind it survive, and nothing is read outside.
+    // The hidden reading page is left exactly as it was too - the card, the open follow-up and
+    // the draft it holds must survive a shortcut pressed while the settings page is in front.
     private static async Task InternalSelectionInSettingsIsNotRead(string folder)
     {
         var probe = new FakeSelectionProbe();
@@ -686,9 +726,19 @@ internal static class PopupRegressionTests
         var handler = new FixtureHandler();
         using (var shell = new AppShell(ConfiguredStore(folder), false, new LlmClient(handler))) {
             shell.Selection = new SelectionAcquirer(probe);
+            // The direct-input preference is the one that would switch the hidden page into its
+            // editor, so it is on for this scenario.
+            var direct = Json.Copy(shell.Store.Settings); direct.FocusInputOnShortcut = true; shell.Store.SaveSettings(direct);
             await shell.TranslateAsync("A settings focus sentence.", "选中文字", false);
             var record = shell.Current;
+            var word = TextTools.Pieces(record.Source).First(p => p.IsWord);
+            await shell.SelectWordAsync(word, false);
+            Click(shell.Popup, "AskButton");
             Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text = "draft behind the settings page";
+            Check(Ui.Get<Border>(shell.Popup, "WordPanel").Visibility == Visibility.Visible &&
+                Ui.Get<Border>(shell.Popup, "InputPanel").Visibility == Visibility.Visible &&
+                Ui.Get<Grid>(shell.Popup, "SourceEditor").Visibility == Visibility.Collapsed,
+                "The reading page behind the settings page has a word card, an open follow-up and no editor");
             shell.ShowSettingsPage();
             var panel = SettingsPanel(shell);
             var target = Ui.Get<TextBox>(panel, "TargetInput");
@@ -708,10 +758,92 @@ internal static class PopupRegressionTests
             Check(target.Text == "a settings value" &&
                 Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text == "draft behind the settings page",
                 "The settings field and the draft behind the page are untouched");
+            Check(HiddenReadingPageUntouched(shell, record),
+                "A shortcut in settings leaves the hidden page's card, follow-up, draft and editor untouched");
+            // The guard is about the page, not about one status: an empty typed answer is routed
+            // the same way as the unavailable one above.
+            shell.InternalSelection = new FixedPageReader(InternalSelectionResult.Empty("SourceText"));
+            await shell.InvokeShortcutAsync();
+            Check(shell.IsSettingsPageOpen && ReferenceEquals(shell.Current, record) && handler.Calls == calls &&
+                HiddenReadingPageUntouched(shell, record),
+                "An empty internal answer in settings also leaves the hidden page untouched");
             Check(await shell.TryLeaveSettingsPageAsync() && !shell.IsSettingsPageOpen &&
                 shell.Store.Settings.TargetLanguage == "a settings value",
                 "Leaving the page afterwards applies the edit it was holding");
+            Check(HiddenReadingPageUntouched(shell, record) &&
+                Ui.Get<TextBlock>(shell.Popup, "TopicLabel").Text.Contains(word.Text),
+                "Returning from settings shows the same reading page the shortcut left alone");
         }
+    }
+
+    // The reading page's own state while the settings page is in front of it.
+    private static bool HiddenReadingPageUntouched(AppShell shell, TranslationRecord record)
+    {
+        return Ui.Get<Border>(shell.Popup, "WordPanel").Visibility == Visibility.Visible &&
+            Ui.Get<Border>(shell.Popup, "InputPanel").Visibility == Visibility.Visible &&
+            Ui.Get<TextBlock>(shell.Popup, "TranslationCaption").Text == "译文" &&
+            Ui.Get<RichTextBox>(shell.Popup, "SourceText").Visibility == Visibility.Visible &&
+            Ui.Get<Grid>(shell.Popup, "SourceEditor").Visibility == Visibility.Collapsed &&
+            Ui.Get<TextBox>(shell.Popup, "SourceInput").Text == record.Source &&
+            Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text == "draft behind the settings page";
+    }
+
+    // The popup is the settings host now, so its own window Deactivated event is the entry the
+    // tray window's Deactivated used to be: a shortcut recording started on the page is ended
+    // when the window loses activation, instead of staying open behind a topmost popup that an
+    // outside click does not leave. Both events are the real WPF ones: the recorder's own
+    // GotKeyboardFocus, and the window's own Deactivated. That a real activation change reaches
+    // it - an outside click, a pinned window, the global registration itself - still needs the
+    // manual desktop pass.
+    private static async Task ShortcutRecordingEndsWhenHostDeactivates(string folder)
+    {
+        var handler = new FixtureHandler();
+        using (var shell = new AppShell(ConfiguredStore(folder), false, new LlmClient(handler))) {
+            await shell.TranslateAsync("A shortcut recording sentence.", "选中文字", false);
+            shell.ShowSettingsPage();
+            var panel = SettingsPanel(shell);
+            var recorder = Ui.Get<TextBox>(panel, "ShortcutInput");
+            var hint = Ui.Get<TextBlock>(panel, "ShortcutHint");
+            string saved = recorder.Text, idleHint = hint.Text;
+            FocusRecorder(recorder);
+            Check(recorder.Text.Contains("请按下") && hint.Text.Contains("按下 Ctrl"),
+                "Focusing the recorder on the popup settings page starts a shortcut recording");
+            Deactivate(shell.Popup);
+            Check(recorder.Text == saved && hint.Text == idleHint,
+                "The popup losing activation ends the recording and restores the previous shortcut");
+            FocusRecorder(recorder);
+            Check(recorder.Text.Contains("请按下"),
+                "A recording can be started again after the window lost activation");
+            Check(await shell.TryLeaveSettingsPageAsync() && !shell.IsSettingsPageOpen,
+                "The page can still be left after deactivation ended the recording");
+        }
+    }
+
+    // Starts the recorder the way the user's click does: the control's own focus event.
+    private static void FocusRecorder(TextBox recorder)
+    {
+        recorder.RaiseEvent(new System.Windows.Input.KeyboardFocusChangedEventArgs(
+            System.Windows.Input.Keyboard.PrimaryDevice, 0, null, recorder) {
+            RoutedEvent = System.Windows.Input.Keyboard.GotKeyboardFocusEvent
+        });
+    }
+
+    // Raises the window's own Deactivated event, which is what WPF does when the window loses
+    // activation. It is backed by a private key rather than a routed event, so its protected
+    // raiser is the only headless entry that goes through the real handler list.
+    private static void Deactivate(Window window)
+    {
+        var method = typeof(Window).GetMethod("OnDeactivated", BindingFlags.Instance | BindingFlags.NonPublic);
+        method.Invoke(window, new object[] { EventArgs.Empty });
+    }
+
+    // A reader that answers one fixed typed result, so a rule that must not depend on the
+    // status can be checked for a status this page cannot produce with real controls.
+    private sealed class FixedPageReader : IInternalSelectionReader
+    {
+        private readonly InternalSelectionResult result;
+        public FixedPageReader(InternalSelectionResult result) { this.result = result; }
+        public InternalSelectionResult Read() { return result; }
     }
 
     // An external capture shows the reading page, so it leaves an open settings page first: the
