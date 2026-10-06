@@ -134,7 +134,7 @@ internal static class SelectionTests
         var wide = new ScriptedUiTree();
         var wideRoot = wide.WindowRoot = new ScriptedUiNode { ControlTypeIdValue = 50033, Selection = null, WindowHandle = 123 };
         for (int i = 0; i < 5000; i++) wideRoot.Add(new ScriptedUiNode { Selection = null });
-        wide.Focus = new ScriptedUiNode { ControlTypeIdValue = 50004, Selection = "" };
+        wide.Focus = wideRoot.Add(new ScriptedUiNode { ControlTypeIdValue = 50004, Selection = "" });
         var wideResult = await new WindowsSelectionProbe(wide).ReadAutomationAsync(target, CancellationToken.None);
         Check(wideResult.Status == CaptureStatus.Unavailable && wideResult.Reason == CaptureReason.AutomationBudget,
             "A window too large for the budget is inconclusive instead of confirmed empty (was " + wideResult.Status + "/" + wideResult.Reason + ")");
@@ -145,7 +145,7 @@ internal static class SelectionTests
         var cancelTree = new ScriptedUiTree();
         var cancelRoot = cancelTree.WindowRoot = new ScriptedUiNode { ControlTypeIdValue = 50033, Selection = null, WindowHandle = 123 };
         for (int i = 0; i < 5000; i++) cancelRoot.Add(new ScriptedUiNode { Selection = null });
-        cancelTree.Focus = new ScriptedUiNode { ControlTypeIdValue = 50004, Selection = "" };
+        cancelTree.Focus = cancelRoot.Add(new ScriptedUiNode { ControlTypeIdValue = 50004, Selection = "" });
         using (var cancelled = new CancellationTokenSource()) {
             cancelTree.OnRead = node => { if (cancelTree.TotalReads >= 2) cancelled.Cancel(); };
             var cancelResult = await new WindowsSelectionProbe(cancelTree).ReadAutomationAsync(target, cancelled.Token);
@@ -175,6 +175,44 @@ internal static class SelectionTests
         Check(sameStep.ControlTypeId == WindowsSelectionProbe.DocumentTypeId && sameStep.PatternSupported && sameStep.CandidateCount >= 2,
             "The UIA stage names the control type that supplied the text");
         Check(document.Reads == 1, "The document that answered was read exactly once");
+
+        // A focus inside another top-level window of the same process belongs to that window,
+        // so it is never read and never becomes this capture's answer: the captured window is
+        // a boundary of its own, not just a process id.
+        var foreignFocus = new ScriptedUiTree();
+        var foreignWindow = new ScriptedUiNode { ControlTypeIdValue = 50033, Selection = null, WindowHandle = 999 };
+        var foreignDocument = foreignWindow.Add(new ScriptedUiNode { ControlTypeIdValue = WindowsSelectionProbe.DocumentTypeId, Selection = "another window's selection" });
+        var capturedWindow = foreignFocus.WindowRoot = new ScriptedUiNode { ControlTypeIdValue = 50033, Selection = null, WindowHandle = 123 };
+        capturedWindow.Add(new ScriptedUiNode { ControlTypeIdValue = WindowsSelectionProbe.DocumentTypeId, Selection = "captured window selection" });
+        foreignFocus.Focus = foreignDocument;
+        var foreignResult = await new WindowsSelectionProbe(foreignFocus).ReadAutomationAsync(target, CancellationToken.None);
+        Check(foreignResult.Status == CaptureStatus.Text && foreignResult.Text == "captured window selection",
+            "Another window of the same process never supplies this capture's selection (was \"" + foreignResult.Text + "\")");
+        Check(foreignDocument.Reads == 0 && foreignWindow.Reads == 0,
+            "A focused element that cannot be shown to belong to the captured window is never read");
+
+        // The same boundary when the captured window has nothing selected: the foreign focus
+        // cannot decide the captured window's answer either.
+        var emptyForeign = new ScriptedUiTree();
+        var otherWindow = new ScriptedUiNode { ControlTypeIdValue = 50033, Selection = null, WindowHandle = 999 };
+        var otherFocusDocument = otherWindow.Add(new ScriptedUiNode { ControlTypeIdValue = WindowsSelectionProbe.DocumentTypeId, Selection = "another window's selection" });
+        var emptyWindow = emptyForeign.WindowRoot = new ScriptedUiNode { ControlTypeIdValue = 50033, Selection = null, WindowHandle = 123 };
+        emptyWindow.Add(new ScriptedUiNode { ControlTypeIdValue = WindowsSelectionProbe.DocumentTypeId, Selection = "" });
+        emptyForeign.Focus = otherFocusDocument;
+        var emptyForeignResult = await new WindowsSelectionProbe(emptyForeign).ReadAutomationAsync(target, CancellationToken.None);
+        Check(emptyForeignResult.Status == CaptureStatus.Empty && emptyForeignResult.Text == "" && otherFocusDocument.Reads == 0,
+            "A foreign focus is not turned into this window's empty selection either");
+
+        // A focus inside a child window of the captured window is still this window's own: the
+        // boundary is the captured window, not the first window handle on the way up.
+        var childWindow = new ScriptedUiTree();
+        var outerWindow = childWindow.WindowRoot = new ScriptedUiNode { ControlTypeIdValue = 50033, Selection = null, WindowHandle = 123 };
+        var innerWindow = outerWindow.Add(new ScriptedUiNode { ControlTypeIdValue = 50033, Selection = null, WindowHandle = 321 });
+        var innerDocument = innerWindow.Add(new ScriptedUiNode { ControlTypeIdValue = WindowsSelectionProbe.DocumentTypeId, Selection = "child window selection" });
+        childWindow.Focus = innerDocument;
+        var childResult = await new WindowsSelectionProbe(childWindow).ReadAutomationAsync(target, CancellationToken.None);
+        Check(childResult.Status == CaptureStatus.Text && childResult.Text == "child window selection",
+            "A focused element inside a child window still belongs to the captured window");
 
         // An empty document that is an ancestor of the focused editor answers the same way.
         var ancestorTree = new ScriptedUiTree();

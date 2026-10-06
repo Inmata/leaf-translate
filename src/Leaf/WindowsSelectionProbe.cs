@@ -140,6 +140,13 @@ namespace Leaf
             int visited = 0, candidates = 0;
             bool trustedEmpty = false, budgetSpent = false, patternSupported = false;
             int emptyType = 0, focusType = focused.ControlTypeId;
+
+            // The focused element can belong to another window of the same process, so its chain
+            // is walked up to the captured window before anything on it is read: a chain that
+            // never reaches that window belongs somewhere else and may not answer for this one.
+            // The walk is bounded like every other tree call.
+            var chain = new List<IUiNode>();
+            bool associated = false;
             IUiNode node = focused;
             for (int depth = 0; node != null && depth < AncestorDepth; depth++) {
                 if (Stopped(cancellation)) return Cancelled(steps);
@@ -147,13 +154,18 @@ namespace Leaf
                 // Ancestors stay inside the captured process; the walk never leaves it.
                 if (target.ProcessId != 0 && node.ProcessId != (int)target.ProcessId) break;
                 visited++;
-                string selected = ReadCandidate(node, ref candidates, ref patternSupported, ref trustedEmpty, ref emptyType);
-                if (!string.IsNullOrWhiteSpace(selected)) return Success(selected, steps, watch, candidates, node.ControlTypeId, tree, target);
-                if (candidates >= MaxCandidates) { budgetSpent = true; break; }
-                // The captured window is the highest node this walk may look at; above it are
-                // other windows of the same process and eventually the desktop.
-                if (IsCapturedWindow(node, target)) break;
+                chain.Add(node);
+                if (IsCapturedWindow(node, target)) { associated = true; break; }
                 node = Parent(node);
+            }
+            if (associated) {
+                foreach (IUiNode candidate in chain) {
+                    if (Stopped(cancellation)) return Cancelled(steps);
+                    if (watch.ElapsedMilliseconds > AutomationBudgetMs) { budgetSpent = true; break; }
+                    string selected = ReadCandidate(candidate, ref candidates, ref patternSupported, ref trustedEmpty, ref emptyType);
+                    if (!string.IsNullOrWhiteSpace(selected)) return Success(selected, steps, watch, candidates, candidate.ControlTypeId, tree, target);
+                    if (candidates >= MaxCandidates) { budgetSpent = true; break; }
+                }
             }
 
             bool complete = !budgetSpent && candidates < MaxCandidates;
@@ -217,9 +229,11 @@ namespace Leaf
         private static bool IsCapturedWindow(IUiNode node, CaptureTarget target)
         {
             if (target == null || target.Window == IntPtr.Zero) return false;
-            long handle;
-            try { handle = node.NativeWindowHandle; } catch { return false; }
-            return handle != 0 && handle == target.Window.ToInt64();
+            return WindowHandle(node) == target.Window.ToInt64();
+        }
+        private static long WindowHandle(IUiNode node)
+        {
+            try { return node.NativeWindowHandle; } catch { return 0; }
         }
         private static IUiNode Parent(IUiNode node)
         {
