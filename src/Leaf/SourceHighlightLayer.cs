@@ -13,7 +13,10 @@ namespace Leaf
     // over them — and the drawing is clipped to the box's viewport. Scrolling and real
     // layout changes recompute only the piece's own bands, once per render cycle however
     // many ticks asked, and only after the box's layout has settled; layout ticks that
-    // change nothing keep the cached drawing. A top-level type so the XAML reader can bind it.
+    // change nothing keep the cached drawing. A hand-dragged window edge is the one state
+    // that asks for no geometry at all: the layer is suspended for the drag, paints
+    // nothing, and refreshes the range that is current when it ends. A top-level type so
+    // the XAML reader can bind it.
     public sealed class SourceHighlightLayer : FrameworkElement
     {
         private static readonly Brush Fill = CreateFill();
@@ -27,6 +30,13 @@ namespace Leaf
         // for line rectangles each time reformats it. Many ticks therefore collapse into one
         // query per render cycle.
         private bool recomputeQueued;
+        // Each queued pass carries the number it was requested under: a pass that a
+        // suspension or a cancel has overtaken returns without asking the box anything.
+        private int pass;
+        // While the window's edge is being dragged the layer draws nothing and asks for
+        // nothing. The range is kept, so the highlight comes back from whichever selection
+        // is current when the drag ends.
+        private bool suspended;
 
         public SourceHighlightLayer() { IsHitTestVisible = false; ClipToBounds = true; }
 
@@ -60,9 +70,41 @@ namespace Leaf
             start = -1; end = -1;
             // The layer's own range is the pending request's protection too: the queued pass
             // re-reads it, so a highlight cleared before that pass runs is never painted back.
+            // That holds while the layer is suspended as well: a clear there resets the range,
+            // so the drag's end cannot paint the old piece again.
             if (bands.Count == 0) return;
             bands.Clear();
             InvalidateVisual();
+        }
+        // A hand-dragged window edge pauses the layer: the drawing is hidden — a render-only
+        // change, the box's layout is untouched — and every size, layout, scroll and queued
+        // pass is refused, because the geometry the box would answer with is the half-arranged
+        // one a drag produces. The latest range survives the pause.
+        internal void Suspend()
+        {
+            if (suspended) return;
+            suspended = true;
+            if (bands.Count == 0) return;
+            bands.Clear();
+            InvalidateVisual();
+        }
+        // The drag is over: the range that is current now — the one it started with, or a
+        // newer one a word card produced during it — is refreshed once, under the layout the
+        // box has settled into. A range a clear removed while suspended is not refreshed.
+        internal void Resume()
+        {
+            if (!suspended) return;
+            suspended = false;
+            RequestRecompute();
+        }
+        // The popup is going away while the layer is suspended: the pass a tick had already
+        // queued is abandoned instead of painted on a window nobody is looking at, and the
+        // range stays for the next layout that needs it.
+        internal void CancelPending()
+        {
+            suspended = false;
+            recomputeQueued = false;
+            pass++;
         }
         private void OnScrollChanged(object sender, ScrollChangedEventArgs e)
         {
@@ -79,16 +121,22 @@ namespace Leaf
         }
         private void RequestRecompute()
         {
-            if (recomputeQueued) return;
+            // A suspended layer asks for nothing: the drag's own ticks would otherwise queue
+            // a pass for every pass of the window's loop.
+            if (suspended || recomputeQueued) return;
             recomputeQueued = true;
+            int current = ++pass;
             // Waiting for render priority means the pass runs after the layout that produced
             // the geometry, so a resize reads each settled size once rather than a half-arranged
             // box on every tick.
             Dispatcher.BeginInvoke(DispatcherPriority.Render, new Action(() => {
+                // An abandoned pass - the popup went away - and a suspended one both return
+                // without asking the box for anything.
+                if (current != pass) return;
                 recomputeQueued = false;
                 // A clear between the request and this pass owns the state now; the removed
                 // highlight is not painted back.
-                if (box == null || start < 0 || end <= start) return;
+                if (box == null || start < 0 || end <= start || suspended) return;
                 Recompute();
             }));
         }

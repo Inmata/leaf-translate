@@ -55,6 +55,13 @@ namespace Leaf
         // resize really changes it and rebuilds the card; every other refresh - a scroll, a
         // selection, a chat message at the same scale - leaves that document alone.
         private double wordCardScale = double.NaN;
+        // A hand-dragged window edge is not a content change: while the drag runs the reading
+        // page keeps the scale it started from, so its type never steps through sizes, and the
+        // highlight layer paints nothing. The window's own size still changes and the text
+        // re-wraps with it; the size the drag ends at is applied once, through the one
+        // typography pass. A programmatic resize never reaches this state at all.
+        private bool interactiveResize;
+        private double resizeFrozenScale = double.NaN;
         // The column the floating collapse action occupies over the card's first line: the
         // button's own width - a 14 dip label with an 8,6 padding on each side - with enough
         // clearance left that the entry can never run under it. Only the first paragraph
@@ -454,7 +461,7 @@ namespace Leaf
         // edge: the reading column is shared with the translation above it.
         private void DrawWordCard()
         {
-            double scale = TypographyScale(Popup.Width, Popup.Height);
+            double scale = CurrentTypographyScale();
             var document = new FlowDocument {
                 PagePadding = new Thickness(0), FontFamily = PaperFontFamily,
                 FontSize = Math.Max(13, 16 * scale)
@@ -619,9 +626,47 @@ namespace Leaf
         {
             return Math.Max(0.84, Math.Min(1, Math.Min(width / 456.0, height / 620.0)));
         }
+        // The scale the reading page is built at right now: a hand-dragged edge keeps the one
+        // the drag started from, and every other pass reads the window's own size.
+        private double CurrentTypographyScale()
+        {
+            return interactiveResize && !double.IsNaN(resizeFrozenScale)
+                ? resizeFrozenScale : TypographyScale(Popup.Width, Popup.Height);
+        }
+        // The user has started dragging the window's edge. Moving the window raises the same
+        // ends of the modal loop without ever sizing it, so only a sizing message reaches
+        // here: the scale is frozen for the whole drag and the highlight stops drawing.
+        private void BeginInteractiveResize()
+        {
+            if (interactiveResize) return;
+            interactiveResize = true;
+            resizeFrozenScale = TypographyScale(Popup.Width, Popup.Height);
+            if (highlightLayer != null) highlightLayer.Suspend();
+        }
+        // The drag is over at its final size: the highlight comes back, and the whole
+        // typography ladder is written once for the size the window really has now. Every
+        // later pass - the one a coalesced size change still raises - reads that same size.
+        private void EndInteractiveResize()
+        {
+            if (!interactiveResize) return;
+            interactiveResize = false;
+            resizeFrozenScale = double.NaN;
+            if (highlightLayer != null) highlightLayer.Resume();
+            UpdatePopupTypography();
+        }
+        // The popup is going away mid-drag: the frozen scale is released so the next show
+        // reads the window's own size, and the pass the paused layer had queued is dropped
+        // instead of painted on a window that is no longer shown.
+        private void CancelInteractiveResize()
+        {
+            if (!interactiveResize) return;
+            interactiveResize = false;
+            resizeFrozenScale = double.NaN;
+            if (highlightLayer != null) highlightLayer.CancelPending();
+        }
         public void UpdatePopupTypography()
         {
-            double scale = TypographyScale(Popup.Width, Popup.Height);
+            double scale = CurrentTypographyScale();
             // The ladder is fixed: a 19 dip original, a 22 dip translation and a 22 dip bold
             // card entry at full size, then 16 dip section headings and reading body over a
             // 14 dip auxiliary tier - the original and translation labels, the part of speech
@@ -884,7 +929,7 @@ namespace Leaf
         {
             var box = Ui.Get<RichTextBox>(Popup, "TranslationText");
             box.Document.Blocks.Clear();
-            var block = new Paragraph { Margin = new Thickness(0), LineHeight = 27 * TypographyScale(Popup.Width, Popup.Height) };
+            var block = new Paragraph { Margin = new Thickness(0), LineHeight = 27 * CurrentTypographyScale() };
             box.Document.Blocks.Add(block);
             string translation = Current == null ? "" : Current.Translation;
             if (string.IsNullOrWhiteSpace(translation)) { block.Inlines.Add(new Run(Current != null ? "正在翻译…" : "译文会显示在这里。")); return; }

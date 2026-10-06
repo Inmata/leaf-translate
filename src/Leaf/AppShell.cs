@@ -55,6 +55,12 @@ namespace Leaf
         private RetryOperation activeTranslation, activeWord, activeFollowup;
         private Action retry;
         private const int HotkeyId = 0x4C46;
+        // The user is resizing this window by hand, and the end of that modal loop. Dragging
+        // the window itself raises the same end without ever sizing it, so only the sizing
+        // message starts the pause; both are observed, never swallowed, so the system's own
+        // resize keeps working.
+        private const int WmSizing = 0x0214;
+        private const int WmExitSizeMove = 0x0232;
 
         public AppShell(LocalStore store, bool native) : this(store, native, new LlmClient(), null) { }
         public AppShell(LocalStore store, bool native, LlmClient client) : this(store, native, client, null) { }
@@ -93,6 +99,12 @@ namespace Leaf
         {
             if (message == 0x0312 && wparam.ToInt32() == HotkeyId) { handled = true; if (!shortcutRecording) CaptureAndTranslate(); }
             if (message == 0x8001) { handled = true; ShowPopup(); }
+            // A drag of the window's edge is followed, not absorbed: the reading page holds its
+            // scale and the highlight stays hidden until the drag ends, when the final size is
+            // applied once. Neither message is marked handled, so the system's own sizing and
+            // the coalesced size change behind it still run.
+            if (message == WmSizing) BeginInteractiveResize();
+            if (message == WmExitSizeMove) EndInteractiveResize();
             return IntPtr.Zero;
         }
         private void BuildTray()
@@ -327,6 +339,9 @@ namespace Leaf
         public void HidePopup()
         {
             CancelCapture();
+            // Hiding ends a drag that was still running: the next show reads the window's own
+            // size, and the highlight pass that was queued is dropped rather than painted.
+            CancelInteractiveResize();
             sourceRevision++;
             RememberPlacement();
             if (Current != null) {

@@ -46,6 +46,7 @@ internal static class PopupRegressionTests
         await RetryUsesLatestProvider(Path.Combine(folder, "retry-provider"));
         await CachedRestoreKeepsWordCard(Path.Combine(folder, "cached-card"));
         await WordCardRefreshKeepsSelection(Path.Combine(folder, "card-refresh"));
+        await InteractiveResizeHoldsReadingPage(Path.Combine(folder, "interactive-resize"));
         await ExpandEntryRestoresAfterCollapse(Path.Combine(folder, "expand-entry"));
         await FailedFollowupRetriesOriginalQuestion(Path.Combine(folder, "failed-followup"));
         await RecoveryBarrierBlocksFollowupRetry(Path.Combine(folder, "barrier-retry"));
@@ -60,6 +61,7 @@ internal static class PopupRegressionTests
         await RootRetryReanchorsAfterReturn(Path.Combine(folder, "root-retry-reanchor"));
         await HighlightPendingClearsOnDetach(Path.Combine(folder, "highlight-detach"));
         await HighlightBandsUnderRealLayout();
+        await HighlightSuspendsDuringInteractiveResize();
         await TranslationDisplayDropsMarkers(Path.Combine(folder, "marker-display"));
         SourceOffsetMapsStayTotalAndMonotone();
         EmbeddedPaperFont();
@@ -671,6 +673,150 @@ internal static class PopupRegressionTests
             await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
             Check(((System.Collections.ICollection)bandsField.GetValue(singleLayer)).Count > 0,
                 "A new selection computes its highlight after a clear");
+        }
+    }
+
+    // The same hidden host drives the pause a hand-dragged window edge puts the layer in: the
+    // drawing is hidden, no geometry is asked for, and the range that is current when the drag
+    // ends is the one that comes back. A clear during the pause owns the state, and a popup
+    // that goes away drops the pass it had queued instead of painting it.
+    private static async Task HighlightSuspendsDuringInteractiveResize()
+    {
+        var parameters = new HwndSourceParameters("highlight-suspend-check");
+        parameters.SetPosition(-32000, -32000); parameters.SetSize(340, 260);
+        parameters.WindowStyle = unchecked((int)0x80000000); // WS_POPUP: never shown
+        using (var host = new HwndSource(parameters)) {
+            var canvas = new Canvas();
+            var box = new TextBox { Text = "alpha beta gamma", Width = 300 };
+            canvas.Children.Add(box);
+            host.RootVisual = canvas;
+            canvas.UpdateLayout();
+            var layer = new SourceHighlightLayer();
+            layer.Bind(box);
+            int beta = box.Text.IndexOf("beta");
+            int gamma = box.Text.IndexOf("gamma");
+            layer.Show(beta, beta + 4);
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            Check(HighlightBands(layer) > 0, "The highlight is drawn before the window edge is dragged");
+            PauseHighlight(layer, "Suspend");
+            Check(HighlightBands(layer) == 0, "A dragged edge hides the drawing");
+            layer.Show(gamma, gamma + 5);
+            Check(!HighlightQueued(layer), "A suspended layer queues no geometry pass of its own");
+            canvas.UpdateLayout();
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            Check(HighlightBands(layer) == 0 && !HighlightQueued(layer),
+                "Size, layout and highlight ticks compute no geometry while the drag runs");
+            PauseHighlight(layer, "Resume");
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            Check(HighlightBands(layer) > 0 && !HighlightSuspended(layer),
+                "The ended drag refreshes the highlight from the range that is current");
+            PauseHighlight(layer, "Suspend");
+            layer.Show(beta, beta + 4);
+            layer.Clear();
+            PauseHighlight(layer, "Resume");
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            Check(HighlightBands(layer) == 0,
+                "A highlight cleared while the drag ran is not revived when it ends");
+            layer.Show(beta, beta + 4);
+            PauseHighlight(layer, "Suspend");
+            layer.Show(gamma, gamma + 5);
+            PauseHighlight(layer, "CancelPending");
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            Check(HighlightBands(layer) == 0 && !HighlightQueued(layer) && !HighlightSuspended(layer),
+                "A popup hidden mid-drag drops its queued pass instead of repainting");
+            layer.Show(beta, beta + 4);
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            Check(HighlightBands(layer) > 0, "The next selection draws again after that drop");
+        }
+    }
+
+    private const int WmSizing = 0x0214;
+    private const int WmExitSizeMove = 0x0232;
+    // The layer's state, read where a person could not see it: the drawing is inspected
+    // through its own bands rather than through pixels.
+    private static int HighlightBands(SourceHighlightLayer layer)
+    {
+        return ((System.Collections.ICollection)HighlightField("bands").GetValue(layer)).Count;
+    }
+    private static bool HighlightQueued(SourceHighlightLayer layer)
+    {
+        return (bool)HighlightField("recomputeQueued").GetValue(layer);
+    }
+    private static bool HighlightSuspended(SourceHighlightLayer layer)
+    {
+        return (bool)HighlightField("suspended").GetValue(layer);
+    }
+    private static FieldInfo HighlightField(string name)
+    {
+        return typeof(SourceHighlightLayer).GetField(name, BindingFlags.Instance | BindingFlags.NonPublic);
+    }
+    private static void PauseHighlight(SourceHighlightLayer layer, string name)
+    {
+        typeof(SourceHighlightLayer).GetMethod(name, BindingFlags.Instance | BindingFlags.NonPublic).Invoke(layer, null);
+    }
+    // The real message entry, driven the way the system drives it. The answer is whether the
+    // handler swallowed the message: a sizing message that was absorbed would be a real
+    // regression, so the check reads the same flag the window procedure would.
+    private static bool SendMessage(AppShell shell, int message)
+    {
+        var messages = typeof(AppShell).GetMethod("Messages", BindingFlags.Instance | BindingFlags.NonPublic);
+        object[] arguments = { IntPtr.Zero, message, IntPtr.Zero, IntPtr.Zero, false };
+        messages.Invoke(shell, arguments);
+        return (bool)arguments[4];
+    }
+    private static SourceHighlightLayer HighlightLayerOf(AppShell shell)
+    {
+        return (SourceHighlightLayer)typeof(AppShell)
+            .GetField("highlightLayer", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(shell);
+    }
+
+    // A hand-dragged window edge, followed through the popup's own message entry: the reading
+    // page holds the scale the drag started from - the card keeps its document, its selection
+    // and its ladder - and the size the drag ends at is applied once, in place. Moving the
+    // window raises only the end of the modal loop and must leave the page alone.
+    private static async Task InteractiveResizeHoldsReadingPage(string folder)
+    {
+        var handler = new FixtureHandler();
+        using (var shell = new AppShell(ConfiguredStore(folder), false, new LlmClient(handler))) {
+            await shell.TranslateAsync("A drag resize sentence.", "选中文字", false);
+            var word = TextTools.Pieces(shell.Current.Source).First(p => p.IsWord);
+            await shell.SelectWordAsync(word, false);
+            var source = Ui.Get<TextBox>(shell.Popup, "SourceText");
+            var card = Ui.Get<RichTextBox>(shell.Popup, "WordCard");
+            var document = card.Document;
+            var entry = document.Blocks.OfType<Paragraph>().First();
+            card.Selection.Select(document.ContentStart, document.ContentEnd);
+            shell.Popup.Width = 456; shell.Popup.Height = 620; shell.UpdatePopupTypography();
+            Check(Math.Abs(source.FontSize - 19) < 0.01 && Math.Abs(entry.FontSize - 22) < 0.01,
+                "The full-size window lays the reading page out at its full ladder");
+
+            Check(!SendMessage(shell, WmSizing), "A sizing message is observed without being swallowed");
+            Check(HighlightSuspended(HighlightLayerOf(shell)), "Starting the drag pauses the highlight layer");
+            shell.Popup.Width = 380; shell.Popup.Height = 420; shell.UpdatePopupTypography();
+            Check(Math.Abs(source.FontSize - 19) < 0.01 && Math.Abs(Ui.Get<RichTextBox>(shell.Popup, "TranslationText").FontSize - 22) < 0.01,
+                "The drag keeps the scale the reading page started from");
+            Check(ReferenceEquals(card.Document, document) && !card.Selection.IsEmpty &&
+                Math.Abs(entry.FontSize - 22) < 0.01 && Math.Abs(document.FontSize - 16) < 0.01,
+                "The drag keeps the card's document, the reader's selection and the card's own ladder");
+
+            Check(!SendMessage(shell, WmExitSizeMove), "The end of the drag is observed without being swallowed");
+            double small = AppShell.TypographyScale(380, 420);
+            Check(!HighlightSuspended(HighlightLayerOf(shell)), "The ended drag releases the highlight layer");
+            Check(Math.Abs(source.FontSize - Math.Max(13, 19 * small)) < 0.01 &&
+                Math.Abs(Ui.Get<RichTextBox>(shell.Popup, "TranslationText").FontSize - Math.Max(14, 22 * small)) < 0.01 &&
+                Math.Abs(entry.FontSize - Math.Max(14, 22 * small)) < 0.01 &&
+                ReferenceEquals(card.Document, document) && !card.Selection.IsEmpty,
+                "The size the drag ended at is applied once, to the same card document");
+
+            // A move raises the same end of the modal loop with no sizing message before it.
+            shell.Popup.Width = 456; shell.Popup.Height = 620; shell.UpdatePopupTypography();
+            shell.Popup.Width = 400; shell.Popup.Height = 500;
+            SendMessage(shell, WmExitSizeMove);
+            Check(Math.Abs(source.FontSize - 19) < 0.01 && Math.Abs(entry.FontSize - 22) < 0.01,
+                "Moving the window ends the loop without pausing or re-applying the reading page");
+            shell.UpdatePopupTypography();
+            Check(Math.Abs(source.FontSize - Math.Max(13, 19 * AppShell.TypographyScale(400, 500))) < 0.01,
+                "A size set without a drag still applies the window's own scale");
         }
     }
 
