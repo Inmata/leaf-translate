@@ -113,6 +113,28 @@ namespace Leaf
                 }
             return count;
         }
+        // Yellow highlight pixels inside one rectangle of an already written 96 DPI PNG: a
+        // warm band fill over a white page (either paper highlight tone), so a painted
+        // highlight is read back from the image rather than assumed from a non-null object.
+        private static int CountYellowInRect(string path, Rect box)
+        {
+            var image = new System.Windows.Media.Imaging.BitmapImage();
+            image.BeginInit(); image.UriSource = new Uri(path);
+            image.CacheOption = System.Windows.Media.Imaging.BitmapCacheOption.OnLoad; image.EndInit();
+            var converted = new System.Windows.Media.Imaging.FormatConvertedBitmap(image, System.Windows.Media.PixelFormats.Bgra32, null, 0);
+            int stride = converted.PixelWidth * 4;
+            var pixels = new byte[stride * converted.PixelHeight];
+            converted.CopyPixels(pixels, stride, 0);
+            int fromY = Math.Max(0, (int)Math.Floor(box.Top)), toY = Math.Min(converted.PixelHeight, (int)Math.Ceiling(box.Bottom));
+            int fromX = Math.Max(0, (int)Math.Floor(box.Left)), toX = Math.Min(converted.PixelWidth, (int)Math.Ceiling(box.Right));
+            int count = 0;
+            for (int y = fromY; y < toY; y++)
+                for (int x = fromX; x < toX; x++) {
+                    int i = y * stride + x * 4;
+                    if (pixels[i] >= 225 && pixels[i + 1] >= 205 && pixels[i + 2] <= 225 && pixels[i] - pixels[i + 2] >= 25) count++;
+                }
+            return count;
+        }
         // Top-left of the first painted pixel of one element on a white backdrop, at 96 DPI.
         private static Point PaintedOrigin(FrameworkElement element)
         {
@@ -169,7 +191,24 @@ namespace Leaf
                 Check(Ui.Get<Border>(popup, "ChatPanel").Visibility == (record.Chat.Count > 0 ? Visibility.Visible : Visibility.Collapsed) &&
                     Ui.Get<Border>(popup, "WordPanel").Visibility == Visibility.Visible,
                     "The " + name + " reading state shows the selected word card and only the conversation that exists", checks);
-                Capture(popup, folder, name + "-reading", checks);
+                string readingPath = Capture(popup, folder, name + "-reading", checks);
+                if (name == "default") {
+                    // The highlight is a painted band, so the image itself has to show it: the
+                    // word's own rectangles, read back from the box, must carry both the yellow
+                    // fill and the readable word — not merely a non-null highlight object.
+                    Check(shell.WordHighlighted, "The reading state keeps a highlight for the selected word", checks);
+                    var reading = Ui.Get<TextBox>(popup, "SourceText");
+                    int wordStart = reading.Text.IndexOf("prowess", StringComparison.Ordinal);
+                    var head = reading.GetRectFromCharacterIndex(wordStart);
+                    var tail = reading.GetRectFromCharacterIndex(wordStart + "prowess".Length - 1);
+                    var page = (FrameworkElement)popup.Content;
+                    var band = new Rect(reading.TranslatePoint(new Point(head.Left - 3, head.Top - 2), page),
+                        reading.TranslatePoint(new Point(tail.Right + 3, tail.Bottom + 2), page));
+                    Check(CountYellowInRect(readingPath, band) > 100,
+                        "The default reading image paints the selected word as a yellow rounded band", checks);
+                    Check(CountInkInRect(readingPath, band) > 10,
+                        "The highlighted band keeps the word itself readable in the image", checks);
+                }
 
                 // Opening the follow-up is the production click the user makes.
                 ask.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
@@ -286,12 +325,14 @@ namespace Leaf
             shell.PopulateDemo();
             Layout(popup);
             Ui.Get<TextBox>(popup, "QuestionInput").Text = "离开前的追问草稿";
+            string badgeBefore = Ui.Get<TextBlock>(popup, "SourceBadge").Text;
             shell.ShowSettingsPage();
             Layout(popup);
             Check(shell.IsSettingsPageOpen &&
                 Ui.Get<Grid>(popup, "TranslatePage").Visibility == Visibility.Collapsed &&
                 Ui.Get<Grid>(popup, "SettingsPage").Visibility == Visibility.Visible &&
-                Ui.Get<TextBlock>(popup, "SourceBadge").Text.Length == 0,
+                Ui.Get<TextBlock>(popup, "SourceBadge").Text.Length > 0 &&
+                Ui.Get<TextBlock>(popup, "SourceBadge").Text == badgeBefore,
                 "The settings page opens inside the popup shell without rebuilding the reading page", checks);
             var panel = (FrameworkElement)Ui.Get<ContentControl>(popup, "SettingsPageHost").Content;
             var placeholder = Ui.Get<TextBlock>(panel, "PresetPlaceholder");
@@ -338,6 +379,69 @@ namespace Leaf
                 Ui.Get<TextBlock>(popup, "SourceBadge").Text == "演示内容 · 未调用 API",
                 "Leaving settings keeps the session: card, topic, draft and badge survive", checks);
 
+            // A preset list with an entry but no selection says so in the same row. The
+            // controller preselects the first preset itself, so the selection is cleared
+            // through the combo's own change event — the state the placeholder exists for —
+            // and the row must be visible in both sizes like the empty one above.
+            var onePreset = Json.Copy(shell.Store.Settings);
+            onePreset.Presets.Add(new LearningPreset {
+                Name = "游戏学习", TargetLanguage = "中文", Scene = "游戏", SceneDetail = "示例游戏",
+                GameTextType = "动作", Style = "简洁", Learning = new List<LearningOption>()
+            });
+            shell.Store.SaveSettings(onePreset);
+            shell.ShowSettingsPage();
+            Layout(popup);
+            var presetPanel = (FrameworkElement)Ui.Get<ContentControl>(popup, "SettingsPageHost").Content;
+            var presetCombo = Ui.Get<ComboBox>(presetPanel, "PresetCombo");
+            Check(shell.IsSettingsPageOpen && presetCombo.IsEnabled && presetCombo.Items.Count == 1 &&
+                presetCombo.SelectedItem is LearningPreset,
+                "Saved presets enable the dropdown and preselect the saved entry", checks);
+            presetCombo.SelectedIndex = -1;
+            Layout(popup);
+            var unselectedHint = Ui.Get<TextBlock>(presetPanel, "PresetPlaceholder");
+            Check(unselectedHint.Text == "未选择预设" && !Ui.Get<Button>(presetPanel, "LoadPreset").IsEnabled &&
+                !Ui.Get<Button>(presetPanel, "RemovePreset").IsEnabled,
+                "A preset list with entries but no selection says 未选择预设 and disables the actions", checks);
+            foreach (var size in new[] { new object[] { "default", 456.0, 620.0 }, new object[] { "compact", 360.0, 380.0 } }) {
+                string presetSize = (string)size[0];
+                popup.Width = (double)size[1]; popup.Height = (double)size[2]; shell.UpdatePopupTypography();
+                ExpandAncestors(unselectedHint);
+                Layout(popup);
+                unselectedHint.BringIntoView();
+                Layout(popup);
+                var hintPage = (FrameworkElement)popup.Content;
+                var hintOrigin = unselectedHint.TranslatePoint(new Point(0, 0), hintPage);
+                Check(unselectedHint.Visibility == Visibility.Visible && unselectedHint.ActualWidth > 0 && unselectedHint.ActualHeight > 0,
+                    "The " + presetSize + " unselected-preset placeholder has a laid out row", checks);
+                Check(hintOrigin.X >= 0 && hintOrigin.Y >= 0 &&
+                    hintOrigin.X + unselectedHint.ActualWidth <= hintPage.ActualWidth && hintOrigin.Y + unselectedHint.ActualHeight <= hintPage.ActualHeight,
+                    "The " + presetSize + " unselected-preset placeholder is scrolled inside the visible settings body", checks);
+                string hintPath = Capture(popup, folder, "settings-preset-unselected-" + presetSize, checks);
+                Check(CountInkInRect(hintPath, new Rect(hintOrigin, new Size(unselectedHint.ActualWidth, unselectedHint.ActualHeight))) > 0,
+                    "The " + presetSize + " unselected-preset image paints its placeholder text instead of a blank area", checks);
+            }
+            popup.Width = 456; popup.Height = 620; shell.UpdatePopupTypography();
+            left = await shell.TryLeaveSettingsPageAsync();
+            Layout(popup);
+            Check(left && !shell.IsSettingsPageOpen &&
+                Ui.Get<TextBlock>(popup, "SourceBadge").Text == "演示内容 · 未调用 API",
+                "Leaving the preset visit restores the same reading page and badge", checks);
+
+            // Paired markdown emphasis is presentation-only: document renders bold while the
+            // raw translation keeps its markers, so history and the copied text stay verbatim.
+            var markdownRecord = TranslationRecord.Create("The uploaded document is detailed.", "选中文字", shell.Store.Settings);
+            markdownRecord.Translation = "这份 **document** 值得细读。"; markdownRecord.Completed = true;
+            shell.OpenRecord(markdownRecord);
+            Layout(popup);
+            var paragraph = Ui.Get<RichTextBox>(popup, "TranslationText").Document.Blocks.OfType<System.Windows.Documents.Paragraph>().First();
+            var visible = new System.Windows.Documents.TextRange(paragraph.ContentStart, paragraph.ContentEnd).Text;
+            var bold = paragraph.Inlines.OfType<System.Windows.Documents.Bold>().FirstOrDefault();
+            Check(!visible.Contains("**") && bold != null &&
+                new System.Windows.Documents.TextRange(bold.ContentStart, bold.ContentEnd).Text == "document",
+                "Paired markdown emphasis renders document in bold without its markers", checks);
+            Check(visible.Contains("document") && markdownRecord.Translation.Contains("**document**"),
+                "The raw translation keeps its markdown markers so history and copy stay verbatim", checks);
+
             // A labeled internal-selection record, scrolled, with a draft: the session that
             // will be replaced and then restored by the back entry.
             var restored = TranslationRecord.Create("She kept her evening reading habit.", "选中文字", shell.Store.Settings);
@@ -348,7 +452,7 @@ namespace Leaf
             }
             shell.OpenRecord(restored);
             Layout(popup);
-            Check(Ui.Get<TextBlock>(popup, "SourceBadge").Text == "来自选中文本", "Internal selections are labeled as selected text", checks);
+            Check(Ui.Get<TextBlock>(popup, "SourceBadge").Text == "选中文本", "Internal selections are labeled as selected text", checks);
             var body = Ui.Get<ScrollViewer>(popup, "BodyScroll");
             body.ScrollToBottom(); Layout(popup);
             double savedOffset = body.VerticalOffset;
@@ -553,10 +657,13 @@ namespace Leaf
                 Ui.Render(shell.Popup, Path.Combine(folder, "popup-question.png"));
                 shell.Popup.Width = 360; shell.Popup.Height = 380; shell.UpdatePopupTypography();
                 var translation = Ui.Get<RichTextBox>(shell.Popup, "TranslationText");
-                Check(translation.FontSize < 17 && translation.FontSize >= 14, "Compact popup reduces translation typography within readable bounds", checks);
+                double compactScale = AppShell.TypographyScale(shell.Popup.Width, shell.Popup.Height);
+                Check(Math.Abs(translation.FontSize - Math.Max(14, 20 * compactScale)) < 0.01,
+                    "Compact popup scales the translation to its 84% floor and never below 14", checks);
                 Check(translation.IsReadOnly && shell.Popup.FindName("CopyButton") == null, "Translation supports selection with no redundant copy button", checks);
                 Check(shell.Popup.FindName("SettingsButton") != null, "Settings is available beside pin in the popup", checks);
-                Check(Ui.Get<TextBox>(shell.Popup, "SourceText").FontSize < 16, "Compact popup scales the reading source too", checks);
+                Check(Math.Abs(Ui.Get<TextBox>(shell.Popup, "SourceText").FontSize - 18 * compactScale) < 0.01,
+                    "Compact popup scales the reading source too", checks);
                 Check(Ui.Get<StackPanel>(shell.Popup, "LearningSections").Children.Cast<object>().All(x => {
                     var text = x as TextBlock;
                     if (text != null) return text.FontSize >= 11;
@@ -573,10 +680,11 @@ namespace Leaf
                     "Collapsing the follow-up restores the compact popup's follow-up entry", checks);
                 Ui.Render(shell.Popup, Path.Combine(folder, "popup-small.png"));
                 shell.Popup.Width = 700; shell.Popup.Height = 900; shell.UpdatePopupTypography();
-                Check(translation.FontSize == 17, "Large popup never excessively enlarges the text", checks);
+                Check(translation.FontSize == 20, "Large popup never excessively enlarges the text", checks);
                 Ui.Render(shell.Popup, Path.Combine(folder, "popup-large.png"));
                 shell.Popup.Width = 456; shell.Popup.Height = 620; shell.UpdatePopupTypography();
-                Check(translation.FontSize == 17, "Resizing back restores the original typography without cumulative scaling", checks);
+                Check(translation.FontSize == 20 && Ui.Get<TextBox>(shell.Popup, "SourceText").FontSize == 18,
+                    "Resizing back restores the 20 DIP translation and 18 DIP source without cumulative scaling", checks);
 
                 EditorState(shell, checks);
                 RenderStates(shell, transport, folder, checks);
