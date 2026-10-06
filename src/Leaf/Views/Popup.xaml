@@ -97,7 +97,10 @@
         </Grid>
         <Grid x:Name="TranslatePage" Grid.Row="1">
           <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-          <Border x:Name="SourcePanel" Padding="0,12,0,12">
+          <!-- The label and the original sit four dips lower than the translation and the
+               card rule below them without moving those: only this panel's own padding moves,
+               so its total height - and everything under it - stays exactly where it was. -->
+          <Border x:Name="SourcePanel" Padding="0,16,0,8">
             <StackPanel>
               <Grid Margin="0,0,0,7">
                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
@@ -180,7 +183,10 @@
                   <RichTextBox x:Name="WordCard" Style="{StaticResource ReadingText}" FontSize="16" AutomationProperties.Name="学习词卡">
                     <FlowDocument PagePadding="0" FontFamily="{StaticResource PaperFontFamily}" FontSize="16"/>
                   </RichTextBox>
-                  <Button x:Name="BackToSentence" Content="收起释义" Style="{StaticResource GhostButton}" HorizontalAlignment="Right" VerticalAlignment="Top"/>
+                  <!-- The collapse entry shares the entry's first line at one step up from the
+                       auxiliary 13 dip tier: the card's own first paragraph reserves the wider
+                       WordCardActionColumn for it, so the larger label still cannot cover text. -->
+                  <Button x:Name="BackToSentence" Content="收起释义" Style="{StaticResource GhostButton}" FontSize="14" HorizontalAlignment="Right" VerticalAlignment="Top"/>
                 </Grid>
               </Border>
               <Border x:Name="ChatPanel" Visibility="Collapsed" BorderBrush="{StaticResource Line}" BorderThickness="0,1,0,0" Padding="0,17,0,4" Margin="0,17,0,0">
@@ -188,10 +194,14 @@
               </Border>
             </StackPanel>
           </ScrollViewer>
-          <Grid Grid.Row="2" Margin="0,14,0,0">
-            <Button x:Name="AskButton" Style="{StaticResource GhostButton}" HorizontalAlignment="Left" FontSize="14" Foreground="{StaticResource Ink}" Padding="8,7" Margin="-8,0,0,0" ToolTip="追问这段原文或当前词" AutomationProperties.Name="追问">
+          <!-- The follow-up entry is the reading page's own footer: the learning body ends
+               further above it (the row's top margin) and it keeps more paper under itself
+               (the row's bottom margin) than it did. Both margins belong to this row alone, so
+               the settings page keeps its own spacing. -->
+          <Grid Grid.Row="2" Margin="0,24,0,8">
+            <Button x:Name="AskButton" Style="{StaticResource GhostButton}" HorizontalAlignment="Left" FontSize="16" Foreground="{StaticResource Ink}" Padding="8,7" Margin="-8,0,0,0" ToolTip="追问这段原文或当前词" AutomationProperties.Name="追问">
               <StackPanel Orientation="Horizontal">
-                <Viewbox Width="18" Height="18" Margin="0,0,7,0" VerticalAlignment="Center">
+                <Viewbox Width="20" Height="20" Margin="0,0,9,0" VerticalAlignment="Center">
                   <!-- A round follow-up bubble with its tail at the lower left, matching the
                        paper's rounded forms; the shared ChatOutline stays square-cornered. -->
                   <Path Data="M12,3.5 C16.7,3.5 20.5,7 20.5,11.5 C20.5,16 16.7,19.5 12,19.5 C10.6,19.5 9.3,19.2 8.1,18.6 L3.5,20.5 L5.4,16.2 C4.2,14.9 3.5,13.3 3.5,11.5 C3.5,7 7.3,3.5 12,3.5 Z"

@@ -58,10 +58,10 @@ namespace Leaf
         // selection, a chat message at the same scale - leaves that document alone.
         private double wordCardScale = double.NaN;
         // The column the floating collapse action occupies over the card's first line: the
-        // button's own width - a 13 dip label with an 8,6 padding on each side - with enough
+        // button's own width - a 14 dip label with an 8,6 padding on each side - with enough
         // clearance left that the entry can never run under it. Only the first paragraph
         // reserves it; the rest of the document keeps the full reading column.
-        private const double WordCardActionColumn = 80;
+        private const double WordCardActionColumn = 88;
 
         private sealed class PreviousSessionSnapshot
         {
@@ -468,11 +468,12 @@ namespace Leaf
                 if (meta.Length > 0)
                     document.Blocks.Add(CardParagraph(meta, 14, FontWeights.Normal, Ui.Brush("Muted"),
                         CardMargin(new Thickness(0, 0, 0, 0), ref columnTaken), 0));
-                // The heading is ordinary weight at body size now and separates itself by the
-                // dark ink, a 24 dip gap above it and an 8 dip one under it.
+                // The heading keeps the body size and separates itself by the dark ink, the
+                // real bold face that ships in the executable, a 24 dip gap above it and an
+                // 8 dip one under it; the entry above stays ordinary weight.
                 foreach (var section in selectedCard.sections ?? new List<LearningSection>()) {
                     if (!string.IsNullOrWhiteSpace(section.title))
-                        document.Blocks.Add(CardParagraph(section.title, Math.Max(13, 16 * scale), FontWeights.Normal,
+                        document.Blocks.Add(CardParagraph(section.title, Math.Max(13, 16 * scale), FontWeights.Bold,
                             Ui.Brush("Ink"), CardMargin(new Thickness(0, 24, 0, 8), ref columnTaken), 0));
                     if (!string.IsNullOrWhiteSpace(section.content))
                         document.Blocks.Add(CardParagraph(section.content, Math.Max(12, 16 * scale), FontWeights.Normal,
@@ -596,7 +597,10 @@ namespace Leaf
             }
             double compact = (scale - 0.84) / 0.16;
             Ui.Get<Grid>(Popup, "PopupContent").Margin = new Thickness(18 + 8 * compact, 12, 18 + 8 * compact, 16 + 8 * compact);
-            Ui.Get<Border>(Popup, "SourcePanel").Padding = new Thickness(0, 8 + 4 * compact, 0, 6 + 6 * compact);
+            // The label and the original start four dips lower than they used to - the same
+            // four dips come off the panel's bottom - so the panel's own height, and with it
+            // the translation and the learning card under it, keep their exact position.
+            Ui.Get<Border>(Popup, "SourcePanel").Padding = new Thickness(0, 12 + 4 * compact, 0, 2 + 6 * compact);
             Ui.Get<ScrollViewer>(Popup, "BodyScroll").Margin = new Thickness(0, 20 + 4 * compact, 0, 0);
             var input = Ui.Get<TextBox>(Popup, "QuestionInput"); input.FontSize = Math.Max(12, 14 * scale); input.Height = 66 * scale;
         }
