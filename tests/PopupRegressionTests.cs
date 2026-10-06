@@ -46,7 +46,12 @@ internal static class PopupRegressionTests
         await RecoveryBarrierBlocksFollowupRetry(Path.Combine(folder, "barrier-retry"));
         await FollowupRetryWorksAfterRecovery(Path.Combine(folder, "barrier-cleared"));
         await SettingsPageRoundTrip(Path.Combine(folder, "settings-page"));
+        await ConcurrentSettingsLeave(Path.Combine(folder, "settings-leave"));
+        await FailedSettingsLeaveKeepsPage(Path.Combine(folder, "settings-leave-failed"));
+        await ExplicitApplyIsFlushed(Path.Combine(folder, "settings-apply-flush"));
+        await ExplicitApplySurvivesPageLeave(Path.Combine(folder, "settings-apply-leave"));
         await InternalSelectionReturn(Path.Combine(folder, "internal-return"));
+        await ReturnAfterClearDoesNotResurrect(Path.Combine(folder, "return-cleared"));
         await LearningContentSelectable(Path.Combine(folder, "selectable"));
         return assertions;
     }
@@ -394,6 +399,129 @@ internal static class PopupRegressionTests
         }
     }
 
+    // Two entry points (the back button and the window close) can ask to leave the same page
+    // while the first flush is still running; the second shares that attempt instead of
+    // flushing the same page twice or detaching whatever page is there when it resumes.
+    private static async Task ConcurrentSettingsLeave(string folder)
+    {
+        var handler = new FixtureHandler();
+        using (var shell = new AppShell(ConfiguredStore(folder), false, new LlmClient(handler))) {
+            await shell.TranslateAsync("A shared settings leave sentence.", "选中文字", false);
+            var record = shell.Current;
+            shell.ShowSettingsPage();
+            var panel = SettingsPanel(shell);
+            Ui.Get<CheckBox>(panel, "ClipboardModeCheck").IsChecked = true;
+            var back = shell.TryLeaveSettingsPageAsync();
+            var close = shell.TryLeaveSettingsPageAsync();
+            Check(ReferenceEquals(back, close),
+                "A second leave entry reuses the attempt already running for this page");
+            Check(await back && await close,
+                "Both leave entries settle once instead of detaching the same page twice");
+            Check(!shell.IsSettingsPageOpen && ReferenceEquals(shell.Current, record) &&
+                Ui.Get<Grid>(shell.Popup, "TranslatePage").Visibility == Visibility.Visible,
+                "The shared leave returns to the live reading page");
+            Check(shell.Store.Settings.ClipboardMode,
+                "The pending preference edit is flushed by the shared leave");
+        }
+    }
+
+    // A flush that cannot apply keeps the page open with its reason, and the same entry can be
+    // retried once the field is fixed.
+    private static async Task FailedSettingsLeaveKeepsPage(string folder)
+    {
+        var handler = new FixtureHandler();
+        using (var shell = new AppShell(ConfiguredStore(folder), false, new LlmClient(handler))) {
+            await shell.TranslateAsync("A failed settings leave sentence.", "选中文字", false);
+            var record = shell.Current;
+            shell.ShowSettingsPage();
+            var panel = SettingsPanel(shell);
+            Ui.Get<TextBox>(panel, "TargetInput").Text = "   ";
+            Check(!await shell.TryLeaveSettingsPageAsync() && shell.IsSettingsPageOpen &&
+                Ui.Get<Grid>(shell.Popup, "SettingsPage").Visibility == Visibility.Visible,
+                "A failed flush keeps the settings page over the live session");
+            Check(Ui.Get<TextBlock>(panel, "SettingsStatus").Text.Contains("目标语言"),
+                "The failed flush keeps its reason visible instead of closing silently");
+            Check(ReferenceEquals(shell.Current, record),
+                "A failed flush does not touch the session behind the page");
+            Ui.Get<TextBox>(panel, "TargetInput").Text = "中文";
+            Check(await shell.TryLeaveSettingsPageAsync() && !shell.IsSettingsPageOpen,
+                "Retrying the leave after fixing the field returns to the reading page");
+        }
+    }
+
+    // Flushing settings must not report success while a clicked service apply is still
+    // committing: the exit path shares this flush and would otherwise leave early.
+    private static async Task ExplicitApplyIsFlushed(string folder)
+    {
+        var store = new LocalStore(folder, new DelayedWrites());
+        var seed = Json.Copy(store.Settings); seed.Provider.Model = "fixture-model"; store.SaveSettings(seed);
+        var credentials = new RecordingCredentials();
+        using (var shell = new AppShell(store, false, new LlmClient(new FixtureHandler()), credentials)) {
+            var settings = new SettingsWindow(shell);
+            var providers = Ui.Get<ComboBox>(settings.Panel, "ProviderCombo");
+            var deepseek = providers.Items.Cast<ProviderProfile>().First(p => p.Id == "deepseek");
+            providers.SelectedItem = deepseek;
+            Ui.Get<ComboBox>(settings.Panel, "ModelInput").Text = "flushed-model";
+            Ui.Get<PasswordBox>(settings.Panel, "ApiKeyInput").Password = "flushed-key";
+            Press(settings.Panel, "SaveSettingsButton");
+            await Task.Delay(60);
+            bool flushed = await settings.FlushPendingAsync();
+            Check(flushed && store.Settings.Provider.Model == "flushed-model",
+                "Flushing settings waits for the clicked apply instead of stopping after its first phase");
+            Check(credentials.Read(deepseek) == "flushed-key",
+                "The key captured by the clicked apply is saved before the flush reports success");
+        }
+    }
+
+    // Leaving the popup settings page while the clicked apply is still committing waits for it,
+    // so the key it captured is not dropped by the page detach.
+    private static async Task ExplicitApplySurvivesPageLeave(string folder)
+    {
+        var store = new LocalStore(folder, new DelayedWrites());
+        var seed = Json.Copy(store.Settings); seed.Provider.Model = "fixture-model"; store.SaveSettings(seed);
+        var credentials = new RecordingCredentials();
+        var shell = new AppShell(store, false, new LlmClient(new FixtureHandler()), credentials);
+        await shell.TranslateAsync("An applied settings sentence.", "选中文字", false);
+        shell.ShowSettingsPage();
+        var panel = SettingsPanel(shell);
+        var providers = Ui.Get<ComboBox>(panel, "ProviderCombo");
+        var deepseek = providers.Items.Cast<ProviderProfile>().First(p => p.Id == "deepseek");
+        providers.SelectedItem = deepseek;
+        Ui.Get<ComboBox>(panel, "ModelInput").Text = "page-model";
+        Ui.Get<PasswordBox>(panel, "ApiKeyInput").Password = "page-key";
+        Press(panel, "SaveSettingsButton");
+        await Task.Delay(60);
+        Check(await shell.TryLeaveSettingsPageAsync() && !shell.IsSettingsPageOpen,
+            "Leaving the page waits for the service apply it started");
+        Check(credentials.Read(deepseek) == "page-key" && store.Settings.Provider.Model == "page-model",
+            "The page leave keeps the key and model that the clicked apply captured");
+        // The disposing shell writes its fallback exit snapshot in the background, and this
+        // store's writes are slowed on purpose; wait for it so nothing outlives the scenario.
+        shell.Dispose();
+        try { await store.FlushAsync(); } catch { }
+    }
+
+    // Clearing history while a sub-session is on screen must not let the previous session come
+    // back: the restored session keeps the epoch it was captured under and its save is skipped.
+    private static async Task ReturnAfterClearDoesNotResurrect(string folder)
+    {
+        var handler = new FixtureHandler();
+        using (var shell = new AppShell(ConfiguredStore(folder), false, new LlmClient(handler))) {
+            await shell.TranslateAsync("A previous session sentence.", "选中文字", false);
+            var record = shell.Current;
+            await shell.TranslateInternalSelectionAsync("A sub-session sentence.");
+            Check(!ReferenceEquals(shell.Current, record), "The sub-session replaced the earlier conversation");
+            await shell.Store.ClearAsync();
+            shell.ReturnToPreviousSession();
+            Check(ReferenceEquals(shell.Current, record) && !shell.CanReturnToPreviousSession,
+                "The earlier conversation still returns from memory without another request");
+            await shell.SaveCurrentAsync();
+            await shell.Store.FlushAsync();
+            Check(shell.Store.History("").Count == 0,
+                "A session captured before the clear cannot be written back under the newer epoch");
+        }
+    }
+
     // Selecting text inside Leaf starts its own conversation, and the light back entry
     // returns to the previous one without any request.
     private static async Task InternalSelectionReturn(string folder)
@@ -689,6 +817,39 @@ internal static class PopupRegressionTests
         var store = new LocalStore(folder); var settings = Json.Copy(store.Settings);
         settings.Provider.Model = "fixture-model"; store.SaveSettings(settings);
         return store;
+    }
+    private static FrameworkElement SettingsPanel(AppShell shell)
+    {
+        return (FrameworkElement)Ui.Get<ContentControl>(shell.Popup, "SettingsPageHost").Content;
+    }
+    private static void Press(FrameworkElement scope, string name)
+    {
+        Ui.Get<Button>(scope, name).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+    }
+    // Writes pause, so a test can observe a settings commit while it is still in flight.
+    private sealed class DelayedWrites : IStoreFiles
+    {
+        private const int DelayMs = 300;
+        private readonly IStoreFiles inner = new PhysicalStoreFiles();
+        public bool Exists(string path) { return inner.Exists(path); }
+        public long Length(string path) { return inner.Length(path); }
+        public string Read(string path) { return inner.Read(path); }
+        public void Write(string path, string payload) { Thread.Sleep(DelayMs); inner.Write(path, payload); }
+        public void Copy(string source, string destination, bool overwrite) { inner.Copy(source, destination, overwrite); }
+        public void Move(string source, string destination) { inner.Move(source, destination); }
+        public void Replace(string source, string destination) { inner.Replace(source, destination); }
+        public void Delete(string path) { inner.Delete(path); }
+    }
+    private sealed class RecordingCredentials : ICredentialProfiles
+    {
+        private readonly Dictionary<string, string> keys = new Dictionary<string, string>();
+        public string Read(ProviderProfile profile)
+        {
+            string key; string id = Credentials.ScopedId(profile);
+            return keys.TryGetValue(id, out key) ? key : "";
+        }
+        public void Save(ProviderProfile profile, string key) { keys[Credentials.ScopedId(profile)] = key; }
+        public void Delete(ProviderProfile profile) { keys.Remove(Credentials.ScopedId(profile)); }
     }
     private static HttpResponseMessage StreamReply(string text)
     {
