@@ -6,6 +6,9 @@
   <SolidColorBrush x:Key="Soft" Color="#F1F2F4"/>
   <SolidColorBrush x:Key="Line" Color="#D9DCE1"/>
   <SolidColorBrush x:Key="WordHighlight" Color="#E9D7A0"/>
+  <Geometry x:Key="SubmitArrow">M4,12 L20,12 M13,5 L20,12 L13,19</Geometry>
+  <Geometry x:Key="ChatOutline">M4,4 L20,4 L20,16 L10,16 L5,20 L5,16 L4,16 Z</Geometry>
+  <Geometry x:Key="FoldChevron">M5,15 L12,8 L19,15</Geometry>
   <Style TargetType="Window">
     <Setter Property="FontFamily" Value="Segoe UI, Microsoft YaHei UI"/>
     <Setter Property="Foreground" Value="{StaticResource Ink}"/>
@@ -68,6 +71,32 @@
     <Setter Property="FontFamily" Value="Segoe MDL2 Assets"/>
     <Setter Property="FontSize" Value="14"/>
     <Setter Property="Padding" Value="0"/>
+  </Style>
+  <!-- Lightweight vector action: transparent until hover or keyboard focus. -->
+  <Style x:Key="PopupActionButton" TargetType="Button" BasedOn="{StaticResource GhostButton}">
+    <Setter Property="Width" Value="30"/><Setter Property="Height" Value="30"/>
+    <Setter Property="Padding" Value="0"/>
+    <Setter Property="Foreground" Value="{StaticResource Ink}"/>
+    <Setter Property="Background" Value="Transparent"/>
+    <Style.Triggers>
+      <Trigger Property="IsKeyboardFocused" Value="True"><Setter Property="Background" Value="{StaticResource Soft}"/></Trigger>
+      <Trigger Property="IsKeyboardFocusWithin" Value="True"><Setter Property="Background" Value="{StaticResource Soft}"/></Trigger>
+    </Style.Triggers>
+  </Style>
+  <!-- The popup's multi-line editor: no frame, no single-line centring, placeholder shares typography. -->
+  <Style x:Key="PopupEditor" TargetType="TextBox">
+    <Setter Property="Background" Value="Transparent"/>
+    <Setter Property="BorderThickness" Value="0"/>
+    <Setter Property="Padding" Value="0,3"/>
+    <Setter Property="VerticalContentAlignment" Value="Top"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="TextBox">
+          <ScrollViewer x:Name="PART_ContentHost" VerticalAlignment="Top" Background="Transparent"
+                        BorderThickness="0" Padding="0"/>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
   </Style>
   <Style TargetType="TextBox">
     <Setter Property="Background" Value="White"/>
@@ -182,6 +211,12 @@
     <Setter Property="Cursor" Value="Hand"/>
     <Style.Triggers>
       <Trigger Property="IsMouseOver" Value="True"><Setter Property="Background" Value="#F4EACD"/><Setter Property="Foreground" Value="{StaticResource Ink}"/></Trigger>
+      <!-- Keyboard focus is visible without moving focus when the popup opens. -->
+      <Trigger Property="IsKeyboardFocused" Value="True">
+        <Setter Property="Background" Value="{StaticResource Soft}"/>
+        <Setter Property="Foreground" Value="{StaticResource Ink}"/>
+        <Setter Property="TextDecorations" Value="Underline"/>
+      </Trigger>
     </Style.Triggers>
   </Style>
   <Style TargetType="Expander">

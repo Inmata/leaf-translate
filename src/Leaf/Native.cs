@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -59,6 +60,47 @@ namespace Leaf
             return new HotkeySpec { Modifiers = modifiers | 0x4000, VirtualKey = (uint)virtualKey };
         }
     }
+    // A restorable copy of whatever the clipboard held before this capture. A null backup
+    // means "unknown": the worker then leaves the clipboard exactly as its copy left it,
+    // because it cannot tell an empty clipboard from one it failed to read.
+    public sealed class ClipboardBackup
+    {
+        private readonly object data;
+        private ClipboardBackup(object data) { this.data = data; }
+        // An empty clipboard that was verified as empty. Nothing on the desktop path produces
+        // one: a data object the clipboard did not hand over is unknown instead.
+        public static ClipboardBackup Empty() { return new ClipboardBackup(null); }
+        public static ClipboardBackup Of(object data) { return new ClipboardBackup(data); }
+        public bool IsEmpty { get { return data == null; } }
+        public object Data { get { return data; } }
+    }
+
+    // The clipboard formats of one data object, as the backup needs them. A data object cannot
+    // be built off-desktop, so this is the one step a check scripts; the rule that decides
+    // whether a backup is complete stays in Native.Materialize.
+    public interface IClipboardFormatSource
+    {
+        string[] Formats { get; }
+        // False when this format could not be read at all.
+        bool TryRead(string format, out object value);
+    }
+
+    // The desktop operations the copy worker is allowed to perform, so its sequence,
+    // ownership, cancellation and restore rules can be checked with a scripted host.
+    public interface ICopyHost
+    {
+        IntPtr ForegroundWindow { get; }
+        uint ClipboardSequence { get; }
+        uint ClipboardOwnerProcess { get; }
+        int SendError { get; }
+        bool ModifiersHeld();
+        void Pause(int milliseconds);
+        bool SendCopy();
+        string ReadClipboardText();
+        ClipboardBackup Backup();
+        void Restore(ClipboardBackup backup);
+    }
+
     public static class Native
     {
         [StructLayout(LayoutKind.Sequential)] public struct Point { public int X; public int Y; }
@@ -83,6 +125,7 @@ namespace Leaf
         [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr window, out Rect rect);
         [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr window, IntPtr after, int x, int y, int width, int height, uint flags);
         [DllImport("user32.dll")] public static extern uint GetClipboardSequenceNumber();
+        [DllImport("user32.dll")] private static extern IntPtr GetClipboardOwner();
         [DllImport("user32.dll")] private static extern bool IsClipboardFormatAvailable(uint format);
         [DllImport("user32.dll")] private static extern short GetAsyncKeyState(int key);
         [DllImport("user32.dll", SetLastError = true)] private static extern uint SendInput(uint count, Input[] inputs, int size);
@@ -97,7 +140,6 @@ namespace Leaf
         [DllImport("user32.dll")] public static extern bool DestroyIcon(IntPtr icon);
         [DllImport("shcore.dll")] private static extern int GetDpiForMonitor(IntPtr monitor, int type, out uint x, out uint y);
         [DllImport("user32.dll")] private static extern IntPtr MonitorFromPoint(Point point, uint flags);
-        private static int automationRunning;
         private static int clipboardWriting;
         private static int captureRunning;
 
@@ -146,14 +188,14 @@ namespace Leaf
             if (!IsClipboardFormatAvailable(13) && !IsClipboardFormatAvailable(1)) return Task.FromResult("");
             return StaCapture(() => Forms.Clipboard.GetText(Forms.TextDataFormat.UnicodeText), false);
         }
-        private sealed class CaptureResult { public string Text; public Exception Error; }
+        private sealed class StaCaptureResult { public string Text; public Exception Error; }
         private static async Task<string> StaCapture(Func<string> action, bool selection)
         {
             if (Interlocked.CompareExchange(ref captureRunning, 1, 0) != 0)
                 throw new UserError("clipboard_busy", "取词尚未完成，可直接输入或稍后再试。");
-            var result = new TaskCompletionSource<CaptureResult>();
+            var result = new TaskCompletionSource<StaCaptureResult>();
             var worker = new Thread(() => {
-                var captured = new CaptureResult();
+                var captured = new StaCaptureResult();
                 try { captured.Text = action(); } catch (Exception error) { captured.Error = error; }
                 finally { Interlocked.Exchange(ref captureRunning, 0); result.TrySetResult(captured); }
             }) { IsBackground = true, Name = "Leaf capture" };
@@ -165,61 +207,375 @@ namespace Leaf
             return value.Text;
         }
 
-        public static async Task<string> SelectedTextAsync()
+        // One safe simulated copy against the window this invocation was started for.
+        // The worker owns the deadline source, so a worker that finishes after the
+        // caller gave up still sees a revoked token and never injects a late copy.
+        public static Task<SelectionCaptureResult> CopySelectionAsync(CaptureTarget target, CancellationToken cancellation)
         {
-            IntPtr foreground = GetForegroundWindow();
-            if (IsDesktop(foreground)) return "";
-            var automation = System.Threading.Interlocked.CompareExchange(ref automationRunning, 1, 0) == 0 ? Task.Run(() => {
-                try {
-                    var focused = AutomationElement.FocusedElement; object pattern;
-                    if (focused != null && focused.TryGetCurrentPattern(TextPattern.Pattern, out pattern)) {
-                        uint process; GetWindowThreadProcessId(foreground, out process);
-                        if (focused.Current.ProcessId != process) return null;
-                        return string.Join("", ((TextPattern)pattern).GetSelection().Select(range => range.GetText(6001)));
-                    }
-                } catch { }
-                finally { System.Threading.Interlocked.Exchange(ref automationRunning, 0); }
-                return null;
-            }) : Task.FromResult<string>(null);
-            if (await Task.WhenAny(automation, Task.Delay(180)) == automation) {
-                string selected = await automation;
-                if (selected != null && GetForegroundWindow() == foreground)
-                    return string.IsNullOrWhiteSpace(selected) ? "" : TextTools.ValidateInput(selected);
-            }
-            return await StaCapture(() => CopySelection(foreground), true);
+            return CopySelectionAsync(target, cancellation, new DesktopCopyHost());
         }
-        private static string CopySelection(IntPtr foreground)
+        // The same worker against a supplied host, so a scripted desktop can exercise the
+        // real sequence, ownership, cancellation and restore rules.
+        public static Task<SelectionCaptureResult> CopySelectionAsync(CaptureTarget target, CancellationToken cancellation, ICopyHost host)
         {
-            for (int i = 0; i < 30 && ModifiersHeld(); i++) Thread.Sleep(20);
-            if (ModifiersHeld() || GetForegroundWindow() != foreground)
-                throw new UserError("selection", "没有取得选中文字。请松开快捷键重试，或切到剪贴板模式。");
-            Forms.IDataObject previous;
-            try { previous = Forms.Clipboard.GetDataObject(); }
-            catch { throw new UserError("clipboard", "剪贴板暂时不可用。请稍候再试。"); }
-            uint before = GetClipboardSequenceNumber();
-            var inputs = new[] { KeyInput(17, false), KeyInput(67, false), KeyInput(67, true), KeyInput(17, true) };
-            if (SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(Input))) != inputs.Length)
-                throw new UserError("selection", "当前程序不允许读取选区。请复制文字后使用剪贴板模式。");
-            uint copied = before; string text = "";
+            if (host == null) throw new ArgumentNullException("host");
+            if (Stopped(cancellation))
+                return Task.FromResult(SelectionCaptureResult.NoText(CaptureStatus.Cancelled, CaptureReason.Cancelled));
+            if (Interlocked.CompareExchange(ref captureRunning, 1, 0) != 0)
+                return Task.FromResult(Step(CaptureStatus.Unavailable, CaptureReason.CaptureBusy, "copy_wait", CaptureReason.CaptureBusy));
+            var completion = new TaskCompletionSource<SelectionCaptureResult>();
+            var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
+            var worker = new Thread(() => {
+                var steps = new List<CaptureStep>();
+                SelectionCaptureResult outcome;
+                try { outcome = CopyOnSta(target, deadline, steps, host); }
+                catch (Exception error) { outcome = CopyFailure(error, steps); }
+                finally { Interlocked.Exchange(ref captureRunning, 0); }
+                completion.TrySetResult(outcome);
+                deadline.Dispose();
+            }) { IsBackground = true, Name = "Leaf capture" };
+            worker.SetApartmentState(ApartmentState.STA); worker.Start();
+            return AwaitCopyAsync(completion.Task, deadline);
+        }
+
+        private static async Task<SelectionCaptureResult> AwaitCopyAsync(Task<SelectionCaptureResult> worker, CancellationTokenSource deadline)
+        {
+            if (await Task.WhenAny(worker, Task.Delay(1600)) == worker) return await worker;
+            // Revoke the token first so the worker cannot inject anything it had not sent yet.
+            try { deadline.Cancel(); } catch (ObjectDisposedException) { }
+            return Step(CaptureStatus.Unavailable, CaptureReason.ClipboardBusy, "copy_wait", CaptureReason.ClipboardBusy);
+        }
+
+        // The copy worker's decisions, separated from the thread that hosts it so a scripted
+        // host can exercise them: no real clipboard, keyboard or foreground is involved.
+        public static SelectionCaptureResult CopyOnSta(CaptureTarget target, CancellationTokenSource deadline, List<CaptureStep> steps, ICopyHost host)
+        {
+            if (host == null) throw new ArgumentNullException("host");
+            var watch = Stopwatch.StartNew();
+            long mark = 0;
+            // Wait for the shortcut keys to come up, but never release the user's own keys.
+            bool released = WaitForModifiers(deadline.Token, 600, host);
+            steps.Add(new CaptureStep {
+                Stage = "copy_wait", Reason = released ? CaptureReason.None : CaptureReason.ModifiersHeld,
+                ModifiersReleased = released, ForegroundSame = host.ForegroundWindow == target.Window,
+                ElapsedMs = Next(watch, ref mark)
+            });
+            if (Stopped(deadline.Token)) return Stopped(steps);
+            if (!released) return Stepped(CaptureStatus.Unavailable, CaptureReason.ModifiersHeld, steps);
+            if (host.ForegroundWindow != target.Window) return Stepped(CaptureStatus.Unavailable, CaptureReason.ForegroundChanged, steps);
+
+            // The old clipboard is saved before it is overwritten. A clipboard that could not
+            // be read is unknown, never empty, so a failed save must not turn into a clear. It
+            // is read on both sides of the save: a clipboard the user changed while it was
+            // being read is one this capture does not replace, so the stale save is dropped
+            // instead of being put back over the newer content later.
+            uint backedUpAt = host.ClipboardSequence;
+            ClipboardBackup previous = null;
+            try { previous = host.Backup(); } catch { previous = null; }
+            if (previous != null && !WindowsSelectionProbe.CanKeepBackup(backedUpAt, host.ClipboardSequence)) previous = null;
+            if (Stopped(deadline.Token)) return Stopped(steps);
+            if (host.ForegroundWindow != target.Window) return Stepped(CaptureStatus.Unavailable, CaptureReason.ForegroundChanged, steps);
+
+            // The baseline of "a new copy" is taken as late as possible: anything the clipboard
+            // held before this instant is not the copy this invocation asked for. The same read
+            // decides whether the saved clipboard still describes the one about to be replaced.
+            uint before = host.ClipboardSequence;
+            if (previous != null && !WindowsSelectionProbe.CanKeepBackup(backedUpAt, before)) previous = null;
+            // The getters above can block on another application, so the token is read once more
+            // immediately before the injected copy and never after it.
+            if (Stopped(deadline.Token)) return Stopped(steps);
+
+            bool sent = host.SendCopy();
+            steps.Add(new CaptureStep {
+                Stage = "copy_send", Reason = sent ? CaptureReason.None : CaptureReason.InputDenied,
+                NativeError = sent ? 0 : host.SendError, ForegroundSame = host.ForegroundWindow == target.Window,
+                ElapsedMs = Next(watch, ref mark)
+            });
+            if (!sent) return Stepped(CaptureStatus.Failed, CaptureReason.InputDenied, steps);
+
+            // Only a new sequence owned by the captured process may be read as this copy, and
+            // the same constraints are checked again after the read: a slow clipboard read
+            // must not hand the worker text the user copied in the meantime.
+            uint captured = 0; string text = ""; Exception readError = null;
+            bool sequenceMoved = false, textRaced = false;
+            var copyWatch = Stopwatch.StartNew();
+            while (copyWatch.ElapsedMilliseconds < 400) {
+                host.Pause(20);
+                uint observed = host.ClipboardSequence;
+                if (observed == before) continue;
+                sequenceMoved = true;
+                bool foregroundSame = host.ForegroundWindow == target.Window;
+                if (!WindowsSelectionProbe.CanReadFreshCopy(before, observed, foregroundSame, Stopped(deadline.Token))) break;
+                if (!WindowsSelectionProbe.CanTrustOrigin(host.ClipboardOwnerProcess, target.ProcessId)) continue;
+                captured = observed;
+                try { text = host.ReadClipboardText(); readError = null; }
+                catch (Exception error) { text = ""; readError = error; }
+                // The owner is part of "this is my copy": content that changed hands while it
+                // was being read is not this selection, and it is not restored over either.
+                if (host.ClipboardSequence != captured ||
+                    !WindowsSelectionProbe.CanTrustOrigin(host.ClipboardOwnerProcess, target.ProcessId) ||
+                    host.ForegroundWindow != target.Window || Stopped(deadline.Token)) {
+                    // The clipboard moved on while reading: what came back is not this copy.
+                    text = ""; readError = null; textRaced = true; break;
+                }
+                if (readError == null && !string.IsNullOrWhiteSpace(text)) break;
+            }
+            bool readFailed = readError != null && string.IsNullOrWhiteSpace(text);
+            steps.Add(new CaptureStep {
+                Stage = "clipboard_read",
+                Reason = captured == 0
+                    ? (sequenceMoved ? CaptureReason.ClipboardOriginUnknown : CaptureReason.CopyNoUpdate)
+                    : textRaced ? CaptureReason.ClipboardOriginUnknown
+                    : readFailed ? CaptureReason.ClipboardBusy : CaptureReason.None,
+                HResult = readFailed ? readError.HResult : 0,
+                ClipboardChanged = captured != 0, ForegroundSame = host.ForegroundWindow == target.Window,
+                ElapsedMs = Next(watch, ref mark)
+            });
+
+            // A cancelled worker stops here: the clipboard is never written after its deadline.
+            if (Stopped(deadline.Token)) return Stopped(steps);
+            if (captured != 0) RestoreClipboard(target, host, previous, captured, deadline.Token, steps, watch, ref mark);
+            // A restore that was itself interrupted leaves this invocation cancelled, so the
+            // text it happened to read is not handed on as a completed capture.
+            if (Stopped(deadline.Token)) return Stopped(steps);
+
+            if (captured == 0)
+                return Stepped(CaptureStatus.Unavailable, sequenceMoved ? CaptureReason.ClipboardOriginUnknown : CaptureReason.CopyNoUpdate, steps);
+            if (textRaced) return Stepped(CaptureStatus.Unavailable, CaptureReason.ClipboardOriginUnknown, steps);
+            if (readFailed) return Stepped(CaptureStatus.Failed, CaptureReason.ClipboardBusy, steps);
+            if (string.IsNullOrWhiteSpace(text)) return Stepped(CaptureStatus.Unavailable, CaptureReason.CopyNoUpdate, steps);
+            return SelectionCaptureResult.Create(CaptureStatus.Text, CaptureReason.None,
+                text.Length > 6001 ? text.Substring(0, 6001) : text, steps);
+        }
+
+        // The saved clipboard goes back only while this capture is still the newest one, the
+        // origin is still the captured process and the foreground has not moved. Every outcome
+        // is recorded with its own metadata: a restore that did not happen is never reported
+        // as a successful one.
+        private static void RestoreClipboard(CaptureTarget target, ICopyHost host, ClipboardBackup previous,
+            uint captured, CancellationToken cancellation, List<CaptureStep> steps, Stopwatch watch, ref long mark)
+        {
+            if (previous == null) {
+                steps.Add(new CaptureStep { Stage = "clipboard_restore", Reason = CaptureReason.ClipboardOriginUnknown,
+                    ClipboardChanged = false, ForegroundSame = host.ForegroundWindow == target.Window, ElapsedMs = Next(watch, ref mark) });
+                return;
+            }
+            // A write of its own, so it is decided with the state the clipboard has now: text
+            // another process put there in the meantime must survive instead of being replaced
+            // by a backup that no longer describes this clipboard. The getters can block on
+            // another application, so the whole decision - including the token - is taken after
+            // them and immediately before the write.
+            bool foregroundSame = host.ForegroundWindow == target.Window;
+            bool originTrusted = WindowsSelectionProbe.CanTrustOrigin(host.ClipboardOwnerProcess, target.ProcessId);
+            uint current = host.ClipboardSequence;
+            bool cancelled = Stopped(cancellation);
+            if (cancelled) {
+                steps.Add(new CaptureStep { Stage = "clipboard_restore", Reason = CaptureReason.Cancelled,
+                    ClipboardChanged = false, ForegroundSame = foregroundSame, ElapsedMs = Next(watch, ref mark) });
+                return;
+            }
+            if (!WindowsSelectionProbe.CanRestoreCopy(captured, current, foregroundSame, originTrusted)) {
+                steps.Add(new CaptureStep { Stage = "clipboard_restore",
+                    Reason = !originTrusted ? CaptureReason.ClipboardOriginUnknown
+                        : foregroundSame ? CaptureReason.CopyNoUpdate : CaptureReason.ForegroundChanged,
+                    ClipboardChanged = false, ForegroundSame = foregroundSame, ElapsedMs = Next(watch, ref mark) });
+                return;
+            }
+            bool restored = false; int error = 0;
+            try { host.Restore(previous); restored = true; }
+            catch (Exception failure) { error = failure.HResult; }
+            steps.Add(new CaptureStep { Stage = "clipboard_restore",
+                Reason = restored ? CaptureReason.None : CaptureReason.ClipboardBusy,
+                ClipboardChanged = restored, HResult = error, ForegroundSame = foregroundSame,
+                ElapsedMs = Next(watch, ref mark) });
+        }
+
+        // Stage durations are differences of one stopwatch, so the log's total is their sum
+        // instead of a multiple of the real elapsed time.
+        private static long Next(Stopwatch watch, ref long mark)
+        {
+            long now = watch.ElapsedMilliseconds;
+            long elapsed = now - mark;
+            mark = now;
+            return elapsed;
+        }
+
+        private static bool WaitForModifiers(CancellationToken cancellation, int limitMs, ICopyHost host)
+        {
+            var watch = Stopwatch.StartNew();
+            while (host.ModifiersHeld()) {
+                if (Stopped(cancellation) || watch.ElapsedMilliseconds >= limitMs) return false;
+                host.Pause(20);
+            }
+            return true;
+        }
+        private static uint OwnerProcess()
+        {
+            IntPtr owner = GetClipboardOwner();
+            if (owner == IntPtr.Zero) return 0;
+            uint process; GetWindowThreadProcessId(owner, out process);
+            return process;
+        }
+        private static bool Stopped(CancellationToken token)
+        {
+            try { return token.IsCancellationRequested; } catch (ObjectDisposedException) { return true; }
+        }
+        private static SelectionCaptureResult Stopped(List<CaptureStep> steps)
+        {
+            return SelectionCaptureResult.Create(CaptureStatus.Cancelled, CaptureReason.Cancelled, "", steps);
+        }
+        private static SelectionCaptureResult Stepped(CaptureStatus status, CaptureReason reason, List<CaptureStep> steps)
+        {
+            return SelectionCaptureResult.Create(status, reason, "", steps);
+        }
+        private static SelectionCaptureResult Step(CaptureStatus status, CaptureReason reason, string stage, CaptureReason stepReason)
+        {
+            return SelectionCaptureResult.Create(status, reason, "", new List<CaptureStep> {
+                new CaptureStep { Stage = stage, Reason = stepReason }
+            });
+        }
+        private static SelectionCaptureResult CopyFailure(Exception error, List<CaptureStep> steps)
+        {
+            var user = error as UserError;
+            bool clipboard = user != null && (user.Code == "clipboard" || user.Code == "clipboard_busy");
+            steps.Add(new CaptureStep {
+                Stage = clipboard ? "clipboard_read" : "copy_send",
+                Reason = clipboard ? CaptureReason.ClipboardBusy : CaptureReason.SystemFailure,
+                HResult = error.HResult
+            });
+            return SelectionCaptureResult.Create(CaptureStatus.Failed,
+                clipboard ? CaptureReason.ClipboardBusy : CaptureReason.SystemFailure, "", steps);
+        }
+        private static bool ModifierKeysDown() { return new[] { 16, 17, 18, 91, 92 }.Any(key => (GetAsyncKeyState(key) & 0x8000) != 0); }
+
+        // The old clipboard is materialised while it can still be read: a delayed-rendering
+        // proxy belongs to the source application and could not be rendered after this copy
+        // replaced it. Anything short of every format read successfully stays unknown, because
+        // a partial copy must never be put back as if it were what the user had.
+        public static ClipboardBackup Materialize(IClipboardFormatSource source)
+        {
+            if (source == null) return null;
+            string[] formats = source.Formats;
+            if (formats == null || formats.Length == 0) return null;
+            var copy = new Forms.DataObject();
+            foreach (string format in formats) {
+                object value;
+                try { if (!source.TryRead(format, out value)) return null; }
+                catch { return null; }
+                // A format the clipboard lists but cannot hand over leaves a partial copy,
+                // which is unknown rather than something safe to put back later.
+                if (value == null) return null;
+                copy.SetData(format, value);
+            }
+            return copy.GetFormats(false).Length == 0 ? null : ClipboardBackup.Of(copy);
+        }
+
+        // The desktop read behind the host's Backup(): the data object the clipboard handed
+        // over. Split out so a check can drive the real adapter - including the object it was
+        // handed - with no real clipboard. A data object the clipboard did not hand over is
+        // unknown, exactly like a partial read: .NET answers null both for a clipboard that
+        // held nothing and for one it could not read, so Empty here would let a later restore
+        // Clear a clipboard that may well have held something.
+        public static ClipboardBackup BackupFrom(Forms.IDataObject data)
+        {
+            if (data == null) return null;
+            return Materialize(new ClipboardFormatSource(data));
+        }
+
+        // The real clipboard behind the materialisation: one data object, read once per format.
+        private sealed class ClipboardFormatSource : IClipboardFormatSource
+        {
+            private readonly Forms.IDataObject data;
+            public ClipboardFormatSource(Forms.IDataObject data) { this.data = data; }
+            public string[] Formats { get { return data.GetFormats(false); } }
+            public bool TryRead(string format, out object value)
+            {
+                try { value = data.GetData(format, false); return true; }
+                catch { value = null; return false; }
+            }
+        }
+
+        // Everything the copy worker does to the desktop. The worker's decisions are the
+        // part worth checking, so they run against this seam instead of the real clipboard.
+        private sealed class DesktopCopyHost : ICopyHost
+        {
+            private int sendError;
+            public IntPtr ForegroundWindow { get { return GetForegroundWindow(); } }
+            public uint ClipboardSequence { get { return GetClipboardSequenceNumber(); } }
+            public uint ClipboardOwnerProcess { get { return OwnerProcess(); } }
+            public int SendError { get { return sendError; } }
+            public bool ModifiersHeld() { return ModifierKeysDown(); }
+            public void Pause(int milliseconds) { Thread.Sleep(milliseconds); }
+            public bool SendCopy()
+            {
+                var inputs = new[] { KeyInput(17, false), KeyInput(67, false), KeyInput(67, true), KeyInput(17, true) };
+                uint sent = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(Input)));
+                sendError = sent == inputs.Length ? 0 : Marshal.GetLastWin32Error();
+                return sent == inputs.Length;
+            }
+            public string ReadClipboardText()
+            {
+                if (!IsClipboardFormatAvailable(13)) return "";
+                return Forms.Clipboard.GetText(Forms.TextDataFormat.UnicodeText);
+            }
+            // A delayed-rendering proxy belongs to the source application, so the formats are
+            // materialised now: after this copy the proxy could no longer be rendered. A
+            // clipboard that cannot be read completely stays "unknown" instead of empty.
+            public ClipboardBackup Backup()
+            {
+                return BackupFrom(Forms.Clipboard.GetDataObject());
+            }
+            public void Restore(ClipboardBackup backup)
+            {
+                if (backup == null) throw new ArgumentNullException("backup");
+                if (backup.IsEmpty) { Forms.Clipboard.Clear(); return; }
+                Forms.Clipboard.SetDataObject(backup.Data, true, 0, 0);
+            }
+        }
+
+        // Clipboard mode reads the clipboard only for the invocation that asked for it.
+        public static async Task<SelectionCaptureResult> ReadClipboardAsync(CaptureTarget target, CancellationToken cancellation)
+        {
+            if (Stopped(cancellation)) return SelectionCaptureResult.NoText(CaptureStatus.Cancelled, CaptureReason.Cancelled);
             try {
-                for (int i = 0; i < 20; i++) {
-                    Thread.Sleep(20);
-                    copied = GetClipboardSequenceNumber();
-                    if (copied == before) continue;
-                    if (GetForegroundWindow() != foreground) break;
-                    try { if (IsClipboardFormatAvailable(13)) text = Forms.Clipboard.GetText(Forms.TextDataFormat.UnicodeText); } catch { }
-                    if (!string.IsNullOrWhiteSpace(text)) break;
-                }
-            } finally {
-                // Never overwrite a newer copy performed by the user or a different foreground app.
-                if (copied != before && GetClipboardSequenceNumber() == copied && GetForegroundWindow() == foreground) {
-                    try { if (previous == null) Forms.Clipboard.Clear(); else Forms.Clipboard.SetDataObject(previous, true, 0, 0); } catch { }
-                }
+                string text = await ClipboardTextAsync();
+                if (string.IsNullOrWhiteSpace(text))
+                    return Step(CaptureStatus.Unavailable, CaptureReason.CopyNoUpdate, "clipboard_read", CaptureReason.CopyNoUpdate);
+                return SelectionCaptureResult.Create(CaptureStatus.Text, CaptureReason.None, text, new List<CaptureStep> {
+                    new CaptureStep { Stage = "clipboard_read", Reason = CaptureReason.None, ClipboardChanged = true }
+                });
+            } catch (OperationCanceledException) {
+                return SelectionCaptureResult.NoText(CaptureStatus.Cancelled, CaptureReason.Cancelled);
+            } catch (UserError error) {
+                var steps = new List<CaptureStep>();
+                return CopyFailure(error, steps);
+            } catch (Exception error) {
+                var steps = new List<CaptureStep>();
+                return CopyFailure(error, steps);
             }
-            if (string.IsNullOrWhiteSpace(text)) throw new UserError("selection", "未取得选中文字。当前软件可能不支持选区复制，请试试剪贴板模式。");
-            return TextTools.ValidateInput(text);
         }
-        private static bool ModifiersHeld() { return new[] { 16, 17, 18, 91, 92 }.Any(key => (GetAsyncKeyState(key) & 0x8000) != 0); }
+
+        // Compatibility wrapper: the shortcut path uses SelectionAcquirer, and this entry
+        // point keeps the same acquisition order - UIA first, one safe copy only when the
+        // automation answer is inconclusive - plus the same input limit, while still
+        // returning a string to callers that predate the typed result.
+        public static Task<string> SelectedTextAsync()
+        {
+            return SelectedTextAsync(new SelectionAcquirer(new WindowsSelectionProbe()));
+        }
+        public static async Task<string> SelectedTextAsync(SelectionAcquirer selection)
+        {
+            if (selection == null) throw new ArgumentNullException("selection");
+            var target = selection.Snapshot();
+            if (target.IsDesktop) return "";
+            var result = await selection.CaptureAsync(target, false, WrapperShortcut, CancellationToken.None);
+            if (result.Status == CaptureStatus.Text) return TextTools.ValidateInput(result.Text);
+            if (result.Status == CaptureStatus.Empty) return "";
+            throw new UserError("selection", "没有取得选中文字。请松开快捷键重试，或切到剪贴板模式。");
+        }
+        // The wrapper has no configured shortcut of its own; the acquirer only uses it to
+        // reject free text, and this path never writes diagnostics.
+        private const string WrapperShortcut = "Ctrl+Alt+T";
         private static Input KeyInput(ushort key, bool up)
         {
             return new Input { Type = 1, Data = new InputUnion { Keyboard = new KeyboardInput { Key = key, Flags = up ? 2u : 0u } } };

@@ -38,7 +38,9 @@ Source text is limited to 6000 UTF-16 code units per request. Split long passage
 
 ## Type and copy text
 
-When nothing is captured, the shortcut opens a source editor immediately. With existing text, use the pencil beside the source or enable direct input. Press `Enter` or Translate ↵ (翻译 ↵) to submit a new conversation; `Shift+Enter` inserts a new line. `Esc` exits editing and restores the original display.
+When nothing is captured, the shortcut opens a source editor immediately; an existing translation is left in place. With existing text, use the pencil beside the source or enable direct input. Press `Enter` or the arrow button at the right of the input to submit a new conversation; `Shift+Enter` inserts a new line. `Esc` exits editing and restores the original display.
+
+On the shortcut: a confirmed empty selection is not an error and only prepares manual input. When the selection could not be read, the source badge says no selection was captured and its tooltip gives the reason. Pressing the shortcut again on the same text returns to the existing translation, word card and follow-up draft without another request, including after clearing the editor without submitting. An edited but unsubmitted draft is kept rather than overwritten.
 
 Select translated text and press `Ctrl+C`, or use its copy context menu. `Ctrl+A` selects all. Clipboard contention produces a visible error without blocking the UI. There is no separate copy button. Ask is at the lower left; its input can be collapsed.
 
@@ -52,7 +54,9 @@ For phrases or scripts without spaces, select text inside the popup and use **Ex
 
 **Ask (追问)** reveals the question input. It does not pin the popup automatically. Questions concern either the current word or the passage; the topic is displayed above the input.
 
-Use `Enter` to send or `Shift+Enter` for a new line. A new source opens a new conversation. Completed conversations can be restored from history.
+Use `Enter` or the arrow button under the input to send, and `Shift+Enter` for a new line. A new source opens a new conversation. Completed conversations can be restored from history.
+
+**Stop (停止)** cancels whatever translation, word lookup or follow-up is running. The **Retry (重试)** entry that appears then repeats only what was stopped: a stopped word lookup looks up that same word again, and a stopped follow-up sends the original question again even if the input has been edited since. When a word lookup and a follow-up run together, both are restored. It never turns into re-translating the whole sentence, and the existing translation and conversation are kept.
 
 ## Set context and learning preferences
 

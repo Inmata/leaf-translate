@@ -20,6 +20,7 @@ namespace Leaf
         public DiagnosticLog Log { get; private set; }
         public Window Popup { get; private set; }
         public bool NativeEnabled { get; private set; }
+        public SelectionAcquirer Selection { get; set; }
         internal Func<ProviderProfile, string> CredentialReader;
         private readonly ICredentialProfiles credentialProfiles;
         private readonly bool migrateLegacyCredentials;
@@ -29,7 +30,7 @@ namespace Leaf
         public TranslationRecord Current { get; private set; }
         private readonly RequestGate generation = new RequestGate();
         private readonly RequestGate wordGeneration = new RequestGate();
-        private CancellationTokenSource mainCancellation, wordCancellation, chatCancellation;
+        private CancellationTokenSource mainCancellation, wordCancellation, chatCancellation, captureCancellation;
         private bool translating, wordBusy, chatBusy, captureBusy, pinned, exiting, demo, disposed, flushedForExit;
         public bool Pinned { get { return pinned; } }
         private IntPtr handle;
@@ -45,6 +46,7 @@ namespace Leaf
         private HistoryWindow historyWindow;
         private TextPiece selectedWord;
         private WordCard selectedCard;
+        private RetryOperation activeTranslation, activeWord, activeFollowup;
         private Action retry;
         private const int HotkeyId = 0x4C46;
 
@@ -56,6 +58,7 @@ namespace Leaf
             if (credentials != null) credentialProfiles = credentials;
             else if (native) { credentialProfiles = new WindowsCredentialProfiles(); migrateLegacyCredentials = true; }
             Log = client.Log ?? new DiagnosticLog(System.IO.Path.Combine(store.Folder, "logs")); Client.Log = Log;
+            Selection = new SelectionAcquirer(new WindowsSelectionProbe());
             Popup = Ui.Load("Popup"); InitializePopup();
         }
         public void Start(bool background, bool demonstration)
@@ -146,43 +149,85 @@ namespace Leaf
                 catch (UserError error) { Log.Event("shortcut_restore_failed", error); ShowError(error.Message, OpenSettings); }
             }
         }
-        private async void CaptureAndTranslate()
+        private async void CaptureAndTranslate() { await InvokeShortcutAsync(); }
+        // The shortcut is the only place a capture is started. Everything it needs is
+        // snapshotted first, and no setting is re-read after the acquisition returns.
+        public async Task InvokeShortcutAsync()
         {
-            if (exiting || captureBusy || shortcutRecording) return;
-            uint foregroundProcess; Native.GetWindowThreadProcessId(Native.GetForegroundWindow(), out foregroundProcess);
-            if (foregroundProcess == (uint)Process.GetCurrentProcess().Id) {
-                ShowPopup(); BeginSourceEdit(Store.Settings.FocusInputOnShortcut); return;
-            }
-            captureBusy = true;
+            if (captureBusy || shortcutRecording || exiting) return;
+            var target = Selection.Snapshot();
+            var invocation = Json.Copy(Store.Settings);
+            if (!invocation.ClipboardMode && target.IsLeaf) { HandleLeafSelectionShortcut(invocation.FocusInputOnShortcut); return; }
             long revision = sourceRevision;
-            string text = null, kind = Store.Settings.ClipboardMode ? "剪贴板" : "选中文字";
+            var owner = new CancellationTokenSource();
+            captureCancellation = owner; captureBusy = true;
+            string captureId = Guid.NewGuid().ToString("N");
+            SelectionCaptureResult result;
             try {
                 // Start acquisition with the original foreground intact, then show immediately.
-                var capture = Store.Settings.ClipboardMode ? Native.ClipboardTextAsync() : Native.SelectedTextAsync();
+                var capture = Selection.CaptureAsync(target, invocation.ClipboardMode, invocation.Shortcut, owner.Token);
                 ShowPopup();
-                text = await capture;
-            } catch (Exception error) {
-                Log.Event("capture_failed", error);
-                if (!(error is OperationCanceledException) && sourceRevision == revision) {
-                    CancelRequests(); Current = null; DisplayRecord();
-                    Ui.Get<TextBlock>(Popup, "SourceBadge").Text = Store.Settings.ClipboardMode ? "剪贴板模式" : "选中模式";
-                    if (!(error is UserError) || ((UserError)error).Code != "selection" && ((UserError)error).Code != "clipboard")
-                        ShowError(error is UserError ? error.Message : "没有取得文字，请重试。", CaptureAndTranslate);
-                    Ui.Get<TextBlock>(Popup, "SourceEditHint").Text = "未取得文字，可直接输入 · Enter 翻译";
-                    ShowPopup();
-                    BeginSourceEdit(Store.Settings.FocusInputOnShortcut);
-                }
-            } finally { captureBusy = false; }
-            if (sourceRevision != revision) return;
-            if (!string.IsNullOrWhiteSpace(text)) {
-                var translation = TranslateAsync(text, kind, false);
-                if (Store.Settings.FocusInputOnShortcut) BeginSourceEdit(true);
-                await translation;
-            } else if (text != null) {
-                CancelRequests(); Current = null; DisplayRecord();
-                Ui.Get<TextBlock>(Popup, "SourceBadge").Text = "输入翻译";
-                ShowPopup(); BeginSourceEdit(Store.Settings.FocusInputOnShortcut);
+                result = await capture;
+            } finally {
+                if (ReferenceEquals(captureCancellation, owner)) captureCancellation = null;
+                captureBusy = false; owner.Dispose();
             }
+            Log.Capture(CaptureTelemetry.For(captureId, target, invocation.ClipboardMode, invocation.Shortcut, result));
+            if (sourceRevision != revision || exiting || result.Status == CaptureStatus.Cancelled) return;
+            if (result.Status == CaptureStatus.Text) {
+                var translation = TranslateAsync(result.Text, invocation.ClipboardMode ? "剪贴板" : "选中文字", false);
+                if (invocation.FocusInputOnShortcut) BeginSourceEdit(true);
+                await translation;
+                return;
+            }
+            if (result.Status == CaptureStatus.Failed) {
+                PrepareManualInput(result.Reason, invocation.ClipboardMode, invocation.FocusInputOnShortcut);
+                ShowError(CaptureMessages.For(result.Reason), () => { var retried = InvokeShortcutAsync(); });
+                return;
+            }
+            // Empty and Unavailable both prepare input; neither is a confirmed failure.
+            PrepareManualInput(result.Reason, invocation.ClipboardMode, invocation.FocusInputOnShortcut);
+        }
+        // Leaf itself is in front, so there is no foreign selection to read. An editor the
+        // user has not committed to stays untouched; otherwise the current result comes back,
+        // and with no result at all the manual input is prepared so the shortcut still works.
+        private void HandleLeafSelectionShortcut(bool directInput)
+        {
+            if (Current == null) { PrepareManualInput(CaptureReason.None, false, directInput); return; }
+            if (HasPendingDraft()) { ShowPopup(); BeginSourceEdit(directInput); return; }
+            RestoreCurrentPresentation(directInput);
+        }
+        // A cleared editor is a draft action, not a new session; an unchanged prefill is not a draft.
+        private bool HasPendingDraft()
+        {
+            if (Current == null) return false;
+            var input = Ui.Get<TextBox>(Popup, "SourceInput");
+            if (Ui.Get<Grid>(Popup, "SourceEditor").Visibility != Visibility.Visible) return false;
+            if (input.Text.Length == 0) return false;
+            return input.Text != Current.Source;
+        }
+        // Keeps whatever the user already has: the conversation, its drafts and any
+        // uncommitted edit. Only the input surface is prepared, and the direct-input
+        // preference passed in is the one this invocation snapshotted.
+        private void PrepareManualInput(CaptureReason reason, bool clipboardMode, bool directInput)
+        {
+            bool inconclusive = reason != CaptureReason.Desktop && reason != CaptureReason.EmptySelection &&
+                reason != CaptureReason.None;
+            var badge = Ui.Get<TextBlock>(Popup, "SourceBadge");
+            string mode = clipboardMode ? "剪贴板模式" : "选中模式";
+            if (Current == null) badge.Text = inconclusive ? "未取得选区 · " + mode : mode;
+            badge.ToolTip = inconclusive ? CaptureMessages.Hint(reason) : null;
+            ShowPopup();
+            if (Ui.Get<Grid>(Popup, "SourceEditor").Visibility == Visibility.Visible &&
+                Ui.Get<TextBox>(Popup, "SourceInput").Text.Length > 0) { Busy(); return; }
+            BeginSourceEdit(directInput);
+        }
+        // Abandons an acquisition whose result the user has already made irrelevant.
+        private void CancelCapture()
+        {
+            var owner = captureCancellation;
+            if (owner == null) return;
+            try { owner.Cancel(); } catch (ObjectDisposedException) { }
         }
         public void ShowPopup()
         {
@@ -226,6 +271,7 @@ namespace Leaf
         }
         public void HidePopup()
         {
+            CancelCapture();
             sourceRevision++;
             RememberPlacement();
             if (Current != null) {
@@ -456,6 +502,27 @@ namespace Leaf
             if (chatCancellation != null) chatCancellation.Cancel();
             translating = wordBusy = chatBusy = false; Busy();
         }
+        // Records what was running before cancelling it, so the single retry entry can
+        // repeat those operations instead of starting a new translation.
+        public void StopForRetry()
+        {
+            var bundle = new RetryBundle(new[] { activeTranslation, activeWord, activeFollowup });
+            CancelRequests();
+            DrawChat();
+            if (selectedCard != null) DrawCard(selectedCard);
+            else if (selectedWord != null) {
+                selectedWord = null; HighlightSource(); Topic();
+                Ui.Visible(Ui.Get<Border>(Popup, "WordPanel"), false);
+            }
+            Busy();
+            if (bundle.Count == 0) { ShowError("已停止。", null); return; }
+            ShowError("已停止。尚未完成的结果不会保存。", () => { var ignored = RetryAsync(bundle); });
+        }
+        private async Task RetryAsync(RetryBundle bundle)
+        {
+            var record = Current;
+            await bundle.RunAsync(record == null ? "" : record.Id);
+        }
         private void Busy()
         {
             Ui.Visible(Ui.Get<Grid>(Popup, "BusyPanel"), translating || wordBusy || chatBusy);
@@ -520,6 +587,8 @@ namespace Leaf
             if (disposed) return;
             bool alreadyFlushed = flushedForExit;
             flushedForExit = false;
+            CancelCapture();
+            RememberPlacement();
             disposed = true;
             if (copyFeedback != null) copyFeedback.Stop();
             Log.Event("app_exit", null);

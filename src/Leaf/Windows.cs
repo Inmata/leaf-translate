@@ -38,11 +38,14 @@ namespace Leaf
         public static void Visible(UIElement control, bool visible) { control.Visibility = visible ? Visibility.Visible : Visibility.Collapsed; }
         public static Brush Brush(string resource) { return (Brush)Application.Current.Resources[resource]; }
         public static void Click(Window window, string name, Action action) { Get<Button>(window, name).Click += (s, e) => action(); }
-        public static void Render(Window window, string path)
+        public static void Render(Window window, string path) { Render(window, path, 96); }
+        // Layout stays in device-independent units; only the output pixels follow the DPI.
+        public static void Render(Window window, string path, double dpi)
         {
+            if (dpi <= 0 || double.IsNaN(dpi) || double.IsInfinity(dpi)) throw new ArgumentOutOfRangeException("dpi");
             var element = (FrameworkElement)window.Content;
             element.Measure(new Size(window.Width, window.Height)); element.Arrange(new Rect(0, 0, window.Width, window.Height)); element.UpdateLayout();
-            var image = new RenderTargetBitmap((int)window.Width, (int)window.Height, 96, 96, PixelFormats.Pbgra32);
+            var image = new RenderTargetBitmap((int)Math.Ceiling(window.Width * dpi / 96), (int)Math.Ceiling(window.Height * dpi / 96), dpi, dpi, PixelFormats.Pbgra32);
             var background = new DrawingVisual();
             using (var drawing = background.RenderOpen()) drawing.DrawRectangle(window.Background, null, new Rect(0, 0, window.Width, window.Height));
             image.Render(background);
