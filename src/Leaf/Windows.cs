@@ -139,7 +139,15 @@ namespace Leaf
         private string detailScene;
         private readonly DispatcherTimer preferenceDebounce = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(400) };
         private readonly DispatcherTimer modelApplyDebounce = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
-        private bool idleFlushArmed;
+        // A clicked "apply service configuration" is one attempt with two commits (preferences,
+        // then the provider and its key). Flushing and leaving wait for the whole attempt, so a
+        // detach cannot drop the key it captured between the phases.
+        private ApplyAttempt explicitApply;
+
+        private sealed class ApplyAttempt
+        {
+            public Task<bool> Completion;
+        }
 
         public SettingsController(AppShell owner, FrameworkElement panel, Func<bool> isHostVisible)
         {
@@ -194,7 +202,7 @@ namespace Leaf
             modelTextChanged = (s, e) => {
                 ThinkingFields();
                 ModelOwnerHint();
-                if (!loading && !fillingProvider) { modelApplyDebounce.Stop(); modelApplyDebounce.Start(); ArmIdleFlushWatch(); }
+                if (!loading && !fillingProvider) { modelApplyDebounce.Stop(); modelApplyDebounce.Start(); }
                 if (!fillingProvider && testCancellation != null) { testCancellation.Cancel(); Status("模型已变化，请重新测试连接。", false); }
             };
             modelTextProperty.AddValueChanged(Ui.Get<ComboBox>(scope, "ModelInput"), modelTextChanged);
@@ -319,7 +327,7 @@ namespace Leaf
             if (!loading) {
                 serviceRevision++;
                 Status("已切换服务。已配置的模型自动应用；新密钥和接口需应用服务配置。", false);
-                modelApplyDebounce.Stop(); modelApplyDebounce.Start(); ArmIdleFlushWatch();
+                modelApplyDebounce.Stop(); modelApplyDebounce.Start();
             }
         }
         private void CaptureProfile()
@@ -491,33 +499,21 @@ namespace Leaf
         {
             if (loading || closed || recordingShortcut || shell.IsExiting) return;
             Status("正在应用…", false); preferenceDebounce.Stop(); preferenceDebounce.Start();
-            ArmIdleFlushWatch();
-        }
-        // While a debounced patch is pending, keep a dispatcher-idle watcher armed: an
-        // exiting shell yields to the dispatcher between its own awaits, which is when
-        // this runs and flushes immediately instead of waiting out the debounce.
-        private void ArmIdleFlushWatch()
-        {
-            if (closed || idleFlushArmed) return;
-            if (!preferenceDebounce.IsEnabled && !modelApplyDebounce.IsEnabled) return;
-            idleFlushArmed = true;
-            Action recheck = null;
-            recheck = () => {
-                idleFlushArmed = false;
-                if (closed) return;
-                if (!preferenceDebounce.IsEnabled && !modelApplyDebounce.IsEnabled) return;
-                if (!shell.IsExiting) { ArmIdleFlushWatch(); return; }
-                var ignored = FlushPendingAsync();
-            };
-            scope.Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, recheck);
         }
         // Stops debounced patches and applies the latest draft; used by Closing and ExitAsync.
+        // A clicked service apply still committing is part of the flush: leaving must wait for
+        // it, and its failure fails the flush so the host stays open with the reported status.
         public async Task<bool> FlushPendingAsync()
         {
             if (closed) return true;
             bool ok = true;
             if (preferenceDebounce.IsEnabled) { preferenceDebounce.Stop(); if (!await ApplyPreferencesAsync()) ok = false; }
             if (modelApplyDebounce.IsEnabled) { modelApplyDebounce.Stop(); if (!await AutoApplyModelAsync()) ok = false; }
+            while (true) {
+                var attempt = explicitApply;
+                if (attempt == null) break;
+                if (!await attempt.Completion) ok = false;
+            }
             return ok;
         }
         private Task<bool> ApplyPreferencesAsync() { return ApplyPreferencesAsync(false); }
@@ -667,10 +663,24 @@ namespace Leaf
                 cancellation.Dispose();
             }
         }
-        private async void Save()
+        private void Save()
+        {
+            if (explicitApply != null) return;
+            var attempt = new ApplyAttempt();
+            explicitApply = attempt;
+            attempt.Completion = RunExplicitApplyAsync(attempt);
+        }
+        private async Task<bool> RunExplicitApplyAsync(ApplyAttempt attempt)
+        {
+            try { return await SaveCoreAsync(); }
+            finally { if (ReferenceEquals(explicitApply, attempt)) explicitApply = null; }
+        }
+        // Returns whether the clicked configuration was committed. A failure reports its own
+        // status and keeps the host open instead of leaving on a discarded draft.
+        private async Task<bool> SaveCoreAsync()
         {
             var button = Ui.Get<Button>(scope, "SaveSettingsButton");
-            if (!button.IsEnabled) return;
+            if (!button.IsEnabled) return true;
             button.IsEnabled = false;
             try {
                 EndShortcutRecording(false); InvalidateRequests();
@@ -689,7 +699,7 @@ namespace Leaf
                 var previous = original.Providers.FirstOrDefault(p => p.Id == profileId);
                 if (previous != null && previous.BaseUrl.TrimEnd('/') != profile.BaseUrl.TrimEnd('/') && !pendingKeys.ContainsKey(profileId))
                     throw new UserError("key", "修改接口地址后，请为该服务重新填写密钥。");
-                if (!await ApplyPreferencesAsync(true)) return;
+                if (!await ApplyPreferencesAsync(true)) return false;
                 var keys = new Dictionary<string, string>(); string pending;
                 if (pendingKeys.TryGetValue(profileId, out pending)) keys[profileId] = pending;
                 var deleted = new HashSet<string>(); if (deletedKeys.Contains(profileId)) deleted.Add(profileId);
@@ -705,7 +715,8 @@ namespace Leaf
                 } else {
                     KeyHint(); Status("已保存「" + profile.Name + "」的服务配置；当前编辑的改动仍待应用。", false);
                 }
-            } catch (Exception error) { shell.Log.Event("settings_save_failed", error); Status(error is UserError ? error.Message : "保存失败，请检查配置后重试。", true); }
+                return true;
+            } catch (Exception error) { shell.Log.Event("settings_save_failed", error); Status(error is UserError ? error.Message : "保存失败，请检查配置后重试。", true); return false; }
             finally { button.IsEnabled = true; }
         }
     }

@@ -8,11 +8,21 @@ namespace Leaf
     // Settings live on a page inside the popup shell. The reading page is only hidden,
     // never rebuilt, so the current session survives the round trip. A fresh panel and
     // controller are created per visit: leaving discards unapplied service drafts exactly
-    // like the old tray window's close did.
+    // like the old tray window's close did, after waiting for a clicked apply to commit.
     public sealed partial class AppShell
     {
         private FrameworkElement settingsPanel;
         private SettingsController settingsController;
+        // One page is left once. The back button, the window close and an exit entry can all
+        // ask while the first attempt is still flushing, so the running attempt is shared for
+        // the exact page instance it was started for.
+        private LeaveAttempt leaveAttempt;
+
+        private sealed class LeaveAttempt
+        {
+            public SettingsController Controller;
+            public Task<bool> Completion;
+        }
 
         public bool IsSettingsPageOpen
         {
@@ -41,19 +51,42 @@ namespace Leaf
             ShowPopup();
         }
 
-        // Flushes debounced preference edits and waits for the settings commit before the
-        // reading page returns; a failure keeps the settings page open with its status.
-        public async Task<bool> TryLeaveSettingsPageAsync()
+        // Flushes debounced preference edits, waits for a clicked service apply and for the
+        // settings commit before the reading page returns; a failure keeps the settings page
+        // open with its status, and the same entry can be retried.
+        public Task<bool> TryLeaveSettingsPageAsync()
         {
-            if (!IsSettingsPageOpen) return true;
-            settingsController.OnHostDeactivated();
-            if (!await settingsController.FlushPendingAsync()) return false;
+            if (!IsSettingsPageOpen) return Task.FromResult(true);
+            var controller = settingsController;
+            var running = leaveAttempt;
+            // Sharing the running attempt keeps a second entry from flushing the same page
+            // twice, and from detaching whatever page is there when its await resumes.
+            if (running != null && ReferenceEquals(running.Controller, controller)) return running.Completion;
+            var attempt = new LeaveAttempt { Controller = controller };
+            leaveAttempt = attempt;
+            attempt.Completion = LeaveSettingsPageAsync(attempt);
+            return attempt.Completion;
+        }
+
+        private async Task<bool> LeaveSettingsPageAsync(LeaveAttempt attempt)
+        {
+            try { return await LeavePageAsync(attempt.Controller); }
+            finally { if (ReferenceEquals(leaveAttempt, attempt)) leaveAttempt = null; }
+        }
+
+        private async Task<bool> LeavePageAsync(SettingsController controller)
+        {
+            controller.OnHostDeactivated();
+            if (!await controller.FlushPendingAsync()) return false;
             try { await WaitForSettingsAsync(); }
             catch (Exception error) {
                 Log.Event("settings_page_leave_flush_failed", error);
-                settingsController.ReportStatus(error is UserError ? error.Message : "保存未完成，请处理后重试。", true);
+                controller.ReportStatus(error is UserError ? error.Message : "保存未完成，请处理后重试。", true);
                 return false;
             }
+            // The page this attempt belongs to may already be gone; only the controller this
+            // attempt captured is left, and a page that replaced it stays open.
+            if (!ReferenceEquals(settingsController, controller)) return !IsSettingsPageOpen;
             LeaveSettingsPage();
             return true;
         }
