@@ -118,19 +118,34 @@ namespace Leaf
             };
             // A click without a selection explains the word under the pointer; a drag that
             // ends with a selection is the user's own selection and is never interpreted.
+            // The click is not swallowed: the up event is left unhandled so the box keeps
+            // its own mouse handling — capture release, caret placement, its own click
+            // interpretation — and the explanation is deferred until that handling has
+            // finished, reading the state it leaves behind instead of replacing it.
             int pointerDownOffset = -1;
             var sourceReading = Ui.Get<TextBox>(Popup, "SourceText");
             sourceReading.PreviewMouseLeftButtonDown += (s, e) => {
                 pointerDownOffset = sourceReading.GetCharacterIndexFromPoint(e.GetPosition(sourceReading), true);
             };
             sourceReading.PreviewMouseLeftButtonUp += (s, e) => {
+                // A double click is the box's own word selection, and a drag that already
+                // ended in a range is the user's own selection; neither is interpreted.
                 if (e.ClickCount != 1 || sourceReading.SelectionLength > 0) return;
                 int offset = sourceReading.GetCharacterIndexFromPoint(e.GetPosition(sourceReading), true);
                 if (offset < 0 || offset != pointerDownOffset) return;
                 var piece = WordHitAt(offset);
                 if (piece == null) return;
-                e.Handled = true;
-                var ignored = SelectWordAsync(piece, false);
+                // The click belongs to the record it was read from: a session replaced
+                // before the deferred step runs — a capture, a retry or a return — drops
+                // the stale explanation, and a range that grew after the up event is still
+                // the user's own selection. The exit, completion and in-flight-request
+                // boundaries stay SelectWordAsync's own.
+                var clicked = Current;
+                sourceReading.Dispatcher.BeginInvoke(new Action(() => {
+                    if (exiting || !ReferenceEquals(Current, clicked)) return;
+                    if (sourceReading.SelectionLength > 0) return;
+                    var ignored = SelectWordAsync(piece, false);
+                }));
             };
             // The highlight paints in one background layer under the reading box; the
             // layer defers its own geometry until the box has real layout, so a highlight
@@ -563,11 +578,11 @@ namespace Leaf
         public void UpdatePopupTypography()
         {
             double scale = TypographyScale(Popup.Width, Popup.Height);
-            // The ladder is fixed: an 18 dip original, a 19 dip translation and a 20 dip card
-            // entry at full size, then 16 dip section headings and reading body over a 14 dip
-            // auxiliary tier - the original and translation labels, the part of speech and the
-            // source badge - that never shrinks; only reading text follows the window's own
-            // 84% floor.
+            // The ladder is fixed: a 19 dip original, a 22 dip translation and a 22 dip bold
+            // card entry at full size, then 16 dip section headings and reading body over a
+            // 14 dip auxiliary tier - the original and translation labels, the part of speech
+            // and the source badge - that never shrinks; only reading text follows the
+            // window's own 84% floor.
             var source = Ui.Get<TextBox>(Popup, "SourceText");
             source.FontSize = Math.Max(13, 19 * scale);
             source.MaxHeight = 100 * scale;
@@ -597,10 +612,12 @@ namespace Leaf
             }
             double compact = (scale - 0.84) / 0.16;
             Ui.Get<Grid>(Popup, "PopupContent").Margin = new Thickness(22 + 8 * compact, 16, 22 + 8 * compact, 20 + 8 * compact);
-            // The label and the original start four dips lower than they used to - the same
-            // four dips come off the panel's bottom - so the panel's own height, and with it
-            // the translation and the learning card under it, keep their exact position.
-            Ui.Get<Border>(Popup, "SourcePanel").Padding = new Thickness(0, 20 + 4 * compact, 0, -6 + 6 * compact);
+            // The label and the original carry their own distance from the top through this
+            // panel's one top inset: 14 dips at the window's 84% floor, rising to 24 at full
+            // size - 14 + 10 per step, the same total a 20/24 top over a negative bottom used
+            // to sum to. The panel never carries a negative inset, so the height it sums to -
+            // and with it the translation and the learning card under it - stays where it was.
+            Ui.Get<Border>(Popup, "SourcePanel").Padding = new Thickness(0, 14 + 10 * compact, 0, 0);
             Ui.Get<ScrollViewer>(Popup, "BodyScroll").Margin = new Thickness(0, 10 + 4 * compact, 0, 0);
             var input = Ui.Get<TextBox>(Popup, "QuestionInput"); input.FontSize = Math.Max(12, 14 * scale); input.Height = 66 * scale;
         }

@@ -22,7 +22,10 @@
       </Setter>
     </Style>
     <!-- Paper top-bar icons drawn as strokes: settings is two slider rows — a knob opening
-         left on the upper row, right on the lower — beside the pushpin and the collapse bar. -->
+         left on the upper row, right on the lower — beside the pushpin and the collapse bar.
+         Every one of them is authored inside the same 24-unit square and centred on it, so
+         the three share one drawing scale: each glyph is drawn through a canvas of that same
+         square inside its own viewbox, and none of them is stretched to fill its box. -->
     <Geometry x:Key="SlidersIcon">M8,7.2 H20 M4,16.8 H14.8 M5.4,7.2 m-2.2,0 a2.2,2.2 0 1,0 4.4,0 a2.2,2.2 0 1,0 -4.4,0 M17.4,16.8 m-2.2,0 a2.2,2.2 0 1,0 4.4,0 a2.2,2.2 0 1,0 -4.4,0</Geometry>
     <!-- The pin reads as a pushpin: a wide rounded head that tapers inward to a narrow
          base, with the thin needle below. -->
@@ -75,22 +78,28 @@
           <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
             <Button x:Name="SettingsButton" Style="{StaticResource PaperTopButton}" ToolTip="设置" AutomationProperties.Name="设置">
               <Viewbox Width="18" Height="18">
-                <Path Data="{StaticResource SlidersIcon}" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}"
-                      StrokeThickness="1.5" StrokeStartLineCap="Round"
-                      StrokeEndLineCap="Round" StrokeLineJoin="Round"/>
+                <Canvas Width="24" Height="24">
+                  <Path Data="{StaticResource SlidersIcon}" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}"
+                        StrokeThickness="1.5" StrokeStartLineCap="Round"
+                        StrokeEndLineCap="Round" StrokeLineJoin="Round"/>
+                </Canvas>
               </Viewbox>
             </Button>
             <Button x:Name="PinButton" Style="{StaticResource PaperTopButton}" Margin="8,0,0,0" ToolTip="置顶并保持显示" AutomationProperties.Name="置顶或取消置顶">
               <Viewbox Width="15" Height="15">
-                <Path Data="{StaticResource PinIcon}" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}"
-                      StrokeThickness="1.5" StrokeStartLineCap="Round"
-                      StrokeEndLineCap="Round" StrokeLineJoin="Round"/>
+                <Canvas Width="24" Height="24">
+                  <Path Data="{StaticResource PinIcon}" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}"
+                        StrokeThickness="1.5" StrokeStartLineCap="Round"
+                        StrokeEndLineCap="Round" StrokeLineJoin="Round"/>
+                </Canvas>
               </Viewbox>
             </Button>
             <Button x:Name="HideButton" Style="{StaticResource PaperTopButton}" Margin="8,0,0,0" ToolTip="收起" AutomationProperties.Name="收起浮窗">
               <Viewbox Width="15" Height="15">
-                <Path Data="{StaticResource HideIcon}" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}"
-                      StrokeThickness="1.5" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+                <Canvas Width="24" Height="24">
+                  <Path Data="{StaticResource HideIcon}" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}"
+                        StrokeThickness="1.5" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+                </Canvas>
               </Viewbox>
             </Button>
           </StackPanel>
@@ -99,12 +108,16 @@
           <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
           <!-- The label and the original sit four dips lower than the translation and the
                card rule below them without moving those: only this panel's own padding moves,
-               so its total height - and everything under it - stays exactly where it was. -->
+               so its total height - and everything under it - stays exactly where it was. That
+               padding is read from the window's own scale (14 + 10 per step), and it is only
+               ever a top inset: a compact window trims the inset instead of turning the panel's
+               bottom padding negative, which is why the panel's height - and with it the
+               translation and the card under it - is the same as it was. -->
           <Border x:Name="SourcePanel" Padding="0,24,0,0">
             <StackPanel>
               <Grid Margin="0,0,0,12">
                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                  <TextBlock Text="原文" Foreground="{StaticResource Muted}" FontSize="14" VerticalAlignment="Center"/>
+                  <TextBlock Text="原文" Foreground="{StaticResource Muted}" FontSize="14" VerticalAlignment="Center" TextAlignment="Left"/>
                   <Button x:Name="BackToPreviousButton" Content="返回上一会话" Style="{StaticResource GhostButton}" FontSize="13" Padding="7,3" Margin="9,0,0,0" Visibility="Collapsed" ToolTip="回到上一次翻译的内容与词卡" AutomationProperties.Name="返回上一会话"/>
                 </StackPanel>
                 <Button x:Name="EditSourceButton" Content="&#xE70F;" Style="{StaticResource IconButton}" HorizontalAlignment="Right" Height="24" Width="24" ToolTip="编辑原文" AutomationProperties.Name="编辑原文" FontSize="18"/>
@@ -117,6 +130,7 @@
                 <TextBox x:Name="SourceText" Style="{StaticResource PaperReader}"
                          TextWrapping="Wrap" AcceptsReturn="True" MaxHeight="100" FontSize="18"
                          Foreground="{StaticResource Secondary}" VerticalScrollBarVisibility="Auto"
+                         TextAlignment="Left"
                          AutomationProperties.Name="原文"/>
               </Grid>
               <Grid x:Name="SourceEditor" Visibility="Collapsed">
@@ -148,7 +162,7 @@
           </Border>
           <ScrollViewer x:Name="BodyScroll" Style="{StaticResource SlimScrollViewer}" Grid.Row="1" VerticalScrollBarVisibility="Auto" Margin="0,14,0,0">
             <StackPanel>
-              <TextBlock x:Name="TranslationCaption" Text="译文" Style="{StaticResource Caption}" FontSize="14" Margin="0,0,0,15" />
+              <TextBlock x:Name="TranslationCaption" Text="译文" Style="{StaticResource Caption}" FontSize="14" Margin="0,0,0,15" TextAlignment="Left"/>
               <RichTextBox x:Name="TranslationText" Style="{StaticResource ReadingText}" FontSize="19" Margin="0,0,8,16">
                 <FlowDocument PagePadding="0" FontFamily="{StaticResource PaperFontFamily}" FontSize="19"/>
               </RichTextBox>
@@ -180,8 +194,8 @@
                   <!-- The entry, the meaning, the part of speech and lemma, and every section
                        heading and body are paragraphs of this one read-only flow: a drag that
                        starts on a heading runs straight on into the content it belongs to. -->
-                  <RichTextBox x:Name="WordCard" Style="{StaticResource ReadingText}" FontSize="16" AutomationProperties.Name="学习词卡">
-                    <FlowDocument PagePadding="0" FontFamily="{StaticResource PaperFontFamily}" FontSize="16"/>
+                  <RichTextBox x:Name="WordCard" Style="{StaticResource ReadingText}" FontSize="16" TextAlignment="Left" AutomationProperties.Name="学习词卡">
+                    <FlowDocument PagePadding="0" FontFamily="{StaticResource PaperFontFamily}" FontSize="16" TextAlignment="Left"/>
                   </RichTextBox>
                   <!-- The collapse entry shares the entry's first line at one step up from the
                        auxiliary 13 dip tier: the card's own first paragraph reserves the wider
@@ -202,13 +216,23 @@
           <Grid Grid.Row="2" Margin="0,36,0,16">
             <Button x:Name="AskButton" Style="{StaticResource GhostButton}" HorizontalAlignment="Left" FontSize="16" Foreground="{StaticResource Ink}" Padding="8,7" Margin="-8,0,0,0" ToolTip="追问这段原文或当前词" AutomationProperties.Name="追问">
               <StackPanel Orientation="Horizontal">
-                <Viewbox Width="20" Height="20" Margin="0,0,9,0" VerticalAlignment="Center">
+                <Viewbox Width="21" Height="21" Margin="0,0,10,0" VerticalAlignment="Center">
                   <!-- A round follow-up bubble with its tail at the lower left, matching the
-                       paper's rounded forms; the shared ChatOutline stays square-cornered. -->
-                  <Path Data="M12,3.5 C16.7,3.5 20.5,7 20.5,11.5 C20.5,16 16.7,19.5 12,19.5 C10.6,19.5 9.3,19.2 8.1,18.6 L3.5,20.5 L5.4,16.2 C4.2,14.9 3.5,13.3 3.5,11.5 C3.5,7 7.3,3.5 12,3.5 Z"
-                        Stroke="{StaticResource Secondary}"
-                        StrokeThickness="1.5" StrokeStartLineCap="Round"
-                        StrokeEndLineCap="Round" StrokeLineJoin="Round"/>
+                       paper's rounded forms; the shared ChatOutline stays square-cornered.
+                       The bubble is drawn on the same 24-unit square as the top-bar glyphs,
+                       and its own leftmost point sits at 3.5 of that square, so the path is
+                       pulled 3.5 units left inside the canvas: the drawn left edge then lands
+                       on the canvas edge, which is what lines the icon up with the body text
+                       under it. Only the path moves - the entry's own box, margin and the
+                       label beside it keep their place inside the button. -->
+                  <Canvas Width="24" Height="24">
+                    <Path Data="M12,3.5 C16.7,3.5 20.5,7 20.5,11.5 C20.5,16 16.7,19.5 12,19.5 C10.6,19.5 9.3,19.2 8.1,18.6 L3.5,20.5 L5.4,16.2 C4.2,14.9 3.5,13.3 3.5,11.5 C3.5,7 7.3,3.5 12,3.5 Z"
+                          Stroke="{StaticResource Secondary}"
+                          StrokeThickness="1.5" StrokeStartLineCap="Round"
+                          StrokeEndLineCap="Round" StrokeLineJoin="Round">
+                      <Path.RenderTransform><TranslateTransform X="-3.5"/></Path.RenderTransform>
+                    </Path>
+                  </Canvas>
                 </Viewbox>
                 <TextBlock Text="追问" FontWeight="Medium" VerticalAlignment="Center"/>
               </StackPanel>

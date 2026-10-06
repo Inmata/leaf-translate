@@ -339,9 +339,26 @@
     <Setter Property="IsUndoEnabled" Value="False"/>
     <Setter Property="BorderThickness" Value="0"/><Setter Property="Background" Value="Transparent"/>
     <Setter Property="Padding" Value="0"/><Setter Property="IsReadOnly" Value="True"/>
-    <Setter Property="IsDocumentEnabled" Value="True"/><Setter Property="VerticalScrollBarVisibility" Value="Disabled"/>
+    <Setter Property="IsDocumentEnabled" Value="True"/><Setter Property="TextAlignment" Value="Left"/>
+    <Setter Property="VerticalScrollBarVisibility" Value="Disabled"/>
     <Setter Property="HorizontalScrollBarVisibility" Value="Disabled"/><Setter Property="MinHeight" Value="0"/>
     <Setter Property="SelectionBrush" Value="#BACCDD"/>
+    <!-- The reading text hosts its own flow directly: the frame and the host padding the
+         stock template adds around the document are gone, so the first glyph starts at the
+         control's own left edge - the same edge the label above and the original beside it
+         start from. The document, its selectable read-only text and the wheel's own inner
+         scroller all stay: PART_ContentHost is still the ScrollViewer that hosts and scrolls
+         the flow, and it is still what a wheel notch over the text finds first. -->
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="RichTextBox">
+          <ScrollViewer x:Name="PART_ContentHost" VerticalAlignment="Top" Background="Transparent"
+                        BorderThickness="0" Padding="0" Focusable="False"
+                        VerticalScrollBarVisibility="{TemplateBinding VerticalScrollBarVisibility}"
+                        HorizontalScrollBarVisibility="{TemplateBinding HorizontalScrollBarVisibility}"/>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
   </Style>
   <Style TargetType="ListBoxItem">
     <Setter Property="Padding" Value="16,14"/>
