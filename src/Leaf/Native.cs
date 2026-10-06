@@ -285,7 +285,11 @@ namespace Leaf
                 captured = observed;
                 try { text = host.ReadClipboardText(); readError = null; }
                 catch (Exception error) { text = ""; readError = error; }
-                if (host.ClipboardSequence != captured || host.ForegroundWindow != target.Window || Stopped(deadline.Token)) {
+                // The owner is part of "this is my copy": content that changed hands while it
+                // was being read is not this selection, and it is not restored over either.
+                if (host.ClipboardSequence != captured ||
+                    !WindowsSelectionProbe.CanTrustOrigin(host.ClipboardOwnerProcess, target.ProcessId) ||
+                    host.ForegroundWindow != target.Window || Stopped(deadline.Token)) {
                     // The clipboard moved on while reading: what came back is not this copy.
                     text = ""; readError = null; textRaced = true; break;
                 }
@@ -315,21 +319,27 @@ namespace Leaf
                 text.Length > 6001 ? text.Substring(0, 6001) : text, steps);
         }
 
-        // The saved clipboard goes back only while this capture is still the newest one and
-        // the foreground has not moved. Every outcome is recorded with its own metadata: a
-        // restore that did not happen is never reported as a successful one.
+        // The saved clipboard goes back only while this capture is still the newest one, the
+        // origin is still the captured process and the foreground has not moved. Every outcome
+        // is recorded with its own metadata: a restore that did not happen is never reported
+        // as a successful one.
         private static void RestoreClipboard(CaptureTarget target, ICopyHost host, ClipboardBackup previous,
             uint captured, List<CaptureStep> steps, Stopwatch watch, ref long mark)
         {
-            bool foregroundSame = host.ForegroundWindow == target.Window;
             if (previous == null) {
                 steps.Add(new CaptureStep { Stage = "clipboard_restore", Reason = CaptureReason.ClipboardOriginUnknown,
-                    ClipboardChanged = false, ForegroundSame = foregroundSame, ElapsedMs = Next(watch, ref mark) });
+                    ClipboardChanged = false, ForegroundSame = host.ForegroundWindow == target.Window, ElapsedMs = Next(watch, ref mark) });
                 return;
             }
-            if (!WindowsSelectionProbe.CanRestoreCopy(captured, host.ClipboardSequence, foregroundSame)) {
+            // A write of its own, so it is decided with the state the clipboard has now: text
+            // another process put there in the meantime must survive instead of being replaced
+            // by a backup that no longer describes this clipboard.
+            bool foregroundSame = host.ForegroundWindow == target.Window;
+            bool originTrusted = WindowsSelectionProbe.CanTrustOrigin(host.ClipboardOwnerProcess, target.ProcessId);
+            if (!WindowsSelectionProbe.CanRestoreCopy(captured, host.ClipboardSequence, foregroundSame, originTrusted)) {
                 steps.Add(new CaptureStep { Stage = "clipboard_restore",
-                    Reason = foregroundSame ? CaptureReason.CopyNoUpdate : CaptureReason.ForegroundChanged,
+                    Reason = !originTrusted ? CaptureReason.ClipboardOriginUnknown
+                        : foregroundSame ? CaptureReason.CopyNoUpdate : CaptureReason.ForegroundChanged,
                     ClipboardChanged = false, ForegroundSame = foregroundSame, ElapsedMs = Next(watch, ref mark) });
                 return;
             }

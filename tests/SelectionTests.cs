@@ -286,10 +286,12 @@ internal static class SelectionTests
             "Cancellation prevents delayed capture side effects");
         Check(WindowsSelectionProbe.CanReadFreshCopy(10, 11, true, false),
             "A current copy can be read");
-        Check(!WindowsSelectionProbe.CanRestoreCopy(11, 12, true),
+        Check(!WindowsSelectionProbe.CanRestoreCopy(11, 12, true, true),
             "A newer user copy must survive restoration");
-        Check(WindowsSelectionProbe.CanRestoreCopy(11, 11, true) && !WindowsSelectionProbe.CanRestoreCopy(11, 11, false),
+        Check(WindowsSelectionProbe.CanRestoreCopy(11, 11, true, true) && !WindowsSelectionProbe.CanRestoreCopy(11, 11, false, true),
             "The saved clipboard is restored only while its sequence and foreground still match");
+        Check(!WindowsSelectionProbe.CanRestoreCopy(11, 11, true, false),
+            "The saved clipboard is never restored over a clipboard another process now owns");
         Check(!WindowsSelectionProbe.CanTrustOrigin(0, 456) && !WindowsSelectionProbe.CanTrustOrigin(789, 456) &&
             WindowsSelectionProbe.CanTrustOrigin(456, 456),
             "Clipboard content is used only when its owner is the captured process");
@@ -344,6 +346,31 @@ internal static class SelectionTests
                 "Text the user copied during the read is discarded instead of becoming the selection");
             Check(Step(outcome, "clipboard_restore") != null && !Step(outcome, "clipboard_restore").ClipboardChanged,
                 "A newer user copy is not overwritten by the restore");
+        }
+
+        // The owner is part of "this is my copy": a clipboard that changed owner while its
+        // text was being read is not this selection, and it is not restored over either.
+        var ownerMoved = new ScriptedCopyHost();
+        ownerMoved.OnRead = () => { ownerMoved.Owner = 789; };
+        using (var deadline = new CancellationTokenSource()) {
+            var outcome = Native.CopyOnSta(target, deadline, new List<CaptureStep>(), ownerMoved);
+            Check(outcome.Status == CaptureStatus.Unavailable && outcome.Reason == CaptureReason.ClipboardOriginUnknown &&
+                outcome.Text == "" && ownerMoved.RestoreCalls == 0,
+                "A clipboard that changed owner while it was read is an unknown origin, not this selection");
+        }
+
+        // The owner can also change after the text was read. The restore is a write of its own,
+        // so it is decided with the owner and sequence the clipboard has at that moment.
+        var ownerLost = new ScriptedCopyHost();
+        ownerLost.OnOwner = () => { if (ownerLost.OwnerReads == 3) ownerLost.Owner = 789; };
+        using (var deadline = new CancellationTokenSource()) {
+            var outcome = Native.CopyOnSta(target, deadline, new List<CaptureStep>(), ownerLost);
+            Check(outcome.Status == CaptureStatus.Text && outcome.Text == "copy fixture" &&
+                ownerLost.RestoreCalls == 0 && ownerLost.EmptyRestoreCalls == 0,
+                "A clipboard another process owns by the time of the restore is not overwritten");
+            Check(Step(outcome, "clipboard_restore") != null && !Step(outcome, "clipboard_restore").ClipboardChanged &&
+                Step(outcome, "clipboard_restore").Reason == CaptureReason.ClipboardOriginUnknown,
+                "A restore that was refused reports the unknown origin instead of a success");
         }
 
         // A definite clipboard read failure is typed, keeps its HResult and still restores.
@@ -566,12 +593,15 @@ internal sealed class ScriptedCopyHost : ICopyHost
     public int SequenceChangeAfterPauses = -1;
     public int PauseMs = 1;
     public Func<bool> Modifiers = () => false;
-    public Action OnRead, OnPause;
-    public int BackupCalls, RestoreCalls, EmptyRestoreCalls, SendCalls, ReadCalls, PauseCalls;
+    public Action OnRead, OnPause, OnOwner;
+    public int BackupCalls, RestoreCalls, EmptyRestoreCalls, SendCalls, ReadCalls, PauseCalls, OwnerReads;
 
     public IntPtr ForegroundWindow { get { return Foreground; } }
     public uint ClipboardSequence { get { return Sequence; } }
-    public uint ClipboardOwnerProcess { get { return Owner; } }
+    public uint ClipboardOwnerProcess
+    {
+        get { OwnerReads++; if (OnOwner != null) OnOwner(); return Owner; }
+    }
     public int SendError { get { return LastSendError; } }
     public bool ModifiersHeld() { return Modifiers(); }
     public void Pause(int milliseconds)

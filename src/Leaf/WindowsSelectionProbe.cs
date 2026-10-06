@@ -81,9 +81,9 @@ namespace Leaf
         {
             return !cancelled && foregroundSame && observed != before;
         }
-        public static bool CanRestoreCopy(uint captured, uint current, bool foregroundSame)
+        public static bool CanRestoreCopy(uint captured, uint current, bool foregroundSame, bool originTrusted)
         {
-            return foregroundSame && captured != 0 && captured == current;
+            return originTrusted && foregroundSame && captured != 0 && captured == current;
         }
         public static bool CanTrustOrigin(uint ownerProcess, uint expectedProcess)
         {
