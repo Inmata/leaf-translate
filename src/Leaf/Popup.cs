@@ -18,13 +18,34 @@ namespace Leaf
         private bool fillingSource;
         private long sourceRevision;
         private DispatcherTimer copyFeedback;
+        // The source paragraph currently built into the reading box; identical sources
+        // reuse it instead of rebuilding thousands of piece objects.
+        private string displayedSource;
+        private double bodyScrollBackup;
+        private PreviousSessionSnapshot previousSession;
+
+        private sealed class PreviousSessionSnapshot
+        {
+            public TranslationRecord Record;
+            public TextPiece Word;
+            public WordCard Card;
+            public bool SourceEditorOpen;
+            public string SourceDraft;
+            public bool InputPanelOpen;
+            public double SourceScroll;
+            public double BodyScrollOffset;
+            public bool ErrorVisible;
+            public string ErrorText;
+            public Action Retry;
+        }
+
         private void InitializePopup()
         {
-            Popup.Closing += (s, e) => { if (!exiting) { e.Cancel = true; HidePopup(); } };
+            Popup.Closing += (s, e) => { if (!exiting) { e.Cancel = true; var ignored = LeaveSettingsThenAsync(HidePopup); } };
             Popup.LocationChanged += (s, e) => QueuePlacementSave();
             Popup.SizeChanged += (s, e) => { UpdatePopupTypography(); QueuePlacementSave(); };
-            Ui.Click(Popup, "HideButton", HidePopup);
-            Ui.Click(Popup, "SettingsButton", OpenSettings);
+            Ui.Click(Popup, "HideButton", () => { var ignored = LeaveSettingsThenAsync(HidePopup); });
+            Ui.Click(Popup, "SettingsButton", ShowSettingsPage);
             Ui.Click(Popup, "EditSourceButton", () => BeginSourceEdit(true));
             Ui.Click(Popup, "TranslateButton", async () => await SubmitSourceAsync());
             var sourceInput = Ui.Get<TextBox>(Popup, "SourceInput");
@@ -61,7 +82,8 @@ namespace Leaf
             };
             Ui.Click(Popup, "CancelButton", StopForRetry);
             Ui.Click(Popup, "RetryButton", () => { var action = retry; ClearError(); if (action != null) action(); });
-            Ui.Click(Popup, "SetupButton", OpenSettings);
+            Ui.Click(Popup, "SetupButton", ShowSettingsPage);
+            Ui.Click(Popup, "BackToPreviousButton", ReturnToPreviousSession);
             Ui.Click(Popup, "AskButton", () => {
                 if (Current == null || !Current.Completed) return;
                 Ui.Visible(Ui.Get<System.Windows.Controls.Border>(Popup, "InputPanel"), true);
@@ -125,10 +147,14 @@ namespace Leaf
             Ui.Get<RichTextBox>(Popup, "TranslationText").ContextMenu = translationMenu;
             foreach (string name in new[] { "SourceText", "TranslationText" }) {
                 var reading = Ui.Get<RichTextBox>(Popup, name);
+                reading.Tag = "LeafSelectableText";
                 reading.CommandBindings.Add(new CommandBinding(ApplicationCommands.Copy,
                     async (s, e) => { e.Handled = true; await CopySelectionAsync(reading.Selection.Text); },
                     (s, e) => { e.CanExecute = !reading.Selection.IsEmpty; e.Handled = true; }));
             }
+            foreach (string name in new[] { "WordMeaning", "WordMeta" })
+                WireSelectableReading(Ui.Get<RichTextBox>(Popup, name));
+            InitializeSettingsPage();
             DisplayRecord();
             UpdatePopupTypography();
         }
@@ -151,6 +177,42 @@ namespace Leaf
                 }
                 copyFeedback.Stop(); copyFeedback.Start();
             } catch (Exception error) { Log.Event("copy_failed", error); ShowError(error is UserError ? error.Message : "复制失败，请稍后再试。", null); }
+        }
+        // A read-only learning control: selectable, copyable, and marked so the selection
+        // source can discover it. Inputs (password, settings, the follow-up editor) are
+        // never marked.
+        private void WireSelectableReading(RichTextBox box)
+        {
+            box.Tag = "LeafSelectableText";
+            box.CommandBindings.Add(new CommandBinding(ApplicationCommands.Copy,
+                async (s, e) => { e.Handled = true; await CopySelectionAsync(box.Selection.Text); },
+                (s, e) => { e.CanExecute = !box.Selection.IsEmpty; e.Handled = true; }));
+            var menu = new ContextMenu();
+            menu.Items.Add(new MenuItem { Header = "复制", Command = ApplicationCommands.Copy });
+            menu.Items.Add(new MenuItem { Header = "全选", Command = ApplicationCommands.SelectAll });
+            box.ContextMenu = menu;
+        }
+        private RichTextBox NewReadingBox()
+        {
+            var box = new RichTextBox { Style = (Style)Application.Current.Resources["ReadingText"], Foreground = Ui.Brush("Secondary") };
+            box.Document = new FlowDocument { PagePadding = new Thickness(0), FontFamily = new FontFamily("Segoe UI, Microsoft YaHei UI") };
+            WireSelectableReading(box);
+            return box;
+        }
+        // Plain text into a reading box: "\n" inside a Run paints a line break, so
+        // paragraphs, surrogate pairs and combining marks survive without markup.
+        private static void SetReadingText(RichTextBox box, string text)
+        {
+            box.Document.Blocks.Clear();
+            var paragraph = new Paragraph { Margin = new Thickness(0) };
+            paragraph.Inlines.Add(new Run(text ?? ""));
+            box.Document.Blocks.Add(paragraph);
+        }
+        private static void ApplyReadingTypography(RichTextBox box, double font, double line)
+        {
+            box.FontSize = box.Document.FontSize = font;
+            if (line <= 0) return;
+            foreach (var paragraph in box.Document.Blocks.OfType<Paragraph>()) paragraph.LineHeight = line;
         }
         public void BeginSourceEdit(bool focus)
         {
@@ -223,16 +285,25 @@ namespace Leaf
             foreach (var paragraph in translation.Document.Blocks.OfType<Paragraph>()) paragraph.LineHeight = 27 * scale;
             Ui.Get<TextBox>(Popup, "SourceInput").FontSize = Math.Max(14, 16 * scale);
             SetTypography("WordTitle", Math.Max(14, 18 * scale), 0);
-            SetTypography("WordMeaning", Math.Max(14, 16 * scale), 25 * scale);
-            SetTypography("WordMeta", 12, 0);
+            ApplyReadingTypography(Ui.Get<RichTextBox>(Popup, "WordMeaning"), Math.Max(14, 16 * scale), 25 * scale);
+            ApplyReadingTypography(Ui.Get<RichTextBox>(Popup, "WordMeta"), 12, 0);
             SetTypography("ErrorText", Math.Max(12, 13 * scale), 21 * scale);
+            // Label/content pairs alternate in these panels; content is a reading box.
             foreach (string name in new[] { "LearningSections", "ChatMessages" }) {
-                var children = Ui.Get<StackPanel>(Popup, name).Children.OfType<TextBlock>().ToArray();
-                for (int i = 0; i < children.Length; i++) {
+                var children = Ui.Get<StackPanel>(Popup, name).Children;
+                for (int i = 0; i < children.Count; i++) {
                     bool label = i % 2 == 0;
-                    children[i].FontSize = label ? 13 : Math.Max(13, 14 * scale);
-                    if (!label) children[i].LineHeight = 24 * scale;
-                    children[i].Margin = new Thickness(0, 0, 0, (label ? 7 : 20) * scale);
+                    var text = children[i] as TextBlock;
+                    if (text != null) {
+                        text.FontSize = label ? 13 : Math.Max(13, 14 * scale);
+                        if (!label) text.LineHeight = 24 * scale;
+                        text.Margin = new Thickness(0, 0, 0, (label ? 7 : 20) * scale);
+                        continue;
+                    }
+                    var reading = children[i] as RichTextBox;
+                    if (reading == null) continue;
+                    ApplyReadingTypography(reading, Math.Max(13, 14 * scale), 24 * scale);
+                    reading.Margin = new Thickness(0, 0, 0, 20 * scale);
                 }
             }
             double compact = (scale - 0.84) / 0.16;
@@ -246,12 +317,17 @@ namespace Leaf
             var text = Ui.Get<TextBlock>(Popup, name); text.FontSize = font;
             if (line > 0) text.LineHeight = line;
         }
+        private static string SourceKindLabel(string kind)
+        {
+            // Internal selections are Leaf's own text on screen; clipboard and typed input
+            // stay labeled as what they really are.
+            return kind == "选中文字" ? "选中文本" : kind;
+        }
 
         private void DisplayRecord()
         {
-            selectedWord = null; selectedCard = null; wordLinks.Clear(); ClearError();
+            selectedWord = null; selectedCard = null; ClearError();
             var source = Ui.Get<RichTextBox>(Popup, "SourceText");
-            source.Document.Blocks.Clear();
             Ui.Get<TextBlock>(Popup, "CopyStatus").Text = "";
             fillingSource = true; Ui.Get<TextBox>(Popup, "SourceInput").Text = Current == null ? "" : Current.Source; fillingSource = false;
             ShowSourceReadOnly();
@@ -259,27 +335,39 @@ namespace Leaf
             Ui.Visible(Ui.Get<Border>(Popup, "InputPanel"), false);
             Ui.Visible(Ui.Get<Button>(Popup, "ExpandWordButton"), Current != null && Current.Completed && TextTools.IsWordInput(Current.Source));
             if (Current == null) {
+                if (displayedSource != null) { source.Document.Blocks.Clear(); wordLinks.Clear(); displayedSource = null; }
                 DrawTranslation(""); BeginSourceEdit(false);
                 Ui.Get<TextBox>(Popup, "QuestionInput").Clear();
-                Ui.Visible(Ui.Get<Border>(Popup, "ChatPanel"), false); Busy(); return;
+                Ui.Visible(Ui.Get<Border>(Popup, "ChatPanel"), false); Busy(); UpdateBackEntry(); return;
             }
-            Ui.Get<TextBlock>(Popup, "SourceBadge").Text = demo ? "演示内容 · 未调用 API" : "来自" + Current.SourceKind;
-            var paragraph = new Paragraph { Margin = new Thickness(0), LineHeight = 25 };
-            foreach (var piece in TextTools.Pieces(Current.Source)) {
-                if (!piece.IsWord) { paragraph.Inlines.Add(new Run(piece.Text)); continue; }
-                var captured = piece;
-                // Reachable and activatable from the keyboard, so Tab + Enter explains a word.
-                var link = new Hyperlink(new Run(piece.Text)) {
-                    Focusable = true, ToolTip = "解释这个词", Style = (Style)Application.Current.Resources[typeof(Hyperlink)]
-                };
-                link.Click += async (s, e) => { e.Handled = true; await SelectWordAsync(captured, false); };
-                wordLinks[piece.Key] = link; paragraph.Inlines.Add(link);
+            Ui.Get<TextBlock>(Popup, "SourceBadge").Text = demo ? "演示内容 · 未调用 API" : "来自" + SourceKindLabel(Current.SourceKind);
+            if (displayedSource != Current.Source) {
+                // Building the per-word links dominates large-record display (measured at
+                // ~80 ms for a 6000-char record); an unchanged source reuses the built
+                // paragraph, links, selection and scroll position as they are.
+                source.Document.Blocks.Clear();
+                wordLinks.Clear();
+                var paragraph = new Paragraph { Margin = new Thickness(0), LineHeight = 25 };
+                foreach (var piece in TextTools.Pieces(Current.Source)) {
+                    if (!piece.IsWord) { paragraph.Inlines.Add(new Run(piece.Text)); continue; }
+                    var captured = piece;
+                    // Reachable and activatable from the keyboard, so Tab + Enter explains a word.
+                    var link = new Hyperlink(new Run(piece.Text)) {
+                        Focusable = true, ToolTip = "解释这个词", Style = (Style)Application.Current.Resources[typeof(Hyperlink)]
+                    };
+                    link.Click += async (s, e) => { e.Handled = true; await SelectWordAsync(captured, false); };
+                    wordLinks[piece.Key] = link; paragraph.Inlines.Add(link);
+                }
+                source.Document.Blocks.Add(paragraph);
+                displayedSource = Current.Source;
+            } else {
+                HighlightSource();
             }
-            source.Document.Blocks.Add(paragraph);
             UpdatePopupTypography();
             DrawTranslation("");
             Ui.Get<TextBox>(Popup, "QuestionInput").Text = Current.Draft ?? "";
             DrawChat(); Topic(); Busy(); Ui.Get<ScrollViewer>(Popup, "BodyScroll").ScrollToTop();
+            UpdateBackEntry();
         }
 
         private void HighlightSource()
@@ -331,7 +419,7 @@ namespace Leaf
         private bool BlockedByRecovery()
         {
             if (!Store.NeedsExplicitRecovery) return false;
-            ShowError("上次保存没有完成，请重新应用配置后重试。", OpenSettings);
+            ShowError("上次保存没有完成，请重新应用配置后重试。", ShowSettingsPage);
             ShowPopup();
             return true;
         }
@@ -410,8 +498,8 @@ namespace Leaf
             var provider = Json.Copy(Store.Settings.Provider);
             string cardKey = demo ? word.Key : CacheKeys.ForWord(record, word, provider);
             Ui.Get<TextBlock>(Popup, "WordTitle").Text = word.Text;
-            Ui.Get<TextBlock>(Popup, "WordMeaning").Text = "正在查词…";
-            Ui.Get<TextBlock>(Popup, "WordMeta").Text = "";
+            SetReadingText(Ui.Get<RichTextBox>(Popup, "WordMeaning"), "正在查词…");
+            SetReadingText(Ui.Get<RichTextBox>(Popup, "WordMeta"), "");
             Ui.Get<StackPanel>(Popup, "LearningSections").Children.Clear();
             Ui.Visible(Ui.Get<Border>(Popup, "WordPanel"), true);
             Ui.Visible(Ui.Get<Button>(Popup, "ExpandWordButton"), false);
@@ -439,7 +527,7 @@ namespace Leaf
             catch (Exception error) {
                 Log.Event("word_card_failed", error);
                 if (Current == record && wordGeneration.IsCurrent(version)) {
-                    wordBusy = false; Busy(); Ui.Get<TextBlock>(Popup, "WordMeaning").Text = "词卡暂未完成。";
+                    wordBusy = false; Busy(); SetReadingText(Ui.Get<RichTextBox>(Popup, "WordMeaning"), "词卡暂未完成。");
                     var bundle = new RetryBundle(new[] { operation });
                     ShowError(error is UserError ? error.Message : "查词没有完成，请重试。", () => { var ignored = RetryAsync(bundle); });
                 }
@@ -453,14 +541,16 @@ namespace Leaf
 
         private void DrawCard(WordCard card)
         {
-            Ui.Get<TextBlock>(Popup, "WordMeaning").Text = card.meaning;
-            Ui.Get<TextBlock>(Popup, "WordMeta").Text = string.Join(" · ", new[] {
+            SetReadingText(Ui.Get<RichTextBox>(Popup, "WordMeaning"), card.meaning);
+            SetReadingText(Ui.Get<RichTextBox>(Popup, "WordMeta"), string.Join(" · ", new[] {
                 card.part_of_speech, string.IsNullOrEmpty(card.lemma) ? "" : "原形 " + card.lemma
-            }.Where(x => !string.IsNullOrWhiteSpace(x)));
+            }.Where(x => !string.IsNullOrWhiteSpace(x))));
             var panel = Ui.Get<StackPanel>(Popup, "LearningSections"); panel.Children.Clear();
             foreach (var section in card.sections) {
                 panel.Children.Add(new TextBlock { Text = section.title, FontSize = 13, FontWeight = FontWeights.Medium, Foreground = Ui.Brush("Ink"), Margin = new Thickness(0, 0, 0, 7) });
-                panel.Children.Add(new TextBlock { Text = section.content, FontSize = 14, Foreground = Ui.Brush("Secondary"), LineHeight = 24, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 20) });
+                var content = NewReadingBox();
+                SetReadingText(content, section.content);
+                panel.Children.Add(content);
             }
             HighlightSource(); DrawTranslation(card.target_phrase); Topic();
             UpdatePopupTypography();
@@ -489,7 +579,7 @@ namespace Leaf
             var input = Ui.Get<TextBox>(Popup, "QuestionInput");
             string question = input.Text.Trim();
             if (question.Length == 0) return;
-            if (demo) { ShowError("这是演示内容。配置 API 后可进行真实追问。", OpenSettings); return; }
+            if (demo) { ShowError("这是演示内容。配置 API 后可进行真实追问。", ShowSettingsPage); return; }
             if (BlockedByRecovery()) return;
             string topic = selectedWord == null ? "原句" : selectedWord.Text;
             await SendChatForAsync(Current, topic, selectedCard, question);
@@ -568,6 +658,102 @@ namespace Leaf
                     new LearningSection { title = "语境", content = "combat prowess 指战斗本领；an edge 在这里是「优势」，不是物体的边缘。" }
                 }
             };
+        }
+
+        // ---- Previous-session return -------------------------------------------------
+
+        public bool CanReturnToPreviousSession
+        {
+            get { return previousSession != null && Current != null && !ReferenceEquals(Current, previousSession.Record); }
+        }
+        private void UpdateBackEntry() { Ui.Visible(Ui.Get<Button>(Popup, "BackToPreviousButton"), CanReturnToPreviousSession); }
+
+        // DSH bridge: translate a selection made inside Leaf itself. Validation and the
+        // recovery barrier run first; on failure the current session stays untouched.
+        public async Task TranslateInternalSelectionAsync(string text)
+        {
+            if (exiting) return;
+            try { text = TextTools.ValidateInput(text); }
+            catch (UserError error) { ShowError(error.Message, null); ShowPopup(); return; }
+            if (BlockedByRecovery()) return;
+            SavePreviousSessionSnapshot();
+            await TranslateAsync(text, "选中文字", true);
+        }
+        // One in-memory layer: the session being replaced is kept so the light back entry
+        // can restore it without another API call. Nothing is persisted.
+        private void SavePreviousSessionSnapshot()
+        {
+            if (Current == null) { previousSession = null; UpdateBackEntry(); return; }
+            var editor = Ui.Get<Grid>(Popup, "SourceEditor");
+            bool editorOpen = editor.Visibility == Visibility.Visible;
+            var sourceScroll = InnerScroll(Ui.Get<RichTextBox>(Popup, "SourceText"));
+            previousSession = new PreviousSessionSnapshot {
+                Record = Current,
+                Word = selectedWord,
+                Card = selectedCard,
+                SourceEditorOpen = editorOpen,
+                SourceDraft = editorOpen ? Ui.Get<TextBox>(Popup, "SourceInput").Text : null,
+                InputPanelOpen = Ui.Get<Border>(Popup, "InputPanel").Visibility == Visibility.Visible,
+                SourceScroll = sourceScroll != null ? sourceScroll.VerticalOffset : 0,
+                BodyScrollOffset = Ui.Get<ScrollViewer>(Popup, "BodyScroll").VerticalOffset,
+                ErrorVisible = Ui.Get<Border>(Popup, "ErrorPanel").Visibility == Visibility.Visible,
+                ErrorText = Ui.Get<TextBlock>(Popup, "ErrorText").Text,
+                Retry = retry
+            };
+            UpdateBackEntry();
+        }
+        // Restores the kept session without any request: completed or partial results come
+        // back as they were, and an unfinished one keeps its original retry entry.
+        public void ReturnToPreviousSession()
+        {
+            var snapshot = previousSession;
+            if (snapshot == null || exiting || ReferenceEquals(Current, snapshot.Record)) return;
+            CancelRequests();
+            Current = snapshot.Record;
+            currentHistoryEpoch = Store.HistoryEpoch;
+            DisplayRecord();
+            selectedWord = snapshot.Word; selectedCard = snapshot.Card;
+            if (selectedCard != null) { Ui.Visible(Ui.Get<Border>(Popup, "WordPanel"), true); DrawCard(selectedCard); }
+            else if (selectedWord != null) HighlightSource();
+            Topic(); Busy();
+            if (snapshot.ErrorVisible) ShowError(snapshot.ErrorText, snapshot.Retry);
+            if (snapshot.SourceEditorOpen) {
+                BeginSourceEdit(false);
+                var input = Ui.Get<TextBox>(Popup, "SourceInput");
+                fillingSource = true; input.Text = snapshot.SourceDraft ?? ""; fillingSource = false;
+                Ui.Visible(Ui.Get<TextBox>(Popup, "SourcePlaceholder"), input.Text.Length == 0);
+                Ui.Visible(Ui.Get<Button>(Popup, "TranslateButton"), !string.IsNullOrWhiteSpace(input.Text));
+            }
+            if (snapshot.InputPanelOpen) { Ui.Visible(Ui.Get<Border>(Popup, "InputPanel"), true); Topic(); Busy(); }
+            RestoreReadingScroll(snapshot.BodyScrollOffset, snapshot.SourceScroll);
+            ShowPopup();
+        }
+        private static ScrollViewer InnerScroll(DependencyObject node)
+        {
+            for (int depth = 0; node != null && depth < 8; depth++) {
+                var viewer = node as ScrollViewer;
+                if (viewer != null) return viewer;
+                int count = VisualTreeHelper.GetChildrenCount(node);
+                if (count == 0) return null;
+                node = VisualTreeHelper.GetChild(node, 0);
+            }
+            return null;
+        }
+        private void RestoreReadingScroll(double bodyOffset, double sourceOffset)
+        {
+            if (bodyOffset <= 0 && sourceOffset <= 0) return;
+            Popup.Dispatcher.BeginInvoke(new Action(() => {
+                var body = Ui.Get<ScrollViewer>(Popup, "BodyScroll");
+                body.UpdateLayout();
+                body.ScrollToVerticalOffset(Math.Min(bodyOffset, Math.Max(0, body.ScrollableHeight)));
+                if (sourceOffset > 0) {
+                    var sourceScroll = InnerScroll(Ui.Get<RichTextBox>(Popup, "SourceText"));
+                    if (sourceScroll != null) {
+                        sourceScroll.UpdateLayout();
+                        sourceScroll.ScrollToVerticalOffset(Math.Min(sourceOffset, Math.Max(0, sourceScroll.ScrollableHeight)));
+                    }
+                }
+            }), DispatcherPriority.Loaded);
         }
     }
 }

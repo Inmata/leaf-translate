@@ -45,6 +45,9 @@ internal static class PopupRegressionTests
         await FailedFollowupRetriesOriginalQuestion(Path.Combine(folder, "failed-followup"));
         await RecoveryBarrierBlocksFollowupRetry(Path.Combine(folder, "barrier-retry"));
         await FollowupRetryWorksAfterRecovery(Path.Combine(folder, "barrier-cleared"));
+        await SettingsPageRoundTrip(Path.Combine(folder, "settings-page"));
+        await InternalSelectionReturn(Path.Combine(folder, "internal-return"));
+        await LearningContentSelectable(Path.Combine(folder, "selectable"));
         return assertions;
     }
 
@@ -81,7 +84,7 @@ internal static class PopupRegressionTests
             await Until(() => record.Cards.Count > 0);
             Check(record.Cards.Count == 1 && record.Cards.Values.All(c => c.meaning == "新的词义"),
                 "Only the retried word lookup lands in the conversation");
-            Check(Ui.Get<TextBlock>(shell.Popup, "WordMeaning").Text == "新的词义",
+            Check(Reading(shell.Popup, "WordMeaning") == "新的词义",
                 "A retried word lookup settles on its card instead of staying busy");
 
             // A retry stops mattering once another conversation replaces the stopped one.
@@ -253,7 +256,7 @@ internal static class PopupRegressionTests
                 "Recovering the same text makes no API call");
             Check(Ui.Get<Border>(shell.Popup, "WordPanel").Visibility == Visibility.Visible &&
                 Ui.Get<TextBlock>(shell.Popup, "WordTitle").Text == word.Text &&
-                Ui.Get<TextBlock>(shell.Popup, "WordMeaning").Text == "夹具词义",
+                Reading(shell.Popup, "WordMeaning") == "夹具词义",
                 "Recovery keeps the word card instead of rebuilding the record");
             Check(WordLink(shell.Popup, word.Text) != null && WordLink(shell.Popup, word.Text).Background != null,
                 "Recovery keeps the highlight on the selected word");
@@ -348,6 +351,110 @@ internal static class PopupRegressionTests
         }
     }
 
+    // The settings page is a view over the live session: entering, leaving and re-entering
+    // keep the conversation, its word card and the follow-up draft untouched.
+    private static async Task SettingsPageRoundTrip(string folder)
+    {
+        var handler = new FixtureHandler();
+        using (var shell = new AppShell(ConfiguredStore(folder), false, new LlmClient(handler))) {
+            await shell.TranslateAsync("A settings round-trip sentence.", "选中文字", false);
+            var record = shell.Current;
+            var word = TextTools.Pieces(record.Source).First(p => p.IsWord);
+            await shell.SelectWordAsync(word, false);
+            Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text = "draft across settings";
+            shell.ShowSettingsPage();
+            Check(shell.IsSettingsPageOpen &&
+                Ui.Get<Grid>(shell.Popup, "TranslatePage").Visibility == Visibility.Collapsed &&
+                Ui.Get<Grid>(shell.Popup, "SettingsPage").Visibility == Visibility.Visible,
+                "Opening settings shows the settings page over the reading page");
+            Check(Ui.Get<TextBlock>(shell.Popup, "SourceBadge").Text.Length == 0,
+                "The reading badge does not show through the settings page");
+            shell.ShowSettingsPage();
+            Check(shell.IsSettingsPageOpen && ReferenceEquals(shell.Current, record),
+                "Opening settings twice keeps one page over the live session");
+            Check(await shell.TryLeaveSettingsPageAsync() && !shell.IsSettingsPageOpen &&
+                Ui.Get<Grid>(shell.Popup, "TranslatePage").Visibility == Visibility.Visible,
+                "Leaving settings returns to the reading page");
+            Check(Ui.Get<Border>(shell.Popup, "WordPanel").Visibility == Visibility.Visible &&
+                Ui.Get<TextBlock>(shell.Popup, "WordTitle").Text == word.Text &&
+                Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text == "draft across settings",
+                "The round trip keeps the word card, the conversation and the draft");
+            Check(Ui.Get<TextBlock>(shell.Popup, "SourceBadge").Text == "来自选中文本",
+                "The badge labels an internal selection as 选中文本 after leaving settings");
+
+            // An empty preset list has its own empty state instead of a blank dropdown.
+            shell.ShowSettingsPage();
+            var panel = (FrameworkElement)Ui.Get<ContentControl>(shell.Popup, "SettingsPageHost").Content;
+            var hint = Ui.Get<TextBlock>(panel, "PresetPlaceholder");
+            Check(hint.Visibility == Visibility.Visible && hint.Text == "暂无偏好预设" &&
+                !Ui.Get<ComboBox>(panel, "PresetCombo").IsEnabled,
+                "An empty preset list shows its empty hint and disables the dropdown");
+            Check(await shell.TryLeaveSettingsPageAsync() && !shell.IsSettingsPageOpen,
+                "Leaving the freshly built settings page also succeeds");
+        }
+    }
+
+    // Selecting text inside Leaf starts its own conversation, and the light back entry
+    // returns to the previous one without any request.
+    private static async Task InternalSelectionReturn(string folder)
+    {
+        var handler = new FixtureHandler();
+        using (var shell = new AppShell(ConfiguredStore(folder), false, new LlmClient(handler))) {
+            await shell.TranslateAsync("A return fixture sentence.", "选中文字", false);
+            var record = shell.Current;
+            var word = TextTools.Pieces(record.Source).First(p => p.IsWord);
+            await shell.SelectWordAsync(word, false);
+            Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text = "return draft";
+            await shell.TranslateInternalSelectionAsync("Words picked inside Leaf itself.");
+            Check(!ReferenceEquals(shell.Current, record) && shell.Current.Source == "Words picked inside Leaf itself.",
+                "An internal selection starts its own conversation");
+            Check(Ui.Get<TextBlock>(shell.Popup, "SourceBadge").Text == "来自选中文本",
+                "The badge labels an internal selection as 选中文本");
+            Check(shell.CanReturnToPreviousSession &&
+                Ui.Get<Button>(shell.Popup, "BackToPreviousButton").Visibility == Visibility.Visible,
+                "The replaced conversation offers its return entry");
+            shell.ReturnToPreviousSession();
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            Check(ReferenceEquals(shell.Current, record) && handler.Calls == 3,
+                "Returning to the previous session restores it without any API call");
+            Check(Ui.Get<Border>(shell.Popup, "WordPanel").Visibility == Visibility.Visible &&
+                Ui.Get<TextBlock>(shell.Popup, "WordTitle").Text == word.Text,
+                "The return restores the previous session's word card");
+            Check(Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text == "return draft",
+                "The return restores the previous session's follow-up draft");
+            Check(!shell.CanReturnToPreviousSession &&
+                Ui.Get<Button>(shell.Popup, "BackToPreviousButton").Visibility == Visibility.Collapsed,
+                "The return entry hides once the previous session is back");
+            await shell.TranslateInternalSelectionAsync("   ");
+            Check(Ui.Get<Border>(shell.Popup, "ErrorPanel").Visibility == Visibility.Visible &&
+                ReferenceEquals(shell.Current, record),
+                "A blank internal selection shows its validation error and keeps the session");
+        }
+    }
+
+    // Learning content is read-only selectable text, marked for the selection source.
+    private static async Task LearningContentSelectable(string folder)
+    {
+        var handler = new FixtureHandler();
+        using (var shell = new AppShell(ConfiguredStore(folder), false, new LlmClient(handler))) {
+            await shell.TranslateAsync("A selectable learning sentence.", "选中文字", false);
+            var record = shell.Current;
+            var word = TextTools.Pieces(record.Source).First(p => p.IsWord);
+            await shell.SelectWordAsync(word, false);
+            var meaning = Ui.Get<RichTextBox>(shell.Popup, "WordMeaning");
+            Check(Reading(shell.Popup, "WordMeaning") == "夹具词义",
+                "The word meaning renders in the selectable reading control");
+            Check(meaning.IsReadOnly && (string)meaning.Tag == "LeafSelectableText",
+                "The word meaning is read-only and marked for selection");
+            var sections = Ui.Get<StackPanel>(shell.Popup, "LearningSections").Children.OfType<RichTextBox>().ToList();
+            Check(sections.Count > 0 && sections.All(b => b.IsReadOnly && (string)b.Tag == "LeafSelectableText"),
+                "Every learning section is a read-only selectable reading control");
+            Check((string)Ui.Get<RichTextBox>(shell.Popup, "TranslationText").Tag == "LeafSelectableText" &&
+                (string)Ui.Get<RichTextBox>(shell.Popup, "SourceText").Tag == "LeafSelectableText",
+                "The translation and the original are marked for selection too");
+        }
+    }
+
     // Files are rolled back but an applied external effect could not be, which is exactly the
     // state that requires an explicit reapply before requests may run again.
     private static async Task ManufactureRecovery(LocalStore store)
@@ -359,6 +466,13 @@ internal static class PopupRegressionTests
                 (committed, candidate) => { throw new Exception("fixture external apply failure"); }, null);
         } catch (UserError) { failed = true; }
         Check(failed && store.NeedsExplicitRecovery, "The fixture leaves an explicit recovery barrier");
+    }
+
+    // Learning content and the translation render in read-only RichTextBoxes now.
+    private static string Reading(Window popup, string name)
+    {
+        var box = Ui.Get<RichTextBox>(popup, name);
+        return new TextRange(box.Document.ContentStart, box.Document.ContentEnd).Text.Trim();
     }
 
     private static System.Windows.Documents.Hyperlink WordLink(Window popup, string text)
