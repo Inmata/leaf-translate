@@ -57,6 +57,11 @@ namespace Leaf
         // resize really changes it and rebuilds the card; every other refresh - a scroll, a
         // selection, a chat message at the same scale - leaves that document alone.
         private double wordCardScale = double.NaN;
+        // The column the floating collapse action occupies over the card's first line: the
+        // button's own width - a 13 dip label with an 8,6 padding on each side - with enough
+        // clearance left that the entry can never run under it. Only the first paragraph
+        // reserves it; the rest of the document keeps the full reading column.
+        private const double WordCardActionColumn = 80;
 
         private sealed class PreviousSessionSnapshot
         {
@@ -428,7 +433,14 @@ namespace Leaf
         // out as paragraphs of one flow. A drag that starts on a heading therefore runs
         // straight on into the content under it, which separate controls could never do.
         // Only a card change, a loading or failed state, or a real typography change rebuilds
-        // it - never a selection, a scroll or a wheel notch.
+        // it - never a selection, a scroll or a wheel notch. The ladder it lays out is the
+        // fixed one UpdatePopupTypography documents: a 20 dip entry over a 16 dip meaning, a
+        // 14 dip part-of-speech line, and 16 dip headings over 16/26 reading text.
+        //
+        // Gaps are carried by one side of each pair - the lower block's bottom margin, or the
+        // section heading's top margin - so the same spacing comes out whether or not the flow
+        // collapses two adjacent paragraph margins. Every paragraph starts at the same left
+        // edge: the reading column is shared with the translation above it.
         private void DrawWordCard()
         {
             double scale = TypographyScale(Popup.Width, Popup.Height);
@@ -436,36 +448,48 @@ namespace Leaf
                 PagePadding = new Thickness(0), FontFamily = PaperFontFamily,
                 FontSize = Math.Max(13, 16 * scale)
             };
+            // The floating collapse button sits over the card's first line, so that one
+            // paragraph - whatever it turns out to be - keeps the button's column free.
+            bool columnTaken = false;
             // The entry is the word every other piece of card state already points at, so a
             // restored session cannot show one word's meaning under another word's heading.
             string entry = selectedWord == null ? null : selectedWord.Text;
             if (!string.IsNullOrEmpty(entry))
-                document.Blocks.Add(CardParagraph(entry, Math.Max(14, 18 * scale), FontWeights.SemiBold,
-                    Ui.Brush("Ink"), new Thickness(0, 0, 0, 10 * scale), 0));
+                document.Blocks.Add(CardParagraph(entry, Math.Max(14, 20 * scale), FontWeights.Normal,
+                    Ui.Brush("Ink"), CardMargin(new Thickness(0, 0, 0, 10 * scale), ref columnTaken), 0));
             string meaning = selectedCard != null ? selectedCard.meaning : wordCardNotice;
             if (!string.IsNullOrWhiteSpace(meaning))
                 document.Blocks.Add(CardParagraph(meaning, Math.Max(13, 16 * scale), FontWeights.Normal,
-                    Ui.Brush("Ink"), new Thickness(0, 0, 0, 4 * scale), 25 * scale));
+                    Ui.Brush("Ink"), CardMargin(new Thickness(0, 0, 0, 8), ref columnTaken), 26 * scale));
             if (selectedCard != null) {
                 string meta = string.Join(" · ", new[] {
                     selectedCard.part_of_speech, string.IsNullOrEmpty(selectedCard.lemma) ? "" : "原形 " + selectedCard.lemma
                 }.Where(x => !string.IsNullOrWhiteSpace(x)));
                 if (meta.Length > 0)
-                    document.Blocks.Add(CardParagraph(meta, 13, FontWeights.Normal, Ui.Brush("Muted"),
-                        new Thickness(0, 0, 0, 0), 0));
-                // A section keeps the old hierarchy - a 15 SemiBold heading over 16/25 reading
-                // text - with a little more air between one section and the next.
+                    document.Blocks.Add(CardParagraph(meta, 14, FontWeights.Normal, Ui.Brush("Muted"),
+                        CardMargin(new Thickness(0, 0, 0, 0), ref columnTaken), 0));
+                // The heading is ordinary weight at body size now and separates itself by the
+                // dark ink, a 24 dip gap above it and an 8 dip one under it.
                 foreach (var section in selectedCard.sections ?? new List<LearningSection>()) {
                     if (!string.IsNullOrWhiteSpace(section.title))
-                        document.Blocks.Add(CardParagraph(section.title, Math.Max(13, 15 * scale), FontWeights.SemiBold,
-                            Ui.Brush("Ink"), new Thickness(0, 20 * scale, 0, 9 * scale), 0));
+                        document.Blocks.Add(CardParagraph(section.title, Math.Max(13, 16 * scale), FontWeights.Normal,
+                            Ui.Brush("Ink"), CardMargin(new Thickness(0, 24, 0, 8), ref columnTaken), 0));
                     if (!string.IsNullOrWhiteSpace(section.content))
                         document.Blocks.Add(CardParagraph(section.content, Math.Max(12, 16 * scale), FontWeights.Normal,
-                            Ui.Brush("Secondary"), new Thickness(0, 0, 0, 6 * scale), 25 * scale));
+                            Ui.Brush("Secondary"), CardMargin(new Thickness(0, 0, 0, 0), ref columnTaken), 26 * scale));
                 }
             }
             Ui.Get<RichTextBox>(Popup, "WordCard").Document = document;
             wordCardScale = scale;
+        }
+        // The card's first paragraph yields its right edge to the floating collapse button and
+        // every later one takes the full column back.
+        private static Thickness CardMargin(Thickness margin, ref bool columnTaken)
+        {
+            Thickness result = columnTaken ? margin
+                : new Thickness(margin.Left, margin.Top, WordCardActionColumn, margin.Bottom);
+            columnTaken = true;
+            return result;
         }
         // Plain text into one card paragraph: "\n" inside a Run paints a line break, so
         // paragraphs, surrogate pairs and combining marks survive without markup.
@@ -538,20 +562,22 @@ namespace Leaf
         public void UpdatePopupTypography()
         {
             double scale = TypographyScale(Popup.Width, Popup.Height);
-            // The ladder is fixed: 16 reading, 17 translation, 18 titles, 15 section titles
-            // and a 13 auxiliary tier that never shrinks; only reading text follows the
-            // window's own 84% floor.
+            // The ladder is fixed: an 18 dip original, a 19 dip translation and a 20 dip card
+            // entry at full size, then 16 dip section headings and reading body over a 14 dip
+            // auxiliary tier - the original and translation labels, the part of speech and the
+            // source badge - that never shrinks; only reading text follows the window's own
+            // 84% floor.
             var source = Ui.Get<TextBox>(Popup, "SourceText");
-            source.FontSize = Math.Max(13, 16 * scale);
+            source.FontSize = Math.Max(13, 18 * scale);
             source.MaxHeight = 100 * scale;
             var translation = Ui.Get<RichTextBox>(Popup, "TranslationText");
-            translation.FontSize = translation.Document.FontSize = Math.Max(14, 17 * scale);
+            translation.FontSize = translation.Document.FontSize = Math.Max(14, 19 * scale);
             foreach (var paragraph in translation.Document.Blocks.OfType<Paragraph>()) paragraph.LineHeight = 27 * scale;
             var editor = Ui.Get<TextBox>(Popup, "SourceInput");
-            editor.FontSize = Math.Max(13, 16 * scale);
+            editor.FontSize = Math.Max(13, 18 * scale);
             SetTypography("ErrorText", 13, 21);
-            // The learning card's own ladder - an 18 entry, 16 reading, a 13 auxiliary line
-            // and 15 headings - lives in the one document it is built from, so a real scale
+            // The learning card's own ladder - a 20 entry, 16 headings and reading body, a
+            // 14 auxiliary line - lives in the one document it is built from, so a real scale
             // change rebuilds that document and patches no control paragraph by paragraph.
             // A hidden card is left alone; the next card change rebuilds it at the current
             // scale. A refresh at the scale the document already has - this method also runs

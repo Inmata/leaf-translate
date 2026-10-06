@@ -629,7 +629,7 @@ namespace Leaf
                 Ui.Render(shell.Popup, Path.Combine(folder, "popup-question.png"));
                 shell.Popup.Width = 360; shell.Popup.Height = 380; shell.UpdatePopupTypography();
                 var translation = Ui.Get<RichTextBox>(shell.Popup, "TranslationText");
-                Check(translation.FontSize >= 14 && translation.FontSize <= 17, "Compact popup keeps the translation within its readable bounds", checks);
+                Check(translation.FontSize >= 14 && translation.FontSize <= 19, "Compact popup keeps the translation within its readable bounds", checks);
                 Check(translation.IsReadOnly && shell.Popup.FindName("CopyButton") == null, "Translation supports selection with no redundant copy button", checks);
                 Check(shell.Popup.FindName("SettingsButton") != null, "Settings is available beside pin in the popup", checks);
                 Check(Ui.Get<TextBox>(shell.Popup, "SourceText").FontSize < 16, "Compact popup scales the reading source too", checks);
@@ -646,10 +646,10 @@ namespace Leaf
                     "Collapsing the follow-up restores the compact popup's follow-up entry", checks);
                 Ui.Render(shell.Popup, Path.Combine(folder, "popup-small.png"));
                 shell.Popup.Width = 700; shell.Popup.Height = 900; shell.UpdatePopupTypography();
-                Check(translation.FontSize == 17, "Large popup never excessively enlarges the text", checks);
+                Check(translation.FontSize == 19, "Large popup never excessively enlarges the text", checks);
                 Ui.Render(shell.Popup, Path.Combine(folder, "popup-large.png"));
                 shell.Popup.Width = 456; shell.Popup.Height = 620; shell.UpdatePopupTypography();
-                Check(translation.FontSize == 17, "Resizing back restores the original typography without cumulative scaling", checks);
+                Check(translation.FontSize == 19, "Resizing back restores the original typography without cumulative scaling", checks);
 
                 EditorState(shell, checks);
                 RenderStates(shell, transport, folder, checks);
