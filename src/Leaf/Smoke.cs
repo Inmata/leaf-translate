@@ -85,6 +85,37 @@ namespace Leaf
             element.Arrange(new Rect(0, 0, window.Width, window.Height));
             element.UpdateLayout();
         }
+        // The settings page keeps its sections in expanders that start collapsed, so reaching a
+        // control the user can only see after opening one means opening its whole chain.
+        private static void ExpandAncestors(DependencyObject element)
+        {
+            for (int depth = 0; element != null && depth < 32; depth++) {
+                var expander = element as Expander;
+                if (expander != null) expander.IsExpanded = true;
+                element = LogicalTreeHelper.GetParent(element);
+            }
+        }
+        // Dark pixels inside one rectangle of an already written 96 DPI PNG, so a state that is
+        // supposed to show a control is inspected in the image rather than only produced.
+        private static int CountInkInRect(string path, Rect box)
+        {
+            var image = new System.Windows.Media.Imaging.BitmapImage();
+            image.BeginInit(); image.UriSource = new Uri(path);
+            image.CacheOption = System.Windows.Media.Imaging.BitmapCacheOption.OnLoad; image.EndInit();
+            var converted = new System.Windows.Media.Imaging.FormatConvertedBitmap(image, System.Windows.Media.PixelFormats.Bgra32, null, 0);
+            int stride = converted.PixelWidth * 4;
+            var pixels = new byte[stride * converted.PixelHeight];
+            converted.CopyPixels(pixels, stride, 0);
+            int fromY = Math.Max(0, (int)Math.Floor(box.Top)), toY = Math.Min(converted.PixelHeight, (int)Math.Ceiling(box.Bottom));
+            int fromX = Math.Max(0, (int)Math.Floor(box.Left)), toX = Math.Min(converted.PixelWidth, (int)Math.Ceiling(box.Right));
+            int count = 0;
+            for (int y = fromY; y < toY; y++)
+                for (int x = fromX; x < toX; x++) {
+                    int i = y * stride + x * 4;
+                    if (pixels[i] < 200 && pixels[i + 1] < 200 && pixels[i + 2] < 200) count++;
+                }
+            return count;
+        }
         // Top-left of the first painted pixel of one element on a white backdrop, at 96 DPI.
         private static Point PaintedOrigin(FrameworkElement element)
         {
@@ -266,10 +297,38 @@ namespace Leaf
                 Ui.Get<TextBlock>(popup, "SourceBadge").Text.Length == 0,
                 "The settings page opens inside the popup shell without rebuilding the reading page", checks);
             var panel = (FrameworkElement)Ui.Get<ContentControl>(popup, "SettingsPageHost").Content;
-            Check(Ui.Get<TextBlock>(panel, "PresetPlaceholder").Text == "暂无偏好预设" && !Ui.Get<ComboBox>(panel, "PresetCombo").IsEnabled &&
+            var placeholder = Ui.Get<TextBlock>(panel, "PresetPlaceholder");
+            Check(placeholder.Text == "暂无偏好预设" && !Ui.Get<ComboBox>(panel, "PresetCombo").IsEnabled &&
                 !Ui.Get<Button>(panel, "LoadPreset").IsEnabled && !Ui.Get<Button>(panel, "RemovePreset").IsEnabled,
                 "An empty preset list disables its dropdown and actions and says so", checks);
             Capture(popup, folder, "settings-page", checks);
+
+            // The empty-preset state must be visible in an image, not only asserted: the preset
+            // list sits in a collapsed expander, so the chain is opened and the placeholder is
+            // scrolled into view before it is captured. One targeted page per size, on top of
+            // the images above; no other state is rendered again here.
+            foreach (var size in new[] { new object[] { "default", 456.0, 620.0 }, new object[] { "compact", 360.0, 380.0 } }) {
+                string presetSize = (string)size[0];
+                popup.Width = (double)size[1]; popup.Height = (double)size[2]; shell.UpdatePopupTypography();
+                ExpandAncestors(placeholder);
+                Layout(popup);
+                placeholder.BringIntoView();
+                Layout(popup);
+                var content = (FrameworkElement)popup.Content;
+                var origin = placeholder.TranslatePoint(new Point(0, 0), content);
+                Check(placeholder.Visibility == Visibility.Visible && placeholder.ActualWidth > 0 && placeholder.ActualHeight > 0 &&
+                    Ui.Get<ComboBox>(panel, "PresetCombo").ActualWidth > 0,
+                    "The " + presetSize + " empty preset row has a laid out dropdown and placeholder", checks);
+                Check(origin.X >= 0 && origin.Y >= 0 &&
+                    origin.X + placeholder.ActualWidth <= content.ActualWidth && origin.Y + placeholder.ActualHeight <= content.ActualHeight,
+                    "The " + presetSize + " empty-preset placeholder is scrolled inside the visible settings body", checks);
+                string presetPath = Capture(popup, folder, "settings-presets-empty-" + presetSize, checks);
+                var placeholderBox = new Rect(origin, new Size(placeholder.ActualWidth, placeholder.ActualHeight));
+                Check(CountInkInRect(presetPath, placeholderBox) > 0,
+                    "The " + presetSize + " empty-preset image paints its placeholder text instead of a blank area", checks);
+            }
+            popup.Width = 456; popup.Height = 620; shell.UpdatePopupTypography();
+
             bool left = await shell.TryLeaveSettingsPageAsync();
             Layout(popup);
             Check(left && !shell.IsSettingsPageOpen &&

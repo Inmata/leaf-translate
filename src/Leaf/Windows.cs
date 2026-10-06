@@ -80,6 +80,7 @@ namespace Leaf
             Panel = Ui.LoadPanel("SettingsPanel");
             Ui.Get<ContentControl>(Window, "PanelHost").Content = Panel;
             controller = new SettingsController(owner, Panel, () => Window.IsVisible);
+            owner.TrackSettingsWindow(this);
             Ui.Click(Window, "CloseSettingsButton", () => Window.Close());
             Window.Deactivated += (s, e) => controller.OnHostDeactivated();
             Window.Closing += async (s, e) => {
@@ -96,7 +97,7 @@ namespace Leaf
                 allowClose = true;
                 Window.Close();
             };
-            Window.Closed += (s, e) => controller.Detach();
+            Window.Closed += (s, e) => { controller.Detach(); owner.UntrackSettingsWindow(this); };
         }
         // Used by a flushed exit: the timers are already stopped, so closing must not run
         // the normal flush again or start a task that needs the dispatcher.

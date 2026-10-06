@@ -24,12 +24,6 @@ namespace Leaf
         // Test seam: the in-window page read. Production reads the popup's own translate page;
         // a scripted reader lets the in-front branch be checked without a shown window.
         public IInternalSelectionReader InternalSelection { get; set; }
-        // Bridge to the unified page's new-session entry, which the settings/UI partial supplies
-        // once it exists; the integration step replaces this bridge with a direct call to that
-        // partial's TranslateInternalSelectionAsync. While it is null a non-empty page selection
-        // falls back to this build's existing in-front behavior instead of starting a session
-        // the window cannot show yet.
-        internal Func<string, Task> InternalSelectionTranslate { get; set; }
         // Test seam: supplies the placement a check wants to persist so the exit path can be
         // exercised without a real desktop. Null in production, where the native read is used.
         public Func<WindowPlacement> PlacementReader { get; set; }
@@ -81,7 +75,9 @@ namespace Leaf
             handle = new WindowInteropHelper(Popup).EnsureHandle();
             HwndSource.FromHwnd(handle).AddHook(Messages);
             outsideClick = new OutsideClick(() => Popup.Dispatcher.BeginInvoke(new Action(() => {
-                if (Popup.IsVisible && !pinned) HidePopup();
+                // A click outside is a real entry that leaves the settings page for the reading
+                // page, so it takes the same leave; a failed flush keeps the page instead.
+                if (Popup.IsVisible && !pinned) { var ignored = LeaveSettingsThenAsync(HidePopup); }
             })));
             BuildTray();
             try { RegisterShortcut(Store.Settings.Shortcut); }
@@ -176,20 +172,28 @@ namespace Leaf
                 // new session, while no page selection at all keeps the existing behavior.
                 var page = InternalSelection != null ? InternalSelection.Read() : InternalSelectionResult.NoPage;
                 Log.InternalSelection(page.Status, page.Reason, page.Source, page.TextLength);
-                var startSession = InternalSelectionTranslate;
-                if (page.Status == InternalSelectionStatus.Text && startSession != null) {
-                    await startSession(page.Text);
+                if (page.Status == InternalSelectionStatus.Text) {
+                    // The reading page replaces whatever page is on screen, so an open settings
+                    // page is left first; a failed flush keeps it and the current session.
+                    if (!await TryLeaveSettingsPageAsync()) return;
+                    await TranslateInternalSelectionAsync(page.Text);
                     return;
                 }
                 HandleLeafSelectionShortcut(invocation.FocusInputOnShortcut);
                 return;
             }
+            // An external capture shows its own result on the reading page, so an open settings
+            // page is left before it starts: pending preferences are applied first, and a flush
+            // that fails keeps that page, its draft and the session as they are.
             long revision = sourceRevision;
             var owner = new CancellationTokenSource();
             captureCancellation = owner; captureBusy = true;
             string captureId = Guid.NewGuid().ToString("N");
             SelectionCaptureResult result;
             try {
+                // The capture stays guarded while the leave runs, so a second shortcut cannot
+                // start a second acquisition through that window.
+                if (!await TryLeaveSettingsPageAsync()) return;
                 // Start acquisition with the original foreground intact, then show immediately.
                 var capture = Selection.CaptureAsync(target, invocation.ClipboardMode, invocation.Shortcut, owner.Token);
                 ShowPopup();
@@ -313,16 +317,26 @@ namespace Leaf
             if (outsideClick != null) outsideClick.Dispose();
             Popup.Hide();
         }
+        // The user's explicit settings entry: the shell has one window, so this reveals the
+        // popup's own settings page instead of opening a second window and instead of hiding
+        // the popup first. The page is revealed without activation, so a plain capture never
+        // takes focus to reach it.
         public void OpenSettings()
         {
             EnsureCredentialMigration();
-            HidePopup();
-            if (settingsWindow != null) { settingsWindow.Window.Activate(); return; }
-            settingsWindow = new SettingsWindow(this);
-            settingsWindow.Window.Closed += (s, e) => settingsWindow = null;
-            settingsWindow.Window.Show(); settingsWindow.Window.Activate();
+            ShowSettingsPage();
         }
+        // Production never opens the tray settings window any more; a window created directly
+        // (legacy code or a check) still registers itself so the exit path flushes and closes it.
+        internal void TrackSettingsWindow(SettingsWindow window) { settingsWindow = window; }
+        internal void UntrackSettingsWindow(SettingsWindow window) { if (ReferenceEquals(settingsWindow, window)) settingsWindow = null; }
         public void OpenHistory()
+        {
+            // The history window is reached from a page the user leaves; the settings page
+            // applies its pending edits first and stays open if that cannot be saved.
+            var ignored = LeaveSettingsThenAsync(OpenHistoryWindow);
+        }
+        private void OpenHistoryWindow()
         {
             HidePopup();
             if (historyWindow != null) { historyWindow.Refresh(); historyWindow.Window.Activate(); return; }
@@ -484,6 +498,12 @@ namespace Leaf
         }
         public void OpenRecord(TranslationRecord record)
         {
+            // Opening a record shows it on the reading page, so an open settings page is left
+            // first; a failed flush keeps that page instead of opening behind it.
+            var ignored = LeaveSettingsThenAsync(() => OpenRecordNow(record));
+        }
+        private void OpenRecordNow(TranslationRecord record)
+        {
             CancelRequests(); demo = false; Current = record; currentHistoryEpoch = Store.HistoryEpoch;
             DisplayRecord(); ShowPopup();
         }
@@ -583,6 +603,12 @@ namespace Leaf
             if (Current != null && !demo) Current.Draft = Ui.Get<TextBox>(Popup, "QuestionInput").Text;
             var placement = CapturePlacementToSave();
             try {
+                // The popup's own settings page is flushed and left before anything is disposed,
+                // so a pending preference, a debounced edit or a clicked service apply is saved
+                // first. A page that cannot be saved keeps the app alive with its own reason,
+                // and a leave already running for this page is shared instead of run twice.
+                if (!await TryLeaveSettingsPageAsync().ConfigureAwait(true))
+                    throw new UserError("storage", "设置尚未保存完成，请在设置页修正提示后重试退出。");
                 if (settingsWindow != null) {
                     bool flushed = await settingsWindow.FlushPendingAsync().ConfigureAwait(true);
                     if (!flushed) throw new UserError("storage", "设置尚未保存完成，请在设置窗口修正提示后重试退出。");

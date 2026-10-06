@@ -108,11 +108,11 @@ namespace Leaf
                 phases.Add(await MeasureHistory("history_long_1000_encode", Path.Combine(folder, "history-1000"), 1000, false));
                 shell.OpenSettings(); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
                 phases.Add(await Measure("settings_window", () => Task.Delay(3000)));
-                foreach (Window window in Application.Current.Windows.Cast<Window>().Where(w => w != shell.Popup).ToArray()) window.Close();
                 phases.Add(await Measure("settings_open_close_15_times", async () => {
                     for (int i = 0; i < 15; i++) {
                         shell.OpenSettings(); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
-                        foreach (Window window in Application.Current.Windows.Cast<Window>().Where(w => w != shell.Popup).ToArray()) window.Close();
+                        await shell.TryLeaveSettingsPageAsync();
+                        await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
                         await Task.Delay(100);
                     }
                     await Task.Delay(2000);
