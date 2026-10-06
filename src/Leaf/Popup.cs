@@ -25,6 +25,9 @@ namespace Leaf
 
     public sealed partial class AppShell
     {
+        // How far the wheel routing walks the visual chain looking for the scroller under the
+        // pointer before giving up and letting the page body take the notch.
+        private const int MaxWheelDepth = 32;
         private bool fillingSource;
         private long sourceRevision;
         private DispatcherTimer copyFeedback;
@@ -185,9 +188,7 @@ namespace Leaf
                 WireSelectableReading(Ui.Get<RichTextBox>(Popup, name));
             WireLearningText(Ui.Get<TextBox>(Popup, "WordTitle"));
             InitializeSettingsPage();
-            ShareWheelWithBody(Ui.Get<TextBox>(Popup, "SourceText"));
-            ShareWheelWithBody(Ui.Get<TextBox>(Popup, "SourceInput"));
-            ShareWheelWithBody(Ui.Get<TextBox>(Popup, "QuestionInput"));
+            WireWheelRouting();
             UpdateTopBarState();
             DisplayRecord();
             UpdatePopupTypography();
@@ -206,26 +207,52 @@ namespace Leaf
         {
             button.Style = (Style)Popup.FindResource(active ? "PaperTopButtonActive" : "PaperTopButton");
         }
-        // The wheel acts on the box under the pointer with no click and no focus: the box
-        // scrolls its own text while it still can, and at its own edge the same wheel
-        // continues in the page's body scroller instead of stopping. Nothing is rebuilt.
-        private void ShareWheelWithBody(TextBoxBase box)
+        // One wheel decision for the whole reading page, taken while the event is still
+        // tunneling: the region under the pointer spends the notch itself while it can still
+        // move, and at its own edge the same notch continues in the page's body scroller
+        // instead of being swallowed. Deciding before any scroller has moved keeps one notch
+        // from reaching two of them, and the region comes from the pointer's own hit target,
+        // so hovering alone is enough - no click and no focus change. Nothing is rebuilt.
+        private void WireWheelRouting()
         {
-            box.AddHandler(UIElement.MouseWheelEvent, new MouseWheelEventHandler((s, e) => {
-                // The box's own scroller is asked live: its template exists by the time a
-                // real wheel arrives, whatever the load order was.
-                var inner = InnerScroll(box);
-                bool canScroll = inner != null &&
-                    (e.Delta > 0 ? inner.VerticalOffset > 0.5 : inner.VerticalOffset < inner.ScrollableHeight - 0.5);
-                if (canScroll) return;
+            var page = Ui.Get<Grid>(Popup, "TranslatePage");
+            page.AddHandler(UIElement.PreviewMouseWheelEvent, new MouseWheelEventHandler((s, e) => {
                 var body = Ui.Get<ScrollViewer>(Popup, "BodyScroll");
-                double before = body.VerticalOffset;
-                double target = before - e.Delta / 120.0 * 48.0;
+                var inner = WheelTargetUnder(e.OriginalSource as DependencyObject, body);
+                if (inner != null && CanSpendWheel(inner, e.Delta)) return;
+                // The body's own offsets are read after its pending layout, so a burst of
+                // notches cannot compute the same target twice from a stale offset.
+                body.UpdateLayout();
+                double target = body.VerticalOffset - e.Delta / 120.0 * 48.0;
                 body.ScrollToVerticalOffset(Math.Max(0, Math.Min(target, body.ScrollableHeight)));
-                // Only a wheel the page could really use is kept; a page already at its own
-                // edge leaves the event alone, so it still travels outward.
-                e.Handled = Math.Abs(body.VerticalOffset - before) > 0.1;
-            }), true);
+                // The notch is spent here whether or not the body could still move: the
+                // region under the pointer already refused it, and leaving the event unhandled
+                // would only let that region swallow it with no effect.
+                e.Handled = true;
+            }), false);
+        }
+        // The innermost scroller the pointer is over, never the body itself: the body is the
+        // fallback every inner region hands its spent notch to.
+        private static ScrollViewer WheelTargetUnder(DependencyObject origin, ScrollViewer body)
+        {
+            DependencyObject node = origin;
+            for (int depth = 0; node != null && depth < MaxWheelDepth; depth++) {
+                var viewer = node as ScrollViewer;
+                if (viewer != null && !ReferenceEquals(viewer, body)) return viewer;
+                node = VisualParentOf(node);
+            }
+            return null;
+        }
+        // Whether the region under the pointer can spend this notch itself. A scroller already
+        // at its edge in that direction refuses it, so the wheel continues in the body.
+        private static bool CanSpendWheel(ScrollViewer viewer, int delta)
+        {
+            double offset = viewer.VerticalOffset;
+            return delta > 0 ? offset > 0.5 : offset < viewer.ScrollableHeight - 0.5;
+        }
+        private static DependencyObject VisualParentOf(DependencyObject node)
+        {
+            try { return VisualTreeHelper.GetParent(node); } catch { return null; }
         }
         private static bool HasButtonParent(DependencyObject item)
         {
@@ -359,7 +386,7 @@ namespace Leaf
         }
         // A learning heading is ordinary paper text, not a control label: the same read-only
         // box as the reading area, so the word entry and every section title answer Ctrl+C
-        // with the text under the user's own selection.
+        // and the in-window selection shortcut with the text under the user's own selection.
         private TextBox NewLearningTitle(string text)
         {
             var box = new TextBox {
@@ -369,10 +396,13 @@ namespace Leaf
             WireLearningText(box);
             return box;
         }
-        // The 复制/全选 menu the reading boxes carry, for the learning titles too. The tag
-        // stays off: the in-window shortcut keeps speaking only for the reading controls.
+        // The 复制/全选 menu and the shared selectable mark the reading boxes carry, for the
+        // learning titles too: the word entry and every section heading are the same ordinary
+        // paper text, so the in-window shortcut reads their selection exactly as it reads the
+        // reading controls'.
         private static void WireLearningText(TextBox box)
         {
+            box.Tag = "LeafSelectableText";
             var menu = new ContextMenu();
             menu.Items.Add(new MenuItem { Header = "复制", Command = ApplicationCommands.Copy });
             menu.Items.Add(new MenuItem { Header = "全选", Command = ApplicationCommands.SelectAll });

@@ -608,6 +608,12 @@ namespace Leaf
                 Check(sections.Children.OfType<RichTextBox>().Any() &&
                     sections.Children.OfType<RichTextBox>().All(x => x.IsReadOnly && (x.Tag as string) == "LeafSelectableText"),
                     "Learning section content is selectable read-only text", checks);
+                // The headings are the same ordinary paper text as the reading boxes, so the
+                // in-window selection read has to find them by the same mark.
+                Check((Ui.Get<TextBox>(shell.Popup, "WordTitle").Tag as string) == "LeafSelectableText" &&
+                    sections.Children.OfType<TextBox>().Any() &&
+                    sections.Children.OfType<TextBox>().All(x => (x.Tag as string) == "LeafSelectableText"),
+                    "Learning headings are marked for the same selection read", checks);
                 Check(shell.Popup.FindName("SceneCombo") == null, "Popup contains no scene picker", checks);
                 Check(!shell.Popup.ShowActivated, "Popup does not activate on Show", checks);
                 Check(shell.Popup.ShowInTaskbar && shell.Popup.Icon != null, "Popup has a branded taskbar entry", checks);
