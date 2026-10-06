@@ -502,6 +502,8 @@ internal static class SelectionTests
             Check(outcome.Status == CaptureStatus.Unavailable && outcome.Reason == CaptureReason.ClipboardOriginUnknown &&
                 outcome.Text == "" && ownerMoved.RestoreCalls == 0,
                 "A clipboard that changed owner while it was read is an unknown origin, not this selection");
+            Check(Step(outcome, "clipboard_read") != null && Step(outcome, "clipboard_read").Reason == CaptureReason.ClipboardOriginUnknown,
+                "The read stage reports the discarded origin instead of a read that counted");
         }
 
         // The owner can also change after the text was read. The restore is a write of its own,

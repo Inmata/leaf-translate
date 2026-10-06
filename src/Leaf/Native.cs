@@ -323,6 +323,7 @@ namespace Leaf
                 Stage = "clipboard_read",
                 Reason = captured == 0
                     ? (sequenceMoved ? CaptureReason.ClipboardOriginUnknown : CaptureReason.CopyNoUpdate)
+                    : textRaced ? CaptureReason.ClipboardOriginUnknown
                     : readFailed ? CaptureReason.ClipboardBusy : CaptureReason.None,
                 HResult = readFailed ? readError.HResult : 0,
                 ClipboardChanged = captured != 0, ForegroundSame = host.ForegroundWindow == target.Window,

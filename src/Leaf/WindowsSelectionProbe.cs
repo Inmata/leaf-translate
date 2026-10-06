@@ -171,7 +171,7 @@ namespace Leaf
         private sealed class Scan
         {
             public int Visited, Candidates;
-            public bool PatternSupported, TrustedEmpty, Unreadable, BudgetSpent;
+            public bool PatternSupported, TrustedEmpty, Unreadable;
             public int EmptyType, ReadError;
         }
 
@@ -257,7 +257,6 @@ namespace Leaf
             // Time that ran out is an unfinished scan even when nothing was left pending: the
             // call that spent it may have been the one that would have found the selection.
             if (budgetSpent || watch.ElapsedMilliseconds > AutomationBudgetMs) complete = false;
-            scan.BudgetSpent = !complete && (budgetSpent || watch.ElapsedMilliseconds > AutomationBudgetMs);
 
             // Only a trusted document that finished its selection query may report "nothing
             // selected"; a truncated scan is inconclusive, never a confirmed empty selection.
