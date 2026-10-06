@@ -53,6 +53,7 @@ namespace Leaf
             // The source badge stays as it is on the reading page: the origin survives
             // entering settings and is recomputed on the way back out.
             settingsController.Activate();
+            UpdateTopBarState();
             ShowPopup();
         }
 
@@ -108,6 +109,7 @@ namespace Leaf
             settingsController.Detach();
             Ui.Get<ContentControl>(Popup, "SettingsPageHost").Content = null;
             settingsPanel = null; settingsController = null;
+            UpdateTopBarState();
             RestoreReadingScroll(bodyScrollBackup, 0);
             bodyScrollBackup = 0;
         }

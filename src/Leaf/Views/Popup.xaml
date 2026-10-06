@@ -21,20 +21,38 @@
         </Setter.Value>
       </Setter>
     </Style>
-    <!-- Paper top-bar icons drawn as strokes: the settings entry sits on a dark rounded
-         chip with two slider rows — a knob opening left on the upper row, right on the
-         lower — while pin and collapse stay plain. -->
+    <!-- Paper top-bar icons drawn as strokes: settings is two slider rows — a knob opening
+         left on the upper row, right on the lower — beside the pushpin and the collapse bar. -->
     <Geometry x:Key="SlidersIcon">M8,7.2 H20 M4,16.8 H14.8 M5.4,7.2 m-2.2,0 a2.2,2.2 0 1,0 4.4,0 a2.2,2.2 0 1,0 -4.4,0 M17.4,16.8 m-2.2,0 a2.2,2.2 0 1,0 4.4,0 a2.2,2.2 0 1,0 -4.4,0</Geometry>
     <!-- The pin reads as a pushpin: a wide rounded head that tapers inward to a narrow
          base, with the thin needle below. -->
     <Geometry x:Key="PinIcon">M12,14 V21 M9.1,3.5 H14.9 C16.9,3.5 18.2,4.9 17.9,6.7 C17.7,8.2 17,9.4 16,10.4 C15.2,11.2 14.8,12.1 14.7,13.1 L14.6,14.5 H9.4 L9.3,13.1 C9.2,12.1 8.8,11.2 8,10.4 C7,9.4 6.3,8.2 6.1,6.7 C5.8,4.9 7.1,3.5 9.1,3.5 Z</Geometry>
     <Geometry x:Key="HideIcon">M4,12 H20</Geometry>
+    <!-- The three top-bar entries share one 32-dip square: plain by default with a dark
+         glyph and a neutral hover, and the active twin paints the dark chip with a white
+         glyph only while its own state is really on (settings page open, window pinned). -->
     <Style x:Key="PaperTopButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
       <Setter Property="Width" Value="32"/>
       <Setter Property="Height" Value="32"/>
       <Setter Property="Padding" Value="0"/>
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="Foreground" Value="{StaticResource Ink}"/>
+      <Style.Triggers>
+        <Trigger Property="IsMouseOver" Value="True"><Setter Property="Background" Value="{StaticResource Soft}"/></Trigger>
+      </Style.Triggers>
+    </Style>
+    <Style x:Key="PaperTopButtonActive" TargetType="Button" BasedOn="{StaticResource PaperTopButton}">
       <Setter Property="Background" Value="{StaticResource Ink}"/>
       <Setter Property="Foreground" Value="White"/>
+      <Style.Triggers>
+        <Trigger Property="IsMouseOver" Value="True"><Setter Property="Background" Value="{StaticResource Ink}"/></Trigger>
+      </Style.Triggers>
+    </Style>
+    <!-- A selectable paper title: the reading box without its minimum height, so a word
+         entry or section heading answers Ctrl+C without stranding a 44-dip row. -->
+    <Style x:Key="PaperTitle" TargetType="TextBox" BasedOn="{StaticResource PaperReader}">
+      <Setter Property="MinHeight" Value="0"/>
+      <Setter Property="TextWrapping" Value="Wrap"/>
     </Style>
   </Window.Resources>
   <Border Margin="8" Background="White" CornerRadius="18" BorderBrush="{StaticResource Line}" BorderThickness="1">
@@ -43,24 +61,24 @@
       <Grid.RowDefinitions><RowDefinition Height="34"/><RowDefinition Height="*"/></Grid.RowDefinitions>
       <Grid x:Name="DragBar" Grid.Row="0" Background="Transparent">
         <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-          <TextBlock x:Name="SourceBadge" Text="剪贴板" FontSize="12" Foreground="{StaticResource Secondary}"/>
+          <TextBlock x:Name="SourceBadge" Text="剪贴板" FontSize="13" Foreground="{StaticResource Secondary}"/>
         </StackPanel>
         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
           <Button x:Name="SettingsButton" Style="{StaticResource PaperTopButton}" ToolTip="设置" AutomationProperties.Name="设置">
             <Viewbox Width="18" Height="18">
-              <Path Data="{StaticResource SlidersIcon}" Stroke="White"
+              <Path Data="{StaticResource SlidersIcon}" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}"
                     StrokeThickness="1.5" StrokeStartLineCap="Round"
                     StrokeEndLineCap="Round" StrokeLineJoin="Round"/>
             </Viewbox>
           </Button>
-          <Button x:Name="PinButton" Style="{StaticResource IconButton}" ToolTip="置顶并保持显示" AutomationProperties.Name="置顶或取消置顶">
+          <Button x:Name="PinButton" Style="{StaticResource PaperTopButton}" Margin="4,0,0,0" ToolTip="置顶并保持显示" AutomationProperties.Name="置顶或取消置顶">
             <Viewbox Width="15" Height="15">
               <Path Data="{StaticResource PinIcon}" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}"
                     StrokeThickness="1.5" StrokeStartLineCap="Round"
                     StrokeEndLineCap="Round" StrokeLineJoin="Round"/>
             </Viewbox>
           </Button>
-          <Button x:Name="HideButton" Style="{StaticResource IconButton}" ToolTip="收起" AutomationProperties.Name="收起浮窗">
+          <Button x:Name="HideButton" Style="{StaticResource PaperTopButton}" Margin="4,0,0,0" ToolTip="收起" AutomationProperties.Name="收起浮窗">
             <Viewbox Width="15" Height="15">
               <Path Data="{StaticResource HideIcon}" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}"
                     StrokeThickness="1.5" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
@@ -74,8 +92,8 @@
           <StackPanel>
             <Grid Margin="0,0,0,7">
               <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                <TextBlock Text="原文" Foreground="{StaticResource Muted}" FontSize="12" VerticalAlignment="Center"/>
-                <Button x:Name="BackToPreviousButton" Content="返回上一会话" Style="{StaticResource GhostButton}" FontSize="12" Padding="7,3" Margin="9,0,0,0" Visibility="Collapsed" ToolTip="回到上一次翻译的内容与词卡" AutomationProperties.Name="返回上一会话"/>
+                <TextBlock Text="原文" Foreground="{StaticResource Muted}" FontSize="13" VerticalAlignment="Center"/>
+                <Button x:Name="BackToPreviousButton" Content="返回上一会话" Style="{StaticResource GhostButton}" FontSize="13" Padding="7,3" Margin="9,0,0,0" Visibility="Collapsed" ToolTip="回到上一次翻译的内容与词卡" AutomationProperties.Name="返回上一会话"/>
               </StackPanel>
               <Button x:Name="EditSourceButton" Content="&#xE70F;" Style="{StaticResource IconButton}" HorizontalAlignment="Right" Height="24" Width="24" ToolTip="编辑原文" AutomationProperties.Name="编辑原文"/>
             </Grid>
@@ -85,7 +103,7 @@
             <Grid>
               <leaf:SourceHighlightLayer x:Name="SourceHighlight"/>
               <TextBox x:Name="SourceText" Style="{StaticResource PaperReader}"
-                       TextWrapping="Wrap" AcceptsReturn="True" MaxHeight="100" FontSize="18"
+                       TextWrapping="Wrap" AcceptsReturn="True" MaxHeight="100" FontSize="16"
                        Foreground="{StaticResource Secondary}" VerticalScrollBarVisibility="Auto"
                        AutomationProperties.Name="原文"/>
             </Grid>
@@ -93,7 +111,7 @@
               <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
               <TextBox x:Name="SourceInput" Grid.Column="0" Style="{StaticResource PopupEditor}"
                        AcceptsReturn="True" TextWrapping="Wrap" MinHeight="38" MaxHeight="110"
-                       FontSize="18" MaxLength="6000" VerticalScrollBarVisibility="Auto"
+                       FontSize="16" MaxLength="6000" VerticalScrollBarVisibility="Auto"
                        AutomationProperties.Name="原文"/>
               <TextBox x:Name="SourcePlaceholder" Grid.Column="0" Text="输入要翻译的文字…"
                        Style="{StaticResource PopupEditor}" IsReadOnly="True" Focusable="False"
@@ -119,14 +137,14 @@
         <ScrollViewer x:Name="BodyScroll" Style="{StaticResource SlimScrollViewer}" Grid.Row="1" VerticalScrollBarVisibility="Auto" Margin="0,24,0,0">
           <StackPanel>
             <TextBlock x:Name="TranslationCaption" Text="译文" Style="{StaticResource Caption}" FontSize="13"/>
-            <RichTextBox x:Name="TranslationText" Style="{StaticResource ReadingText}" FontSize="20" FontWeight="SemiBold" Margin="0,0,8,16">
-              <FlowDocument PagePadding="0" FontFamily="Segoe UI, Microsoft YaHei UI" FontSize="20" FontWeight="SemiBold"/>
+            <RichTextBox x:Name="TranslationText" Style="{StaticResource ReadingText}" FontSize="17" FontWeight="SemiBold" Margin="0,0,8,16">
+              <FlowDocument PagePadding="0" FontFamily="Microsoft YaHei UI, Segoe UI" FontSize="17" FontWeight="SemiBold"/>
             </RichTextBox>
             <Grid x:Name="BusyPanel" Visibility="Collapsed" Margin="0,6,0,10">
               <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
               <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
                 <Ellipse Width="5" Height="5" Fill="{StaticResource Accent}" Margin="0,0,8,0"/>
-                <TextBlock x:Name="BusyLabel" Text="正在翻译…" FontSize="12" Foreground="{StaticResource Muted}"/>
+                <TextBlock x:Name="BusyLabel" Text="正在翻译…" FontSize="13" Foreground="{StaticResource Muted}"/>
               </StackPanel>
               <Button x:Name="CancelButton" Grid.Column="1" Content="停止" Style="{StaticResource GhostButton}"/>
             </Grid>
@@ -143,14 +161,14 @@
             <Border x:Name="WordPanel" Visibility="Collapsed" BorderBrush="{StaticResource Line}" BorderThickness="0,1,0,0" Padding="0,24,0,0" Margin="0,24,0,0">
               <StackPanel>
                 <Grid Margin="0,0,0,9">
-                  <TextBlock x:Name="WordTitle" Text="prowess" FontSize="20" FontWeight="SemiBold"/>
+                  <TextBox x:Name="WordTitle" Style="{StaticResource PaperTitle}" Text="prowess" FontSize="18" FontWeight="SemiBold" IsTabStop="False" AutomationProperties.Name="词条"/>
                   <Button x:Name="BackToSentence" Content="收起释义" Style="{StaticResource GhostButton}" HorizontalAlignment="Right" Margin="0,-4,-8,0"/>
                 </Grid>
-                <RichTextBox x:Name="WordMeaning" Style="{StaticResource ReadingText}" FontSize="17" Margin="0,0,0,2" AutomationProperties.Name="词义">
-                  <FlowDocument PagePadding="0" FontFamily="Segoe UI, Microsoft YaHei UI" FontSize="17"/>
+                <RichTextBox x:Name="WordMeaning" Style="{StaticResource ReadingText}" FontSize="16" Margin="0,0,0,2" AutomationProperties.Name="词义">
+                  <FlowDocument PagePadding="0" FontFamily="Microsoft YaHei UI, Segoe UI" FontSize="16"/>
                 </RichTextBox>
                 <RichTextBox x:Name="WordMeta" Style="{StaticResource ReadingText}" FontSize="13" Foreground="{StaticResource Muted}" Margin="0,5,0,0" AutomationProperties.Name="词形信息">
-                  <FlowDocument PagePadding="0" FontFamily="Segoe UI, Microsoft YaHei UI" FontSize="13"/>
+                  <FlowDocument PagePadding="0" FontFamily="Microsoft YaHei UI, Segoe UI" FontSize="13"/>
                 </RichTextBox>
                 <StackPanel x:Name="LearningSections" Margin="0,15,0,4"/>
               </StackPanel>
@@ -174,12 +192,12 @@
               <TextBlock Text="追问" FontWeight="Medium" VerticalAlignment="Center"/>
             </StackPanel>
           </Button>
-          <TextBlock x:Name="CopyStatus" HorizontalAlignment="Right" FontSize="11" Foreground="{StaticResource Muted}" VerticalAlignment="Center"/>
+          <TextBlock x:Name="CopyStatus" HorizontalAlignment="Right" FontSize="13" Foreground="{StaticResource Muted}" VerticalAlignment="Center"/>
         </Grid>
         <Border x:Name="InputPanel" Grid.Row="3" Visibility="Collapsed" BorderBrush="{StaticResource Line}" BorderThickness="0,1,0,0" Margin="0,9,0,0" Padding="0,12,0,0">
           <StackPanel>
             <Grid Margin="0,0,0,8">
-              <TextBlock x:Name="TopicLabel" Text="关于这段原文" FontSize="12" Foreground="{StaticResource Muted}" VerticalAlignment="Center"/>
+              <TextBlock x:Name="TopicLabel" Text="关于这段原文" FontSize="13" Foreground="{StaticResource Muted}" VerticalAlignment="Center"/>
               <Button x:Name="CloseQuestionButton" Style="{StaticResource PopupActionButton}" HorizontalAlignment="Right" ToolTip="收起追问" AutomationProperties.Name="收起追问">
                 <Viewbox Width="12" Height="12">
                   <Path Data="{StaticResource FoldChevron}" Stroke="{StaticResource Secondary}"
@@ -205,7 +223,7 @@
       <Grid x:Name="SettingsPage" Grid.Row="1" Visibility="Collapsed">
         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
         <Grid Grid.Row="0" Margin="0,20,0,24">
-          <TextBlock Text="翻译服务" FontSize="20" FontWeight="SemiBold" VerticalAlignment="Center"/>
+          <TextBlock Text="翻译服务" FontSize="18" FontWeight="SemiBold" VerticalAlignment="Center"/>
           <Button x:Name="SettingsBackButton" Content="返回" Style="{StaticResource GhostButton}" FontSize="13" HorizontalAlignment="Right" ToolTip="返回翻译" AutomationProperties.Name="返回翻译"/>
         </Grid>
         <ContentControl x:Name="SettingsPageHost" Grid.Row="1"/>

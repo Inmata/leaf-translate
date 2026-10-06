@@ -120,10 +120,8 @@ namespace Leaf
             highlightLayer.Bind(sourceReading);
             Ui.Click(Popup, "PinButton", () => {
                 pinned = !pinned;
-                var button = Ui.Get<Button>(Popup, "PinButton");
-                button.Foreground = pinned ? Ui.Brush("Accent") : Ui.Brush("Secondary");
-                button.Background = pinned ? Ui.Brush("Soft") : Brushes.Transparent;
-                button.ToolTip = pinned ? "取消置顶，窗口外点击会收起" : "置顶并保持显示";
+                Ui.Get<Button>(Popup, "PinButton").ToolTip = pinned ? "取消置顶，窗口外点击会收起" : "置顶并保持显示";
+                UpdateTopBarState();
             });
             Ui.Get<Grid>(Popup, "DragBar").MouseLeftButtonDown += (s, e) => {
                 if (!NativeEnabled || (e.OriginalSource is DependencyObject && HasButtonParent((DependencyObject)e.OriginalSource))) return;
@@ -185,9 +183,49 @@ namespace Leaf
             }
             foreach (string name in new[] { "WordMeaning", "WordMeta" })
                 WireSelectableReading(Ui.Get<RichTextBox>(Popup, name));
+            WireLearningText(Ui.Get<TextBox>(Popup, "WordTitle"));
             InitializeSettingsPage();
+            ShareWheelWithBody(Ui.Get<TextBox>(Popup, "SourceText"));
+            ShareWheelWithBody(Ui.Get<TextBox>(Popup, "SourceInput"));
+            ShareWheelWithBody(Ui.Get<TextBox>(Popup, "QuestionInput"));
+            UpdateTopBarState();
             DisplayRecord();
             UpdatePopupTypography();
+        }
+        // The top bar carries one dark chip at a time: the settings entry while its page is
+        // open, the pin while the window is really pinned. Leaving either state — the back
+        // entry, the outside click, the window close or the pin's own click — puts the plain
+        // square back, and nothing here takes focus.
+        private void UpdateTopBarState()
+        {
+            SetTopBarState(Ui.Get<Button>(Popup, "SettingsButton"), IsSettingsPageOpen);
+            SetTopBarState(Ui.Get<Button>(Popup, "PinButton"), pinned);
+            SetTopBarState(Ui.Get<Button>(Popup, "HideButton"), false);
+        }
+        private void SetTopBarState(Button button, bool active)
+        {
+            button.Style = (Style)Popup.FindResource(active ? "PaperTopButtonActive" : "PaperTopButton");
+        }
+        // The wheel acts on the box under the pointer with no click and no focus: the box
+        // scrolls its own text while it still can, and at its own edge the same wheel
+        // continues in the page's body scroller instead of stopping. Nothing is rebuilt.
+        private void ShareWheelWithBody(TextBoxBase box)
+        {
+            box.AddHandler(UIElement.MouseWheelEvent, new MouseWheelEventHandler((s, e) => {
+                // The box's own scroller is asked live: its template exists by the time a
+                // real wheel arrives, whatever the load order was.
+                var inner = InnerScroll(box);
+                bool canScroll = inner != null &&
+                    (e.Delta > 0 ? inner.VerticalOffset > 0.5 : inner.VerticalOffset < inner.ScrollableHeight - 0.5);
+                if (canScroll) return;
+                var body = Ui.Get<ScrollViewer>(Popup, "BodyScroll");
+                double before = body.VerticalOffset;
+                double target = before - e.Delta / 120.0 * 48.0;
+                body.ScrollToVerticalOffset(Math.Max(0, Math.Min(target, body.ScrollableHeight)));
+                // Only a wheel the page could really use is kept; a page already at its own
+                // edge leaves the event alone, so it still travels outward.
+                e.Handled = Math.Abs(body.VerticalOffset - before) > 0.1;
+            }), true);
         }
         private static bool HasButtonParent(DependencyObject item)
         {
@@ -319,10 +357,31 @@ namespace Leaf
             menu.Items.Add(new MenuItem { Header = "全选", Command = ApplicationCommands.SelectAll });
             box.ContextMenu = menu;
         }
+        // A learning heading is ordinary paper text, not a control label: the same read-only
+        // box as the reading area, so the word entry and every section title answer Ctrl+C
+        // with the text under the user's own selection.
+        private TextBox NewLearningTitle(string text)
+        {
+            var box = new TextBox {
+                Style = (Style)Popup.FindResource("PaperTitle"), Text = text ?? "",
+                FontWeight = FontWeights.SemiBold, Foreground = Ui.Brush("Ink"), IsTabStop = false
+            };
+            WireLearningText(box);
+            return box;
+        }
+        // The 复制/全选 menu the reading boxes carry, for the learning titles too. The tag
+        // stays off: the in-window shortcut keeps speaking only for the reading controls.
+        private static void WireLearningText(TextBox box)
+        {
+            var menu = new ContextMenu();
+            menu.Items.Add(new MenuItem { Header = "复制", Command = ApplicationCommands.Copy });
+            menu.Items.Add(new MenuItem { Header = "全选", Command = ApplicationCommands.SelectAll });
+            box.ContextMenu = menu;
+        }
         private RichTextBox NewReadingBox()
         {
             var box = new RichTextBox { Style = (Style)Application.Current.Resources["ReadingText"], Foreground = Ui.Brush("Secondary") };
-            box.Document = new FlowDocument { PagePadding = new Thickness(0), FontFamily = new FontFamily("Segoe UI, Microsoft YaHei UI") };
+            box.Document = new FlowDocument { PagePadding = new Thickness(0), FontFamily = new FontFamily("Microsoft YaHei UI, Segoe UI") };
             WireSelectableReading(box);
             return box;
         }
@@ -403,32 +462,34 @@ namespace Leaf
         public void UpdatePopupTypography()
         {
             double scale = TypographyScale(Popup.Width, Popup.Height);
+            // The ladder is fixed: 16 reading, 17 translation, 18 titles, 15 section titles
+            // and a 13 auxiliary tier that never shrinks; only reading text follows the
+            // window's own 84% floor.
             var source = Ui.Get<TextBox>(Popup, "SourceText");
-            source.FontSize = 18 * scale;
+            source.FontSize = Math.Max(13, 16 * scale);
             source.MaxHeight = 100 * scale;
             var translation = Ui.Get<RichTextBox>(Popup, "TranslationText");
-            translation.FontSize = translation.Document.FontSize = Math.Max(14, 20 * scale);
-            foreach (var paragraph in translation.Document.Blocks.OfType<Paragraph>()) paragraph.LineHeight = 30 * scale;
-            Ui.Get<TextBox>(Popup, "SourceInput").FontSize = Math.Max(14, 18 * scale);
-            SetTypography("WordTitle", Math.Max(14, 20 * scale), 0);
-            ApplyReadingTypography(Ui.Get<RichTextBox>(Popup, "WordMeaning"), Math.Max(14, 17 * scale), 27 * scale);
+            translation.FontSize = translation.Document.FontSize = Math.Max(14, 17 * scale);
+            foreach (var paragraph in translation.Document.Blocks.OfType<Paragraph>()) paragraph.LineHeight = 27 * scale;
+            var editor = Ui.Get<TextBox>(Popup, "SourceInput");
+            editor.FontSize = Math.Max(13, 16 * scale);
+            Ui.Get<TextBox>(Popup, "WordTitle").FontSize = Math.Max(14, 18 * scale);
+            ApplyReadingTypography(Ui.Get<RichTextBox>(Popup, "WordMeaning"), Math.Max(13, 16 * scale), 25 * scale);
             ApplyReadingTypography(Ui.Get<RichTextBox>(Popup, "WordMeta"), 13, 0);
-            SetTypography("ErrorText", Math.Max(12, 13 * scale), 21 * scale);
-            // Learning sections: a 16 SemiBold title 8 over 16/26 reading content, with 24
+            SetTypography("ErrorText", 13, 21);
+            // Learning sections: a 15 SemiBold title 8 over 16/25 reading content, with 24
             // between sections. Chat labels stay small and tight.
             var learning = Ui.Get<StackPanel>(Popup, "LearningSections").Children;
             for (int i = 0; i < learning.Count; i++) {
-                bool label = i % 2 == 0;
-                var text = learning[i] as TextBlock;
-                if (text != null) {
-                    text.FontSize = Math.Max(13, 16 * scale);
-                    if (label) text.FontWeight = FontWeights.SemiBold;
-                    text.Margin = new Thickness(0, 0, 0, 8 * scale);
+                var title = learning[i] as TextBox;
+                if (title != null) {
+                    title.FontSize = Math.Max(13, 15 * scale);
+                    title.Margin = new Thickness(0, 0, 0, 8 * scale);
                     continue;
                 }
                 var reading = learning[i] as RichTextBox;
                 if (reading == null) continue;
-                ApplyReadingTypography(reading, Math.Max(13, 16 * scale), 26 * scale);
+                ApplyReadingTypography(reading, Math.Max(12, 16 * scale), 25 * scale);
                 reading.Margin = new Thickness(0, 0, 0, 24 * scale);
             }
             var chat = Ui.Get<StackPanel>(Popup, "ChatMessages").Children;
@@ -542,7 +603,7 @@ namespace Leaf
         {
             var box = Ui.Get<RichTextBox>(Popup, "TranslationText");
             box.Document.Blocks.Clear();
-            var block = new Paragraph { Margin = new Thickness(0), LineHeight = 30 * TypographyScale(Popup.Width, Popup.Height) };
+            var block = new Paragraph { Margin = new Thickness(0), LineHeight = 27 * TypographyScale(Popup.Width, Popup.Height) };
             box.Document.Blocks.Add(block);
             string translation = Current == null ? "" : Current.Translation;
             if (string.IsNullOrWhiteSpace(translation)) { block.Inlines.Add(new Run(Current != null ? "正在翻译…" : "译文会显示在这里。")); return; }
@@ -700,7 +761,7 @@ namespace Leaf
             // History keeps its language/learning context, while new calls use the current saved API.
             var provider = Json.Copy(Store.Settings.Provider);
             string cardKey = demo ? word.Key : CacheKeys.ForWord(record, word, provider);
-            Ui.Get<TextBlock>(Popup, "WordTitle").Text = word.Text;
+            Ui.Get<TextBox>(Popup, "WordTitle").Text = word.Text;
             SetReadingText(Ui.Get<RichTextBox>(Popup, "WordMeaning"), "正在查词…");
             SetReadingText(Ui.Get<RichTextBox>(Popup, "WordMeta"), "");
             Ui.Get<StackPanel>(Popup, "LearningSections").Children.Clear();
@@ -750,7 +811,7 @@ namespace Leaf
             }.Where(x => !string.IsNullOrWhiteSpace(x))));
             var panel = Ui.Get<StackPanel>(Popup, "LearningSections"); panel.Children.Clear();
             foreach (var section in card.sections) {
-                panel.Children.Add(new TextBlock { Text = section.title, FontSize = 16, FontWeight = FontWeights.SemiBold, Foreground = Ui.Brush("Ink"), Margin = new Thickness(0, 0, 0, 8) });
+                panel.Children.Add(NewLearningTitle(section.title));
                 var content = NewReadingBox();
                 SetReadingText(content, section.content);
                 panel.Children.Add(content);
@@ -849,7 +910,7 @@ namespace Leaf
             var word = TextTools.Pieces(Current.Source).First(p => p.Text == "prowess");
             Current.Cards[word.Key] = DemoCard("prowess");
             DisplayRecord(); selectedWord = word; selectedCard = Current.Cards[word.Key];
-            Ui.Get<TextBlock>(Popup, "WordTitle").Text = word.Text;
+            Ui.Get<TextBox>(Popup, "WordTitle").Text = word.Text;
             Ui.Visible(Ui.Get<Border>(Popup, "WordPanel"), true); DrawCard(selectedCard);
         }
         private static WordCard DemoCard(string word)

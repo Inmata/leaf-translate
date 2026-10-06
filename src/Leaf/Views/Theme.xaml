@@ -10,7 +10,7 @@
   <Geometry x:Key="ChatOutline">M4,4 L20,4 L20,16 L10,16 L5,20 L5,16 L4,16 Z</Geometry>
   <Geometry x:Key="FoldChevron">M5,15 L12,8 L19,15</Geometry>
   <Style TargetType="Window">
-    <Setter Property="FontFamily" Value="Segoe UI, Microsoft YaHei UI"/>
+    <Setter Property="FontFamily" Value="Microsoft YaHei UI, Segoe UI"/>
     <Setter Property="Foreground" Value="{StaticResource Ink}"/>
     <Setter Property="FontSize" Value="14"/>
     <Setter Property="Background" Value="White"/>
@@ -61,7 +61,7 @@
     <Setter Property="Background" Value="Transparent"/>
     <Setter Property="Foreground" Value="{StaticResource Secondary}"/>
     <Setter Property="Padding" Value="8,6"/>
-    <Setter Property="FontSize" Value="12"/>
+    <Setter Property="FontSize" Value="13"/>
     <Style.Triggers>
       <Trigger Property="IsMouseOver" Value="True"><Setter Property="Background" Value="{StaticResource Soft}"/></Trigger>
     </Style.Triggers>
@@ -127,7 +127,7 @@
     <Setter Property="Background" Value="White"/>
     <Setter Property="BorderBrush" Value="{StaticResource Line}"/>
     <Setter Property="BorderThickness" Value="1"/>
-    <Setter Property="FontSize" Value="15"/>
+    <Setter Property="FontSize" Value="14"/>
     <Setter Property="MinHeight" Value="44"/>
     <Setter Property="Padding" Value="12,8"/>
     <Setter Property="VerticalContentAlignment" Value="Center"/>
@@ -156,7 +156,7 @@
   </Style>
   <Style TargetType="PasswordBox">
     <Setter Property="Background" Value="White"/><Setter Property="BorderBrush" Value="{StaticResource Line}"/>
-    <Setter Property="FontSize" Value="15"/>
+    <Setter Property="FontSize" Value="14"/>
     <Setter Property="MinHeight" Value="44"/>
     <Setter Property="Padding" Value="12,8"/><Setter Property="VerticalContentAlignment" Value="Center"/>
     <Setter Property="PasswordChar" Value="●"/>
@@ -195,7 +195,7 @@
   </Style>
   <Style TargetType="ComboBox">
     <Setter Property="Background" Value="White"/><Setter Property="BorderBrush" Value="{StaticResource Line}"/>
-    <Setter Property="FontSize" Value="15"/><Setter Property="MinHeight" Value="44"/>
+    <Setter Property="FontSize" Value="14"/><Setter Property="MinHeight" Value="44"/>
     <Setter Property="Template">
       <Setter.Value>
         <ControlTemplate TargetType="ComboBox">
