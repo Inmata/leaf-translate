@@ -601,6 +601,15 @@ namespace Leaf
             // and with it the translation and the learning card under it - stays where it was.
             Ui.Get<Border>(Popup, "SourcePanel").Padding = new Thickness(0, 14 + 10 * compact, 0, 0);
             Ui.Get<ScrollViewer>(Popup, "BodyScroll").Margin = new Thickness(0, 10 + 4 * compact, 0, 0);
+            // The follow-up entry's footing is reading-page paper too, so it follows the
+            // window down like every other inset: its full 36/16 at the full window and 16/8
+            // at the 84% floor. This row is the last one that can give, and what it gives
+            // back goes to the body above it - the page's only scrolling region. At the floor
+            // the source panel, the entry and the input together take 280 of the reading
+            // page's 292 dips on their own, so an expanded follow-up under the full footing
+            // leaves the body about one dip to scroll in, and the next environment's slightly
+            // taller text takes even that.
+            Ui.Get<Grid>(Popup, "AskRow").Margin = new Thickness(0, 16 + 20 * compact, 0, 8 + 8 * compact);
             var input = Ui.Get<TextBox>(Popup, "QuestionInput"); input.FontSize = Math.Max(12, 14 * scale); input.Height = 66 * scale;
             AlignReadingColumn();
         }

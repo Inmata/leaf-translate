@@ -222,8 +222,11 @@
           <!-- The follow-up entry is the reading page's own footer: the learning body ends
                further above it (the row's top margin) and it keeps more paper under itself
                (the row's bottom margin) than it did. Both margins belong to this row alone, so
-               the settings page keeps its own spacing. -->
-          <Grid Grid.Row="2" Margin="0,36,0,16">
+               the settings page keeps its own spacing. They are the paper the entry sits on,
+               not fixed furniture, so a shrinking window trims them like its other insets
+               (see UpdatePopupTypography): the body above is the page's only scrolling region
+               and it is what gets that paper back. -->
+          <Grid x:Name="AskRow" Grid.Row="2" Margin="0,36,0,16">
             <!-- The button's content starts at its own left padding, so it is inset by exactly
                  that padding to put its icon's visible left edge - and nothing else - on the
                  shared reading column; the reading column measurement corrects that figure if
