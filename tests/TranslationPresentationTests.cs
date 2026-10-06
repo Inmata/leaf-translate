@@ -63,8 +63,30 @@ public static class TranslationPresentationTests
 
         Check(TranslationPresentation.Parse("no markers").Count == 1 && !TranslationPresentation.Parse("no markers")[0].Bold, "Plain raw maps to one identical plain span");
 
-        var spans = Parsed("中**粗**体 `c\\*d` 尾\\*", "中粗体 `c*d` 尾*");
-        Check(spans.Count == 3 && spans[0].Text == "中" && spans[1].Bold && spans[1].Text == "粗" && spans[2].Text == "体 `c*d` 尾*", "Mixed bold, code and escapes segment correctly");
+        // The backslash inside the code span is literal content, not an escape.
+        var spans = Parsed("中**粗**体 `c\\*d` 尾\\*", "中粗体 `c\\*d` 尾*");
+        Check(spans.Count == 3 && spans[0].Text == "中" && spans[1].Bold && spans[1].Text == "粗" && spans[2].Text == "体 `c\\*d` 尾*", "Mixed bold, code and escapes segment correctly");
+
+        var codeInBold = Parsed("**before `**literal**` after**", "before `**literal**` after");
+        Check(codeInBold.Count == 1 && codeInBold[0].Bold && codeInBold[0].Text == "before `**literal**` after", "The closing search skips code spans so inner markers stay literal");
+
+        var codeEscapes = Parsed("`c\\*d`", "`c\\*d`");
+        Check(codeEscapes.Count == 1 && !codeEscapes[0].Bold && codeEscapes[0].Text == "`c\\*d`", "Code spans keep backslashes and stars verbatim");
+
+        var boldWithCode = Parsed("**a `b\\*c` d**", "a `b\\*c` d");
+        Check(boldWithCode.Count == 1 && boldWithCode[0].Bold && boldWithCode[0].Text == "a `b\\*c` d", "Bold text keeps embedded code spans verbatim");
+
+        var strayBacktick = Parsed("tmp `x **bold**", "tmp `x bold");
+        Check(strayBacktick.Count == 2 && !strayBacktick[0].Bold && strayBacktick[0].Text == "tmp `x " && strayBacktick[1].Bold && strayBacktick[1].Text == "bold", "An unpaired backtick never hides a later valid marker");
+
+        var pairedCodeWithBold = Parsed("a `x **y** z` b", "a `x **y** z` b");
+        Check(pairedCodeWithBold.Count == 1 && !pairedCodeWithBold[0].Bold, "A paired code span keeps inner bold markers literal");
+
+        var emoji = Parsed("👍 **要点** 🫶🏼", "👍 要点 🫶🏼");
+        Check(emoji.Count == 3 && !emoji[0].Bold && emoji[1].Bold && emoji[1].Text == "要点" && !emoji[2].Bold, "Emoji surrogate pairs survive around bold spans");
+
+        var combining = Parsed("cafe\u0301 **粗** ba\u0300r", "cafe\u0301 粗 ba\u0300r");
+        Check(combining.Count == 3 && combining[1].Bold && combining[1].Text == "粗" && combining[2].Text == " ba\u0300r", "Combining marks stay attached to their base letters");
 
         return assertions;
     }

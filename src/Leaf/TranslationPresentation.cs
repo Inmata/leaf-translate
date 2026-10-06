@@ -12,8 +12,11 @@ namespace Leaf
     }
 
     // Pure presentation formatter for model answers: the only supported emphasis is the
-    // writer's **paired** marker. Escaped markers, code spans and unmatched markers keep
-    // their original characters, so raw answers, history and LLM context stay untouched.
+    // writer's **paired** marker. Escaped markers and unmatched markers keep their original
+    // characters. A code span is a paired `...` run copied verbatim — escapes and **
+    // markers inside stay literal — and an unpaired backtick stays literal so it never
+    // hides a later valid marker. Copy text is the concatenation of span texts, so raw
+    // answers, history and LLM context stay untouched.
     public static class TranslationPresentation
     {
         public static IReadOnlyList<TranslationSpan> Parse(string raw)
@@ -22,7 +25,6 @@ namespace Leaf
             if (string.IsNullOrEmpty(raw)) return spans;
             var plain = new StringBuilder();
             int i = 0;
-            bool inCode = false;
             while (i < raw.Length)
             {
                 char c = raw[i];
@@ -32,10 +34,16 @@ namespace Leaf
                 }
                 if (c == '`')
                 {
-                    inCode = !inCode;
+                    // A paired backtick run is one code span consumed verbatim, so escape
+                    // handling never sees its interior. Unpaired backticks stay literal.
+                    int close = FindCodeClose(raw, i + 1);
+                    if (close >= 0)
+                    {
+                        plain.Append(raw, i, close - i + 1); i = close + 1; continue;
+                    }
                     plain.Append('`'); i++; continue;
                 }
-                if (!inCode && c == '*' && i + 1 < raw.Length && raw[i + 1] == '*')
+                if (c == '*' && i + 1 < raw.Length && raw[i + 1] == '*')
                 {
                     int end = FindClosing(raw, i + 2);
                     if (end >= 0 && end > i + 2)
@@ -59,9 +67,23 @@ namespace Leaf
             while (j < raw.Length)
             {
                 if (raw[j] == '\\' && j + 1 < raw.Length && (raw[j + 1] == '*' || raw[j + 1] == '\\')) { j += 2; continue; }
+                if (raw[j] == '`')
+                {
+                    // Skip the whole paired code span so its ** never reads as a closing
+                    // marker; an unpaired backtick just continues the search.
+                    int close = FindCodeClose(raw, j + 1);
+                    if (close >= 0) { j = close + 1; continue; }
+                }
                 if (raw[j] == '*' && j + 1 < raw.Length && raw[j + 1] == '*') return j;
                 j++;
             }
+            return -1;
+        }
+
+        // A code span closes at the next backtick; -1 means the backtick is unpaired.
+        private static int FindCodeClose(string raw, int start)
+        {
+            for (int j = start; j < raw.Length; j++) if (raw[j] == '`') return j;
             return -1;
         }
 
@@ -71,6 +93,15 @@ namespace Leaf
             while (j < end)
             {
                 if (raw[j] == '\\' && j + 1 < end && (raw[j + 1] == '*' || raw[j + 1] == '\\')) { target.Append(raw[j + 1]); j += 2; continue; }
+                if (raw[j] == '`')
+                {
+                    // Keep embedded code spans verbatim, matching FindClosing's skips.
+                    int close = FindCodeClose(raw, j + 1);
+                    if (close >= 0 && close < end)
+                    {
+                        target.Append(raw, j, close - j + 1); j = close + 1; continue;
+                    }
+                }
                 target.Append(raw[j]); j++;
             }
         }
