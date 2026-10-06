@@ -70,7 +70,7 @@
           <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
             <!-- The source badge is the reading page's auxiliary tier, so it stays at the
                  label size that never shrinks with the window. -->
-            <TextBlock x:Name="SourceBadge" Text="剪贴板" FontSize="14" Foreground="{StaticResource Secondary}"/>
+            <TextBlock x:Name="SourceBadge" Text="剪贴板" FontSize="14" Foreground="{StaticResource Secondary}" Margin="-4,0,0,0"/>
           </StackPanel>
           <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
             <Button x:Name="SettingsButton" Style="{StaticResource PaperTopButton}" ToolTip="设置" AutomationProperties.Name="设置">
@@ -80,14 +80,14 @@
                       StrokeEndLineCap="Round" StrokeLineJoin="Round"/>
               </Viewbox>
             </Button>
-            <Button x:Name="PinButton" Style="{StaticResource PaperTopButton}" Margin="4,0,0,0" ToolTip="置顶并保持显示" AutomationProperties.Name="置顶或取消置顶">
+            <Button x:Name="PinButton" Style="{StaticResource PaperTopButton}" Margin="8,0,0,0" ToolTip="置顶并保持显示" AutomationProperties.Name="置顶或取消置顶">
               <Viewbox Width="15" Height="15">
                 <Path Data="{StaticResource PinIcon}" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}"
                       StrokeThickness="1.5" StrokeStartLineCap="Round"
                       StrokeEndLineCap="Round" StrokeLineJoin="Round"/>
               </Viewbox>
             </Button>
-            <Button x:Name="HideButton" Style="{StaticResource PaperTopButton}" Margin="4,0,0,0" ToolTip="收起" AutomationProperties.Name="收起浮窗">
+            <Button x:Name="HideButton" Style="{StaticResource PaperTopButton}" Margin="8,0,0,0" ToolTip="收起" AutomationProperties.Name="收起浮窗">
               <Viewbox Width="15" Height="15">
                 <Path Data="{StaticResource HideIcon}" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}"
                       StrokeThickness="1.5" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
@@ -100,14 +100,14 @@
           <!-- The label and the original sit four dips lower than the translation and the
                card rule below them without moving those: only this panel's own padding moves,
                so its total height - and everything under it - stays exactly where it was. -->
-          <Border x:Name="SourcePanel" Padding="0,16,0,8">
+          <Border x:Name="SourcePanel" Padding="0,24,0,0">
             <StackPanel>
-              <Grid Margin="0,0,0,7">
+              <Grid Margin="0,0,0,12">
                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
                   <TextBlock Text="原文" Foreground="{StaticResource Muted}" FontSize="14" VerticalAlignment="Center"/>
                   <Button x:Name="BackToPreviousButton" Content="返回上一会话" Style="{StaticResource GhostButton}" FontSize="13" Padding="7,3" Margin="9,0,0,0" Visibility="Collapsed" ToolTip="回到上一次翻译的内容与词卡" AutomationProperties.Name="返回上一会话"/>
                 </StackPanel>
-                <Button x:Name="EditSourceButton" Content="&#xE70F;" Style="{StaticResource IconButton}" HorizontalAlignment="Right" Height="24" Width="24" ToolTip="编辑原文" AutomationProperties.Name="编辑原文"/>
+                <Button x:Name="EditSourceButton" Content="&#xE70F;" Style="{StaticResource IconButton}" HorizontalAlignment="Right" Height="24" Width="24" ToolTip="编辑原文" AutomationProperties.Name="编辑原文" FontSize="18"/>
               </Grid>
               <!-- The highlight is one background layer in the same cell, under the
                    transparent reading box: bands render behind the glyphs and are clipped
@@ -146,9 +146,9 @@
               </Grid>
             </StackPanel>
           </Border>
-          <ScrollViewer x:Name="BodyScroll" Style="{StaticResource SlimScrollViewer}" Grid.Row="1" VerticalScrollBarVisibility="Auto" Margin="0,24,0,0">
+          <ScrollViewer x:Name="BodyScroll" Style="{StaticResource SlimScrollViewer}" Grid.Row="1" VerticalScrollBarVisibility="Auto" Margin="0,14,0,0">
             <StackPanel>
-              <TextBlock x:Name="TranslationCaption" Text="译文" Style="{StaticResource Caption}" FontSize="14"/>
+              <TextBlock x:Name="TranslationCaption" Text="译文" Style="{StaticResource Caption}" FontSize="14" Margin="0,0,0,15" />
               <RichTextBox x:Name="TranslationText" Style="{StaticResource ReadingText}" FontSize="19" Margin="0,0,8,16">
                 <FlowDocument PagePadding="0" FontFamily="{StaticResource PaperFontFamily}" FontSize="19"/>
               </RichTextBox>
@@ -170,7 +170,7 @@
                 </StackPanel>
               </Border>
               <Button x:Name="ExpandWordButton" Content="展开学习" HorizontalAlignment="Left" Style="{StaticResource GhostButton}" Visibility="Collapsed"/>
-              <Border x:Name="WordPanel" Visibility="Collapsed" BorderBrush="{StaticResource Line}" BorderThickness="0,1,0,0" Padding="0,24,0,0" Margin="0,24,0,0">
+              <Border x:Name="WordPanel" Visibility="Collapsed" BorderBrush="{StaticResource Line}" BorderThickness="0,1,0,0" Padding="0,24,0,0" Margin="0,17,0,0">
                 <!-- The collapse action floats over the card's own top-right corner instead of
                      taking a line of its own above it, so the entry shares its row. It stays a
                      sibling of the document and never becomes part of it: only the card's first
@@ -186,7 +186,8 @@
                   <!-- The collapse entry shares the entry's first line at one step up from the
                        auxiliary 13 dip tier: the card's own first paragraph reserves the wider
                        WordCardActionColumn for it, so the larger label still cannot cover text. -->
-                  <Button x:Name="BackToSentence" Content="收起释义" Style="{StaticResource GhostButton}" FontSize="14" HorizontalAlignment="Right" VerticalAlignment="Top"/>
+                  <Button x:Name="BackToSentence" Content="收起释义" Style="{StaticResource GhostButton}" FontSize="14" HorizontalAlignment="Right" VerticalAlignment="Top"
+                    Margin="0,-4,0,0"/>
                 </Grid>
               </Border>
               <Border x:Name="ChatPanel" Visibility="Collapsed" BorderBrush="{StaticResource Line}" BorderThickness="0,1,0,0" Padding="0,17,0,4" Margin="0,17,0,0">
@@ -198,7 +199,7 @@
                further above it (the row's top margin) and it keeps more paper under itself
                (the row's bottom margin) than it did. Both margins belong to this row alone, so
                the settings page keeps its own spacing. -->
-          <Grid Grid.Row="2" Margin="0,24,0,8">
+          <Grid Grid.Row="2" Margin="0,36,0,16">
             <Button x:Name="AskButton" Style="{StaticResource GhostButton}" HorizontalAlignment="Left" FontSize="16" Foreground="{StaticResource Ink}" Padding="8,7" Margin="-8,0,0,0" ToolTip="追问这段原文或当前词" AutomationProperties.Name="追问">
               <StackPanel Orientation="Horizontal">
                 <Viewbox Width="20" Height="20" Margin="0,0,9,0" VerticalAlignment="Center">

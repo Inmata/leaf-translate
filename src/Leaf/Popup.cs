@@ -455,8 +455,8 @@ namespace Leaf
             // restored session cannot show one word's meaning under another word's heading.
             string entry = selectedWord == null ? null : selectedWord.Text;
             if (!string.IsNullOrEmpty(entry))
-                document.Blocks.Add(CardParagraph(entry, Math.Max(14, 20 * scale), FontWeights.Normal,
-                    Ui.Brush("Ink"), CardMargin(new Thickness(0, 0, 0, 10 * scale), ref columnTaken), 0));
+                document.Blocks.Add(CardParagraph(entry, Math.Max(14, 22 * scale), FontWeights.Bold,
+                    Ui.Brush("Ink"), CardMargin(new Thickness(0, 0, 0, 16 * scale), ref columnTaken), 0));
             string meaning = selectedCard != null ? selectedCard.meaning : wordCardNotice;
             if (!string.IsNullOrWhiteSpace(meaning))
                 document.Blocks.Add(CardParagraph(meaning, Math.Max(13, 16 * scale), FontWeights.Normal,
@@ -569,10 +569,10 @@ namespace Leaf
             // source badge - that never shrinks; only reading text follows the window's own
             // 84% floor.
             var source = Ui.Get<TextBox>(Popup, "SourceText");
-            source.FontSize = Math.Max(13, 18 * scale);
+            source.FontSize = Math.Max(13, 19 * scale);
             source.MaxHeight = 100 * scale;
             var translation = Ui.Get<RichTextBox>(Popup, "TranslationText");
-            translation.FontSize = translation.Document.FontSize = Math.Max(14, 19 * scale);
+            translation.FontSize = translation.Document.FontSize = Math.Max(14, 22 * scale);
             foreach (var paragraph in translation.Document.Blocks.OfType<Paragraph>()) paragraph.LineHeight = 27 * scale;
             var editor = Ui.Get<TextBox>(Popup, "SourceInput");
             editor.FontSize = Math.Max(13, 18 * scale);
@@ -596,12 +596,12 @@ namespace Leaf
                 }
             }
             double compact = (scale - 0.84) / 0.16;
-            Ui.Get<Grid>(Popup, "PopupContent").Margin = new Thickness(18 + 8 * compact, 12, 18 + 8 * compact, 16 + 8 * compact);
+            Ui.Get<Grid>(Popup, "PopupContent").Margin = new Thickness(22 + 8 * compact, 16, 22 + 8 * compact, 20 + 8 * compact);
             // The label and the original start four dips lower than they used to - the same
             // four dips come off the panel's bottom - so the panel's own height, and with it
             // the translation and the learning card under it, keep their exact position.
-            Ui.Get<Border>(Popup, "SourcePanel").Padding = new Thickness(0, 12 + 4 * compact, 0, 2 + 6 * compact);
-            Ui.Get<ScrollViewer>(Popup, "BodyScroll").Margin = new Thickness(0, 20 + 4 * compact, 0, 0);
+            Ui.Get<Border>(Popup, "SourcePanel").Padding = new Thickness(0, 20 + 4 * compact, 0, -6 + 6 * compact);
+            Ui.Get<ScrollViewer>(Popup, "BodyScroll").Margin = new Thickness(0, 10 + 4 * compact, 0, 0);
             var input = Ui.Get<TextBox>(Popup, "QuestionInput"); input.FontSize = Math.Max(12, 14 * scale); input.Height = 66 * scale;
         }
         private void SetTypography(string name, double font, double line)
