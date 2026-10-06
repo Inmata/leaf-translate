@@ -27,6 +27,10 @@ namespace Leaf
         private sealed class PreviousSessionSnapshot
         {
             public TranslationRecord Record;
+            // The epoch the record was created under: a clear, a delete or a history disable
+            // while the sub-session was on screen invalidates it, and returning must not
+            // rewrite it under the newer epoch.
+            public long HistoryEpoch;
             public TextPiece Word;
             public WordCard Card;
             public bool SourceEditorOpen;
@@ -689,6 +693,7 @@ namespace Leaf
             var sourceScroll = InnerScroll(Ui.Get<RichTextBox>(Popup, "SourceText"));
             previousSession = new PreviousSessionSnapshot {
                 Record = Current,
+                HistoryEpoch = currentHistoryEpoch,
                 Word = selectedWord,
                 Card = selectedCard,
                 SourceEditorOpen = editorOpen,
@@ -710,7 +715,9 @@ namespace Leaf
             if (snapshot == null || exiting || ReferenceEquals(Current, snapshot.Record)) return;
             CancelRequests();
             Current = snapshot.Record;
-            currentHistoryEpoch = Store.HistoryEpoch;
+            // The restored session keeps the epoch it was captured under, so a clear or a
+            // history disable during the sub-session still blocks its late save.
+            currentHistoryEpoch = snapshot.HistoryEpoch;
             DisplayRecord();
             selectedWord = snapshot.Word; selectedCard = snapshot.Card;
             if (selectedCard != null) { Ui.Visible(Ui.Get<Border>(Popup, "WordPanel"), true); DrawCard(selectedCard); }
