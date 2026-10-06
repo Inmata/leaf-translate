@@ -121,6 +121,7 @@ internal static class SelectionTests
         await CopyWorker();
         ClipboardBackups();
         await BoundedTraversal();
+        SelectionAnswers();
         return count + assertions;
     }
 
@@ -243,6 +244,40 @@ internal static class SelectionTests
             emptyResult.Steps.First(s => s.Stage == "uia").PatternSupported,
             "A completely scanned window still reports a confirmed empty selection");
 
+        // A TreeWalker call that spends the whole budget on its way to "no children" leaves
+        // nothing pending, and a truncated walk is still not a confirmed empty selection.
+        var slowChild = new ScriptedUiTree();
+        var slowRoot = slowChild.WindowRoot = new ScriptedUiNode { ControlTypeIdValue = WindowsSelectionProbe.DocumentTypeId, Selection = "", WindowHandle = 123 };
+        slowChild.Focus = slowRoot;
+        slowChild.OnChild = node => { if (node == slowRoot) Thread.Sleep(WindowsSelectionProbe.AutomationBudgetMs + 80); };
+        var slowResult = await new WindowsSelectionProbe(slowChild).ReadAutomationAsync(target, CancellationToken.None);
+        Check(slowResult.Status == CaptureStatus.Unavailable && slowResult.Reason == CaptureReason.AutomationBudget,
+            "A child enumeration that ran out of budget is inconclusive instead of a confirmed empty (was " + slowResult.Status + "/" + slowResult.Reason + ")");
+
+        // The same for the selection query itself: spending the budget inside one read leaves
+        // the walk unfinished, whatever the node answered.
+        var slowRead = new ScriptedUiTree();
+        var slowReadRoot = slowRead.WindowRoot = new ScriptedUiNode { ControlTypeIdValue = WindowsSelectionProbe.DocumentTypeId, Selection = "", WindowHandle = 123 };
+        slowRead.Focus = slowReadRoot;
+        slowRead.OnRead = node => { if (node == slowReadRoot) Thread.Sleep(WindowsSelectionProbe.AutomationBudgetMs + 80); };
+        var slowReadResult = await new WindowsSelectionProbe(slowRead).ReadAutomationAsync(target, CancellationToken.None);
+        Check(slowReadResult.Status == CaptureStatus.Unavailable && slowReadResult.Reason == CaptureReason.AutomationBudget,
+            "A selection query that overran the budget is inconclusive too (was " + slowReadResult.Status + "/" + slowReadResult.Reason + ")");
+
+        // A control that has a text pattern but cannot answer is not a confirmed empty
+        // selection, and the error code Windows reported has to survive into the stage.
+        var unreadableTree = new ScriptedUiTree();
+        var unreadableRoot = unreadableTree.WindowRoot = new ScriptedUiNode {
+            ControlTypeIdValue = WindowsSelectionProbe.DocumentTypeId, WindowHandle = 123,
+            SelectionUnreadable = true, SelectionHResult = unchecked((int)0x800401D0)
+        };
+        unreadableTree.Focus = unreadableRoot;
+        var unreadableResult = await new WindowsSelectionProbe(unreadableTree).ReadAutomationAsync(target, CancellationToken.None);
+        Check(unreadableResult.Status == CaptureStatus.Unavailable && unreadableResult.Reason == CaptureReason.AutomationUnreadable &&
+            unreadableResult.Text == "" && unreadableResult.Steps.First(s => s.Stage == "uia").HResult == unchecked((int)0x800401D0),
+            "A document whose selection query failed is unavailable with its HResult, not an empty selection (was "
+                + unreadableResult.Status + "/" + unreadableResult.Reason + ")");
+
         // Foreground metadata is a real comparison, not "some foreground window exists".
         Check(!WindowsSelectionProbe.ForegroundIs(new CaptureTarget { Window = new IntPtr(123) }),
             "A window that is not in front is never reported as the same foreground");
@@ -256,6 +291,36 @@ internal static class SelectionTests
         Check(!movedResult.Steps.First(s => s.Stage == "uia").ForegroundSame,
             "A moved foreground is reported as a different one instead of merely non-zero");
         movedTree.Foreground = true;
+    }
+
+    // The read policy behind the real UIA node, checked directly: a query that threw, a range
+    // list that never came back and a range that failed are unknown answers, while a query
+    // that really answered with nothing is a confirmed empty one.
+    private static void SelectionAnswers()
+    {
+        var failedQuery = WindowsSelectionProbe.ReadSelectionAnswer(
+            () => { throw new System.Runtime.InteropServices.COMException("fixture query failure", unchecked((int)0x800401D0)); },
+            range => "text");
+        Check(failedQuery.Text == null && failedQuery.Unreadable && failedQuery.HResult == unchecked((int)0x800401D0),
+            "A selection query that threw is unknown and keeps its HResult");
+
+        var noRanges = WindowsSelectionProbe.ReadSelectionAnswer(() => null, range => "text");
+        Check(noRanges.Text == null && noRanges.Unreadable,
+            "A selection query that returned no range list is unknown, not an empty selection");
+
+        var failedRange = WindowsSelectionProbe.ReadSelectionAnswer(
+            () => new object[] { "range" },
+            range => { throw new System.Runtime.InteropServices.COMException("fixture range failure", unchecked((int)0x8001010A)); });
+        Check(failedRange.Text == null && failedRange.Unreadable && failedRange.HResult == unchecked((int)0x8001010A),
+            "A range that cannot be read is unknown and keeps its HResult");
+
+        var answeredEmpty = WindowsSelectionProbe.ReadSelectionAnswer(() => new object[0], range => "text");
+        Check(answeredEmpty.Text == "" && !answeredEmpty.Unreadable,
+            "A query that answered with nothing is a confirmed empty selection");
+
+        var answeredText = WindowsSelectionProbe.ReadSelectionAnswer(() => new object[] { "one ", "two" }, range => (string)range);
+        Check(answeredText.Text == "one two" && !answeredText.Unreadable,
+            "The ranges that answered are joined into the selection text");
     }
 
     private static CaptureStep Step(SelectionCaptureResult result, string stage)
@@ -655,22 +720,30 @@ internal sealed class ScriptedUiTree : IUiTree
         get { return ScriptedUiNode.OnRead; }
         set { ScriptedUiNode.OnRead = value; }
     }
+    public Action<ScriptedUiNode> OnChild
+    {
+        get { return ScriptedUiNode.OnChild; }
+        set { ScriptedUiNode.OnChild = value; }
+    }
     public int TotalReads { get { return ScriptedUiNode.TotalReads; } }
     public int SiblingCalls { get { return ScriptedUiNode.SiblingCalls; } }
     public ScriptedUiTree()
     {
-        ScriptedUiNode.TotalReads = 0; ScriptedUiNode.SiblingCalls = 0; ScriptedUiNode.OnRead = null;
+        ScriptedUiNode.TotalReads = 0; ScriptedUiNode.SiblingCalls = 0;
+        ScriptedUiNode.OnRead = null; ScriptedUiNode.OnChild = null;
     }
 }
 
 internal sealed class ScriptedUiNode : IUiNode
 {
     public static int TotalReads, SiblingCalls;
-    public static Action<ScriptedUiNode> OnRead;
+    public static Action<ScriptedUiNode> OnRead, OnChild;
     public int ProcessIdValue = 456;
     public int ControlTypeIdValue = 50004;
     public long WindowHandle;
     public string Selection = "";   // null means this node exposes no usable text pattern.
+    public bool SelectionUnreadable; // true means it has a pattern but cannot answer.
+    public int SelectionHResult;
     public readonly List<ScriptedUiNode> Children = new List<ScriptedUiNode>();
     public ScriptedUiNode ParentNode;
     public int Reads;
@@ -684,14 +757,21 @@ internal sealed class ScriptedUiNode : IUiNode
     public int ProcessId { get { return ProcessIdValue; } }
     public int ControlTypeId { get { return ControlTypeIdValue; } }
     public long NativeWindowHandle { get { return WindowHandle; } }
-    public string ReadSelection()
+    public UiSelectionAnswer ReadSelection()
     {
         Reads++; TotalReads++;
         if (OnRead != null) OnRead(this);
-        return Selection;
+        if (SelectionUnreadable) return UiSelectionAnswer.Unknown(SelectionHResult);
+        return Selection == null ? UiSelectionAnswer.NoPattern : UiSelectionAnswer.Of(Selection);
     }
     public IUiNode Parent { get { return ParentNode; } }
-    public IUiNode FirstChild { get { return Children.Count == 0 ? null : Children[0]; } }
+    public IUiNode FirstChild
+    {
+        get {
+            if (OnChild != null) OnChild(this);
+            return Children.Count == 0 ? null : Children[0];
+        }
+    }
     public IUiNode NextSibling
     {
         get {

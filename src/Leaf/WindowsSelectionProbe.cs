@@ -17,12 +17,33 @@ namespace Leaf
         // 0 when the control type cannot be read, which also makes it no candidate.
         int ControlTypeId { get; }
         long NativeWindowHandle { get; }
-        // Selected text; "" when the pattern is present but nothing is selected, or null when
-        // this node exposes no usable text pattern.
-        string ReadSelection();
+        // The selected text of this node, as a typed answer: an empty answer is a real one,
+        // while a control that could not answer is unknown and never reported as empty.
+        UiSelectionAnswer ReadSelection();
         IUiNode Parent { get; }
         IUiNode FirstChild { get; }
         IUiNode NextSibling { get; }
+    }
+
+    // What one node's selection read produced. An element that exposes no text pattern, one
+    // whose query failed and one that really has nothing selected are three different answers,
+    // and only the last of them may ever conclude that nothing is selected.
+    public sealed class UiSelectionAnswer
+    {
+        private UiSelectionAnswer(string text, bool unreadable, int hResult)
+        {
+            Text = text; Unreadable = unreadable; HResult = hResult;
+        }
+        // Null unless the node answered with text or with a confirmed empty selection.
+        public string Text { get; private set; }
+        // True when a text pattern exists but did not answer, so the answer is unknown.
+        public bool Unreadable { get; private set; }
+        // The error code Windows reported for the failed call, 0 when it reported none.
+        public int HResult { get; private set; }
+        public static readonly UiSelectionAnswer Empty = new UiSelectionAnswer("", false, 0);
+        public static readonly UiSelectionAnswer NoPattern = new UiSelectionAnswer(null, false, 0);
+        public static UiSelectionAnswer Of(string text) { return new UiSelectionAnswer(text ?? "", false, 0); }
+        public static UiSelectionAnswer Unknown(int hResult) { return new UiSelectionAnswer(null, true, hResult); }
     }
 
     // The tree the probe walks. A fixture implements it so the bounded traversal itself can
@@ -41,7 +62,7 @@ namespace Leaf
         public const int MaxNodes = 128;
         public const int MaxCandidates = 32;
         // Slightly below the coordinator's budget so a bounded scan can report its own end.
-        private const int AutomationBudgetMs = 240;
+        public const int AutomationBudgetMs = 240;
         private const int AncestorDepth = 24;
         public static readonly int DocumentTypeId = ControlType.Document.Id;
         private static int automationRunning;
@@ -122,6 +143,38 @@ namespace Leaf
             return completion.Task;
         }
 
+        // The rule a selection read follows, with the two AutomationElement calls supplied by
+        // the caller so the real policy can be checked without a desktop. A query that threw,
+        // one that returned no range list at all and a range that failed are all unknown
+        // answers: only a query that really answered with nothing is a confirmed empty one.
+        public static UiSelectionAnswer ReadSelectionAnswer(Func<object[]> ranges, Func<object, string> rangeText)
+        {
+            object[] selection;
+            try { selection = ranges(); }
+            catch (Exception error) { return UiSelectionAnswer.Unknown(error.HResult); }
+            if (selection == null) return UiSelectionAnswer.Unknown(0);
+            var text = new StringBuilder();
+            foreach (object range in selection) {
+                if (range == null) continue;
+                string piece;
+                try { piece = rangeText(range); }
+                catch (Exception error) { return UiSelectionAnswer.Unknown(error.HResult); }
+                if (piece == null) return UiSelectionAnswer.Unknown(0);
+                text.Append(piece);
+                if (text.Length > 6001) break;
+            }
+            return UiSelectionAnswer.Of(text.ToString());
+        }
+
+        // The running state of one bounded scan, so the read policy records what it saw
+        // without a growing parameter list.
+        private sealed class Scan
+        {
+            public int Visited, Candidates;
+            public bool PatternSupported, TrustedEmpty, Unreadable, BudgetSpent;
+            public int EmptyType, ReadError;
+        }
+
         // Bounded to the captured window: the focused element and its ancestors first, then a
         // limited walk of the same window for a reading document. Control Name and Value are
         // never read. Every tree call can block on another application, so cancellation and
@@ -130,16 +183,16 @@ namespace Leaf
         private static SelectionCaptureResult Query(CaptureTarget target, CancellationToken cancellation, List<CaptureStep> steps, IUiTree tree)
         {
             var watch = Stopwatch.StartNew();
+            var scan = new Scan();
             IUiNode focused = null;
             try { focused = tree.Focused; } catch { }
             if (focused == null)
-                return Finish(CaptureStatus.Unavailable, CaptureReason.UnsupportedPattern, steps, watch, 0, 0, 0, false, tree, target);
+                return Finish(CaptureStatus.Unavailable, CaptureReason.UnsupportedPattern, steps, watch, scan, 0, false, tree, target);
             if (target.ProcessId != 0 && focused.ProcessId != (int)target.ProcessId)
-                return Finish(CaptureStatus.Unavailable, CaptureReason.ForegroundChanged, steps, watch, 0, 0, focused.ControlTypeId, false, tree, target);
+                return Finish(CaptureStatus.Unavailable, CaptureReason.ForegroundChanged, steps, watch, scan, focused.ControlTypeId, false, tree, target);
 
-            int visited = 0, candidates = 0;
-            bool trustedEmpty = false, budgetSpent = false, patternSupported = false;
-            int emptyType = 0, focusType = focused.ControlTypeId;
+            bool budgetSpent = false;
+            int focusType = focused.ControlTypeId;
 
             // The focused element can belong to another window of the same process, so its chain
             // is walked up to the captured window before anything on it is read: a chain that
@@ -153,7 +206,7 @@ namespace Leaf
                 if (watch.ElapsedMilliseconds > AutomationBudgetMs) { budgetSpent = true; break; }
                 // Ancestors stay inside the captured process; the walk never leaves it.
                 if (target.ProcessId != 0 && node.ProcessId != (int)target.ProcessId) break;
-                visited++;
+                scan.Visited++;
                 chain.Add(node);
                 if (IsCapturedWindow(node, target)) { associated = true; break; }
                 node = Parent(node);
@@ -162,68 +215,86 @@ namespace Leaf
                 foreach (IUiNode candidate in chain) {
                     if (Stopped(cancellation)) return Cancelled(steps);
                     if (watch.ElapsedMilliseconds > AutomationBudgetMs) { budgetSpent = true; break; }
-                    string selected = ReadCandidate(candidate, ref candidates, ref patternSupported, ref trustedEmpty, ref emptyType);
-                    if (!string.IsNullOrWhiteSpace(selected)) return Success(selected, steps, watch, candidates, candidate.ControlTypeId, tree, target);
-                    if (candidates >= MaxCandidates) { budgetSpent = true; break; }
+                    string selected = ReadCandidate(candidate, scan);
+                    if (!string.IsNullOrWhiteSpace(selected)) return Success(selected, steps, watch, scan, candidate.ControlTypeId, tree, target);
+                    if (scan.Candidates >= MaxCandidates) { budgetSpent = true; break; }
                 }
             }
 
-            bool complete = !budgetSpent && candidates < MaxCandidates;
+            bool complete = !budgetSpent && scan.Candidates < MaxCandidates;
             IUiNode root = null;
             try { root = tree.Root(target.Window); } catch { }
             if (root == null) complete = false;
-            if (root != null && complete && visited < MaxNodes) {
+            if (root != null && complete && scan.Visited < MaxNodes) {
                 var pending = new Queue<IUiNode>();
                 pending.Enqueue(root);
-                while (pending.Count > 0 && visited < MaxNodes && candidates < MaxCandidates) {
+                while (pending.Count > 0 && scan.Visited < MaxNodes && scan.Candidates < MaxCandidates) {
                     if (Stopped(cancellation)) return Cancelled(steps);
                     if (watch.ElapsedMilliseconds > AutomationBudgetMs) { budgetSpent = true; break; }
-                    IUiNode current = pending.Dequeue(); visited++;
+                    IUiNode current = pending.Dequeue(); scan.Visited++;
                     if (target.ProcessId != 0 && current.ProcessId != (int)target.ProcessId) continue;
-                    string selected = ReadCandidate(current, ref candidates, ref patternSupported, ref trustedEmpty, ref emptyType);
-                    if (!string.IsNullOrWhiteSpace(selected)) return Success(selected, steps, watch, candidates, current.ControlTypeId, tree, target);
+                    string selected = ReadCandidate(current, scan);
+                    if (!string.IsNullOrWhiteSpace(selected)) return Success(selected, steps, watch, scan, current.ControlTypeId, tree, target);
                     // Siblings are enumerated under the same limits: a TreeWalker call can block
                     // on a foreign application, so each one is preceded by its own checks.
                     IUiNode child = FirstChild(current);
                     while (child != null) {
                         if (Stopped(cancellation)) return Cancelled(steps);
                         if (watch.ElapsedMilliseconds > AutomationBudgetMs) { budgetSpent = true; break; }
-                        if (visited + pending.Count >= MaxNodes) { budgetSpent = true; break; }
+                        if (scan.Visited + pending.Count >= MaxNodes) { budgetSpent = true; break; }
                         pending.Enqueue(child);
                         child = NextSibling(child);
                     }
+                    // A child call that blocked long enough to spend the budget leaves the rest
+                    // of that window unexamined even when it handed back no child at all.
+                    if (!budgetSpent && watch.ElapsedMilliseconds > AutomationBudgetMs) budgetSpent = true;
                     if (budgetSpent) break;
                 }
                 // A scan only counts as finished when nothing was left over for any reason.
-                if (pending.Count > 0 || visited >= MaxNodes || candidates >= MaxCandidates) complete = false;
+                if (pending.Count > 0 || scan.Visited >= MaxNodes || scan.Candidates >= MaxCandidates) complete = false;
             }
+            if (Stopped(cancellation)) return Cancelled(steps);
+            // Time that ran out is an unfinished scan even when nothing was left pending: the
+            // call that spent it may have been the one that would have found the selection.
+            if (budgetSpent || watch.ElapsedMilliseconds > AutomationBudgetMs) complete = false;
+            scan.BudgetSpent = !complete && (budgetSpent || watch.ElapsedMilliseconds > AutomationBudgetMs);
 
             // Only a trusted document that finished its selection query may report "nothing
             // selected"; a truncated scan is inconclusive, never a confirmed empty selection.
-            if (trustedEmpty && complete)
-                return Finish(CaptureStatus.Empty, CaptureReason.EmptySelection, steps, watch, visited, candidates,
-                    emptyType != 0 ? emptyType : focusType, patternSupported, tree, target);
+            if (scan.TrustedEmpty && complete)
+                return Finish(CaptureStatus.Empty, CaptureReason.EmptySelection, steps, watch, scan,
+                    scan.EmptyType != 0 ? scan.EmptyType : focusType, scan.PatternSupported, tree, target);
             return Finish(CaptureStatus.Unavailable,
-                complete ? CaptureReason.UnsupportedPattern : CaptureReason.AutomationBudget, steps, watch, visited, candidates,
-                trustedEmpty && emptyType != 0 ? emptyType : focusType, patternSupported, tree, target);
+                complete ? (scan.Unreadable && !scan.PatternSupported ? CaptureReason.AutomationUnreadable : CaptureReason.UnsupportedPattern)
+                    : CaptureReason.AutomationBudget, steps, watch, scan,
+                scan.TrustedEmpty && scan.EmptyType != 0 ? scan.EmptyType : focusType, scan.PatternSupported, tree, target);
         }
 
-        // Reads one candidate. A node whose control type cannot be read is not a candidate;
-        // a Document that completed an empty query is the only node that may conclude Empty.
-        private static string ReadCandidate(IUiNode node, ref int candidates, ref bool patternSupported,
-            ref bool trustedEmpty, ref int emptyType)
+        // Reads one candidate. A node whose control type cannot be read is not a candidate; a
+        // node that could not answer is recorded as such and is never a confirmed empty one.
+        private static string ReadCandidate(IUiNode node, Scan scan)
         {
             int type = node.ControlTypeId;
             if (type == 0) return null;
-            candidates++;
-            string selected;
-            try { selected = node.ReadSelection(); } catch { return null; }
-            if (selected == null) return null; // No usable text pattern on this node.
-            patternSupported = true;
-            if (string.IsNullOrWhiteSpace(selected) && type == DocumentTypeId) {
-                trustedEmpty = true; emptyType = type;
+            scan.Candidates++;
+            UiSelectionAnswer answer;
+            try { answer = node.ReadSelection(); }
+            catch (Exception error) {
+                scan.Unreadable = true; scan.ReadError = error.HResult; return null;
             }
-            return selected;
+            if (answer == null) { scan.Unreadable = true; return null; }
+            if (answer.Text == null) {
+                // A control with no text pattern at all is a capability answer; one that has a
+                // pattern but did not answer is unknown, and neither may conclude Empty.
+                scan.Unreadable = true;
+                if (answer.HResult != 0) scan.ReadError = answer.HResult;
+                return null;
+            }
+            scan.PatternSupported = true;
+            if (string.IsNullOrWhiteSpace(answer.Text) && type == DocumentTypeId) {
+                scan.TrustedEmpty = true; scan.EmptyType = type;
+            }
+            return answer.Text;
         }
 
         private static bool IsCapturedWindow(IUiNode node, CaptureTarget target)
@@ -248,20 +319,22 @@ namespace Leaf
             try { return node.NextSibling; } catch { return null; }
         }
         private static SelectionCaptureResult Success(string text, List<CaptureStep> steps, Stopwatch watch,
-            int candidates, int controlTypeId, IUiTree tree, CaptureTarget target)
+            Scan scan, int controlTypeId, IUiTree tree, CaptureTarget target)
         {
-            steps.Add(new CaptureStep { Stage = "uia", Reason = CaptureReason.None, CandidateCount = candidates,
+            steps.Add(new CaptureStep { Stage = "uia", Reason = CaptureReason.None, CandidateCount = scan.Candidates,
                 ControlTypeId = controlTypeId, PatternSupported = true, ForegroundSame = Same(tree, target),
                 ElapsedMs = watch.ElapsedMilliseconds });
             return SelectionCaptureResult.Create(CaptureStatus.Text, CaptureReason.None,
                 text.Length > 6001 ? text.Substring(0, 6001) : text, steps);
         }
         private static SelectionCaptureResult Finish(CaptureStatus status, CaptureReason reason, List<CaptureStep> steps,
-            Stopwatch watch, int visited, int candidates, int controlTypeId, bool patternSupported,
+            Stopwatch watch, Scan scan, int controlTypeId, bool patternSupported,
             IUiTree tree, CaptureTarget target)
         {
-            steps.Add(new CaptureStep { Stage = "uia", Reason = reason, CandidateCount = candidates,
+            steps.Add(new CaptureStep { Stage = "uia", Reason = reason, CandidateCount = scan.Candidates,
                 ControlTypeId = controlTypeId, PatternSupported = patternSupported,
+                // An unreadable query reports the code Windows gave it instead of losing it.
+                HResult = scan.ReadError,
                 ForegroundSame = Same(tree, target), ElapsedMs = watch.ElapsedMilliseconds });
             return SelectionCaptureResult.Create(status, reason, "", steps);
         }
@@ -320,23 +393,17 @@ namespace Leaf
         public IUiNode Parent { get { return Wrap(TreeWalker.ControlViewWalker.GetParent(element)); } }
         public IUiNode FirstChild { get { return Wrap(TreeWalker.ControlViewWalker.GetFirstChild(element)); } }
         public IUiNode NextSibling { get { return Wrap(TreeWalker.ControlViewWalker.GetNextSibling(element)); } }
-        // Control Name and Value are never read, and no whole document is fetched.
-        public string ReadSelection()
+        // Control Name and Value are never read, and no whole document is fetched. A pattern
+        // that cannot answer is reported as unknown instead of as an empty selection.
+        public UiSelectionAnswer ReadSelection()
         {
             object pattern;
-            try { if (!element.TryGetCurrentPattern(TextPattern.Pattern, out pattern)) return null; }
-            catch { return null; }
-            try {
-                var ranges = ((TextPattern)pattern).GetSelection();
-                if (ranges == null) return "";
-                var text = new StringBuilder();
-                foreach (TextPatternRange range in ranges) {
-                    if (range == null) continue;
-                    text.Append(range.GetText(6001));
-                    if (text.Length > 6001) break;
-                }
-                return text.ToString();
-            } catch { return ""; }
+            try { if (!element.TryGetCurrentPattern(TextPattern.Pattern, out pattern)) return UiSelectionAnswer.NoPattern; }
+            catch (Exception error) { return UiSelectionAnswer.Unknown(error.HResult); }
+            var text = (TextPattern)pattern;
+            return WindowsSelectionProbe.ReadSelectionAnswer(
+                () => text.GetSelection(),
+                range => ((TextPatternRange)range).GetText(6001));
         }
         private static IUiNode Wrap(AutomationElement element)
         {

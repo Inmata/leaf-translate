@@ -14,7 +14,7 @@ namespace Leaf
     public enum CaptureReason
     {
         None, Desktop, EmptySelection, UnsupportedPattern, AutomationTimeout,
-        AutomationBusy, AutomationBudget, ForegroundChanged, ModifiersHeld, CopyNoUpdate,
+        AutomationBusy, AutomationBudget, AutomationUnreadable, ForegroundChanged, ModifiersHeld, CopyNoUpdate,
         ClipboardOriginUnknown,
         ClipboardBusy, CaptureBusy, InputDenied, SystemFailure, Cancelled
     }
