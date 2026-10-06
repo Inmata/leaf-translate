@@ -324,6 +324,8 @@ namespace Leaf
             if (!string.IsNullOrEmpty(unassignedKey)) { pendingKeys[active.Id] = unassignedKey; unassignedKey = ""; }
             Ui.Get<PasswordBox>(scope, "ApiKeyInput").Password = pendingKeys.TryGetValue(active.Id, out pending) ? pending : "";
             Ui.Get<Expander>(scope, "EndpointExpander").IsExpanded = active.Id == "custom";
+            // A custom service needs its address field reachable: open the advanced group too.
+            if (active.Id == "custom") Ui.Get<Expander>(scope, "AdvancedExpander").IsExpanded = true;
             fillingProvider = false; KeyHint(); ThinkingFields(); ScheduleModels();
             if (!loading) {
                 serviceRevision++;
@@ -373,20 +375,24 @@ namespace Leaf
             var placeholder = Ui.Get<TextBlock>(scope, "KeyPlaceholder");
             bool saved = active != null && !deletedKeys.Contains(active.Id) && shell.NativeEnabled &&
                 original.Providers.Any(p => p.Id == active.Id && p.BaseUrl.TrimEnd('/') == Ui.Get<TextBox>(scope, "EndpointInput").Text.TrimEnd('/')) && shell.ReadCredential(active).Length > 0;
-            placeholder.Text = saved ? "● ● ● ● ● ● ● ●" : "输入此服务的 API Key…";
-            placeholder.Foreground = Ui.Brush(saved ? "Ink" : "Muted");
-            placeholder.FontSize = saved ? 11 : 13;
-            Ui.Visible(placeholder, input.Password.Length == 0 && !input.IsKeyboardFocused);
+            // The saved key is shown as eight fixed dots - a placeholder, never the real
+            // key's length. Focusing or typing hides it; the genuine caret takes over.
+            bool empty = input.Password.Length == 0;
+            bool dots = saved && empty && !input.IsKeyboardFocused;
+            Ui.Visible(Ui.Get<StackPanel>(scope, "KeyDots"), dots);
+            Ui.Visible(placeholder, empty && !dots && !input.IsKeyboardFocused);
             if (active == null) {
                 Ui.Get<TextBlock>(scope, "KeyHint").Text = "先选择服务，密钥与模型随服务一起切换。"; return;
             }
             string url = Ui.Get<TextBox>(scope, "EndpointInput").Text.TrimEnd('/');
             var previous = original.Providers.FirstOrDefault(p => p.Id == active.Id);
-            string hint = input.Password.Length > 0 ? "密钥已填写，点击「应用服务配置」生效。" :
-                previous == null || url != previous.BaseUrl.TrimEnd('/') ?
-                "接口地址已变化，请重新填写密钥。" :
-                deletedKeys.Contains(active.Id) ? "应用服务配置后删除已存密钥。" :
-                saved ? "已保存密钥 · 输入可更换，留空继续使用。" : "保存在 Windows 凭据管理器。";
+            string hint;
+            if (!empty) hint = "已填写，待「应用服务配置」生效。";
+            else if (input.IsKeyboardFocused) hint = saved ? "留空保留已保存密钥。" : "输入此服务的 API Key。";
+            else if (previous == null || url != previous.BaseUrl.TrimEnd('/')) hint = "接口地址已变化，请重新填写密钥。";
+            else if (deletedKeys.Contains(active.Id)) hint = "应用服务配置后删除已存密钥。";
+            else if (saved) hint = "密钥已保存。";
+            else hint = "保存在 Windows 凭据管理器。";
             Ui.Get<TextBlock>(scope, "KeyHint").Text = hint;
             System.Windows.Automation.AutomationProperties.SetHelpText(input, hint);
         }
@@ -463,7 +469,7 @@ namespace Leaf
             var combo = Ui.Get<ComboBox>(scope, "PresetCombo");
             bool selected = combo.SelectedItem as LearningPreset != null;
             var placeholder = Ui.Get<TextBlock>(scope, "PresetPlaceholder");
-            placeholder.Text = draft.Presets.Count == 0 ? "暂无偏好预设" : "未选择";
+            placeholder.Text = draft.Presets.Count == 0 ? "暂无偏好预设" : "未选择预设";
             Ui.Visible(placeholder, !selected);
             combo.IsEnabled = draft.Presets.Count > 0;
             Ui.Get<Button>(scope, "LoadPreset").IsEnabled = selected;
@@ -625,7 +631,12 @@ namespace Leaf
             } catch (OperationCanceledException) { }
             catch (Exception error) {
                 shell.Log.Event("model_discovery_failed", error);
-                if (!closed && providerGeneration.IsCurrent(version)) ModelStatus(error is UserError ? error.Message : "获取失败，可直接填写模型 ID。", true);
+                if (!closed && providerGeneration.IsCurrent(version)) {
+                    ModelStatus(error is UserError ? error.Message : "获取失败，可直接填写模型 ID。", true);
+                    // The model row lives in the collapsed advanced group; the page keeps one
+                    // short visible status so a discovery failure is never silently swallowed.
+                    Status("模型列表获取失败，可直接填写模型 ID。", true);
+                }
             } finally {
                 if (modelCancellation == cancellation) modelCancellation = null;
                 if (!closed && providerGeneration.IsCurrent(version)) Ui.Get<Button>(scope, "FetchModels").IsEnabled = true;

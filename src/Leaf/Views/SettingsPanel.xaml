@@ -2,29 +2,45 @@
   <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
   <ScrollViewer Style="{StaticResource SlimScrollViewer}" VerticalScrollBarVisibility="Auto" Padding="0,0,10,0">
     <StackPanel>
-      <StackPanel Margin="0,0,0,16"><TextBlock Text="API 服务" Style="{StaticResource Caption}"/>
-          <Grid><ComboBox x:Name="ProviderCombo" DisplayMemberPath="Name"/>
-            <TextBlock x:Name="ProviderPlaceholder" Text="选择服务…" IsHitTestVisible="False" Margin="12,0,25,0" FontSize="12" VerticalAlignment="Center" Foreground="{StaticResource Muted}" Visibility="Collapsed"/>
-          </Grid>
-        </StackPanel>
-      <TextBlock Text="API Key" Style="{StaticResource Caption}"/>
-      <Grid>
-        <PasswordBox x:Name="ApiKeyInput" MaxLength="1000" Height="40" AutomationProperties.Name="API Key"/>
-        <TextBlock x:Name="KeyPlaceholder" Text="输入此服务的 API Key…" IsHitTestVisible="False" Foreground="{StaticResource Muted}" FontSize="13" VerticalAlignment="Center" Margin="12,0"/>
-      </Grid>
-      <TextBlock x:Name="KeyHint" Text="密钥保存在 Windows 凭据管理器。" TextWrapping="Wrap" Foreground="{StaticResource Muted}" FontSize="12" Margin="0,7,0,16"/>
-        <StackPanel Margin="0,0,0,15"><TextBlock Text="模型" Style="{StaticResource Caption}"/>
-          <ComboBox x:Name="ModelInput" IsEditable="True" IsTextSearchEnabled="False" MaxDropDownHeight="260"/>
-        </StackPanel>
-      <TextBlock x:Name="ModelVendorHint" TextWrapping="Wrap" Foreground="{StaticResource Muted}" FontSize="11" Margin="0,-7,0,10" Visibility="Collapsed"/>
-      <Grid Margin="0,-8,0,10">
-        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-        <TextBlock x:Name="ModelStatus" Text="填入密钥后自动获取，也可直接填写模型 ID。" TextWrapping="Wrap" Foreground="{StaticResource Muted}" FontSize="11" VerticalAlignment="Center" Margin="0,0,8,0"/>
-        <Button x:Name="FetchModels" Grid.Column="1" Content="刷新模型" Style="{StaticResource GhostButton}" HorizontalAlignment="Right" Margin="0,0,-8,0"/>
-        <Button x:Name="TestConnection" Grid.Column="2" Content="测试连接" Style="{StaticResource GhostButton}" HorizontalAlignment="Right" Margin="8,0,-8,0"/>
-      </Grid>
-      <Expander Header="高级选项" FontSize="12" Foreground="{StaticResource Muted}" Margin="0,0,0,18">
+      <StackPanel Margin="0,0,0,24">
+        <TextBlock Text="服务" Style="{StaticResource Caption}"/>
+        <Grid>
+          <ComboBox x:Name="ProviderCombo" DisplayMemberPath="Name"/>
+          <TextBlock x:Name="ProviderPlaceholder" Text="选择服务…" IsHitTestVisible="False" Margin="13,0,25,0" FontSize="12" VerticalAlignment="Center" Foreground="{StaticResource Muted}" Visibility="Collapsed"/>
+        </Grid>
+      </StackPanel>
+      <StackPanel Margin="0,0,0,24">
+        <TextBlock Text="API Key" Style="{StaticResource Caption}"/>
+        <Grid>
+          <PasswordBox x:Name="ApiKeyInput" MaxLength="1000" AutomationProperties.Name="API Key"/>
+          <!-- Saved-key placeholder: eight fixed dots, never the real key's length. -->
+          <StackPanel x:Name="KeyDots" Orientation="Horizontal" IsHitTestVisible="False" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="13,0,0,0" Visibility="Collapsed">
+            <Ellipse Width="10" Height="10" Fill="{StaticResource Ink}" Margin="0,0,6,0"/>
+            <Ellipse Width="10" Height="10" Fill="{StaticResource Ink}" Margin="0,0,6,0"/>
+            <Ellipse Width="10" Height="10" Fill="{StaticResource Ink}" Margin="0,0,6,0"/>
+            <Ellipse Width="10" Height="10" Fill="{StaticResource Ink}" Margin="0,0,6,0"/>
+            <Ellipse Width="10" Height="10" Fill="{StaticResource Ink}" Margin="0,0,6,0"/>
+            <Ellipse Width="10" Height="10" Fill="{StaticResource Ink}" Margin="0,0,6,0"/>
+            <Ellipse Width="10" Height="10" Fill="{StaticResource Ink}" Margin="0,0,6,0"/>
+            <Ellipse Width="10" Height="10" Fill="{StaticResource Ink}"/>
+          </StackPanel>
+          <TextBlock x:Name="KeyPlaceholder" Text="输入此服务的 API Key…" IsHitTestVisible="False" Foreground="{StaticResource Muted}" FontSize="13" VerticalAlignment="Center" Margin="13,0"/>
+        </Grid>
+        <TextBlock x:Name="KeyHint" Text="密钥保存在 Windows 凭据管理器。" TextWrapping="Wrap" Foreground="{StaticResource Muted}" FontSize="12" Margin="0,8,0,0"/>
+      </StackPanel>
+      <StackPanel Margin="0,0,0,24">
+        <TextBlock Text="模型" Style="{StaticResource Caption}"/>
+        <ComboBox x:Name="ModelInput" IsEditable="True" IsTextSearchEnabled="False" MaxDropDownHeight="260"/>
+      </StackPanel>
+      <Expander x:Name="AdvancedExpander" Header="高级" FontSize="12" Foreground="{StaticResource Muted}" Margin="0,0,0,24">
         <StackPanel Margin="0,12,0,0">
+          <TextBlock x:Name="ModelVendorHint" TextWrapping="Wrap" Foreground="{StaticResource Muted}" FontSize="11" Margin="0,0,0,10" Visibility="Collapsed"/>
+          <Grid Margin="0,0,0,14">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <TextBlock x:Name="ModelStatus" Text="填入密钥后自动获取，也可直接填写模型 ID。" TextWrapping="Wrap" Foreground="{StaticResource Muted}" FontSize="11" VerticalAlignment="Center" Margin="0,0,8,0"/>
+            <Button x:Name="FetchModels" Grid.Column="1" Content="刷新模型" Style="{StaticResource GhostButton}" HorizontalAlignment="Right"/>
+            <Button x:Name="TestConnection" Grid.Column="2" Content="测试连接" Style="{StaticResource GhostButton}" HorizontalAlignment="Right" Margin="8,0,0,0"/>
+          </Grid>
           <TextBlock Text="思考模式" Style="{StaticResource Caption}"/>
           <ComboBox x:Name="ThinkingModeCombo">
             <ComboBoxItem Content="自动适配（推荐）" Tag="auto"/>
@@ -42,17 +58,17 @@
           </StackPanel>
           <TextBlock Text="输出 token 上限（选填）" Style="{StaticResource Caption}"/>
           <TextBox x:Name="OutputLimitInput" MaxLength="5"/>
-          <TextBlock Text="留空自动适配。包含思考与正文；上限过小可能导致回答被截断，上限不是实际用量。" TextWrapping="Wrap" FontSize="11" Foreground="{StaticResource Muted}" Margin="0,7,0,0"/>
+          <TextBlock Text="留空自动适配。包含思考与正文；上限过小可能导致回答被截断，上限不是实际用量。" TextWrapping="Wrap" FontSize="11" Foreground="{StaticResource Muted}" Margin="0,7,0,16"/>
+          <Expander x:Name="EndpointExpander" Header="接口地址" Foreground="{StaticResource Muted}" FontSize="12">
+            <StackPanel Margin="0,12,0,0">
+              <TextBox x:Name="EndpointInput" MaxLength="300"/>
+              <TextBlock Text="自定义服务填写兼容接口的基础地址。更改已保存地址需重新填密钥。" TextWrapping="Wrap" FontSize="11" Margin="0,7,0,0" Foreground="{StaticResource Muted}"/>
+              <Button x:Name="DeleteKey" Content="删除此服务的已存密钥" Style="{StaticResource GhostButton}" HorizontalAlignment="Left" Margin="-8,8,0,0"/>
+            </StackPanel>
+          </Expander>
         </StackPanel>
       </Expander>
-      <Expander x:Name="EndpointExpander" Header="接口地址" Foreground="{StaticResource Muted}" FontSize="12" Margin="0,0,0,24">
-        <StackPanel Margin="0,12,0,0">
-          <TextBox x:Name="EndpointInput" MaxLength="300" FontSize="12"/>
-          <TextBlock Text="自定义服务填写兼容接口的基础地址。更改已保存地址需重新填密钥。" TextWrapping="Wrap" FontSize="11" Margin="0,7,0,0" Foreground="{StaticResource Muted}"/>
-          <Button x:Name="DeleteKey" Content="删除此服务的已存密钥" Style="{StaticResource GhostButton}" HorizontalAlignment="Left" Margin="-8,8,0,0"/>
-        </StackPanel>
-      </Expander>
-      <Button x:Name="SaveSettingsButton" Content="应用服务配置" Style="{StaticResource PrimaryButton}" HorizontalAlignment="Left" Padding="16,9" Margin="0,-6,0,24"/>
+      <Button x:Name="SaveSettingsButton" Content="应用服务配置" Style="{StaticResource PrimaryButton}" HorizontalAlignment="Left" Padding="16,9" Margin="0,0,0,24"/>
       <Expander Margin="0,0,0,16">
         <Expander.Header><TextBlock Text="阅读与翻译" FontSize="16" FontWeight="SemiBold" Foreground="{StaticResource Ink}"/></Expander.Header>
         <StackPanel Margin="0,14,0,0">
@@ -89,7 +105,7 @@
               <Grid>
                 <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                 <ComboBox x:Name="PresetCombo" DisplayMemberPath="Name"/>
-                <TextBlock x:Name="PresetPlaceholder" Text="暂无偏好预设" IsHitTestVisible="False" Margin="12,0,25,0" FontSize="12" VerticalAlignment="Center" Foreground="{StaticResource Muted}" Visibility="Collapsed"/>
+                <TextBlock x:Name="PresetPlaceholder" Text="暂无偏好预设" IsHitTestVisible="False" Margin="13,0,25,0" FontSize="12" VerticalAlignment="Center" Foreground="{StaticResource Muted}" Visibility="Collapsed"/>
                 <Button x:Name="LoadPreset" Content="应用" Grid.Column="1" Margin="8,0,0,0"/>
                 <Button x:Name="RemovePreset" Content="删除" Grid.Column="2" Style="{StaticResource GhostButton}" Margin="4,0,0,0"/>
               </Grid>
