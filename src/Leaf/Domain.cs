@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
@@ -129,6 +130,33 @@ namespace Leaf
             if (string.IsNullOrWhiteSpace(Shortcut)) Shortcut = defaults.Shortcut;
             HistoryLimit = Math.Max(20, Math.Min(1000, HistoryLimit == 0 ? 200 : HistoryLimit));
         }
+        // Validates the structure of freshly loaded JSON before Normalize runs. Throws for
+        // structurally invalid data so the caller can back it up and restore defaults.
+        public void NormalizeLoaded()
+        {
+            if (Providers != null && Providers.Count > 0) {
+                var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var provider in Providers) {
+                    if (provider == null) throw new InvalidDataException("A provider entry is null.");
+                    if (string.IsNullOrWhiteSpace(provider.Id)) throw new InvalidDataException("A provider id is empty.");
+                    if (!ids.Add(provider.Id)) throw new InvalidDataException("A provider id is duplicated.");
+                    provider.Name = provider.Name ?? "";
+                    provider.Model = provider.Model ?? "";
+                    provider.BaseUrl = provider.BaseUrl ?? "";
+                    if (!string.IsNullOrWhiteSpace(provider.BaseUrl)) LlmClient.Endpoint(provider.BaseUrl);
+                }
+            }
+            if (Learning != null) foreach (var option in Learning)
+                if (option == null) throw new InvalidDataException("A learning entry is null.");
+            if (Presets != null) foreach (var preset in Presets) {
+                if (preset == null) throw new InvalidDataException("A preset entry is null.");
+                if (preset.Learning == null) throw new InvalidDataException("A preset has no learning list.");
+                foreach (var option in preset.Learning)
+                    if (option == null) throw new InvalidDataException("A preset learning entry is null.");
+            }
+            Normalize();
+            if (Providers.All(p => p.Id != ProviderId)) ProviderId = Providers[0].Id;
+        }
     }
     public sealed class LearningSection
     {
@@ -168,7 +196,7 @@ namespace Leaf
             return result;
         }
         private static string Safe(string value, int limit) {
-            value = (value ?? "").Trim(); return value.Length <= limit ? value : value.Substring(0, limit);
+            value = (value ?? "").Trim(); return TextTools.TruncateElements(value, limit);
         }
     }
     public sealed class ChatTurn
@@ -201,6 +229,41 @@ namespace Leaf
                 Chat = new List<ChatTurn>(), Draft = ""
             };
         }
+        // Repairs one loaded record in place. Returns false for records that cannot be
+        // recovered individually; the caller keeps the rest and quarantines the original.
+        public bool TryNormalizeLoaded()
+        {
+            if (!Completed || string.IsNullOrWhiteSpace(Id) || string.IsNullOrWhiteSpace(Source) || Context == null ||
+                UpdatedUtcTicks <= 0 || UpdatedUtcTicks > DateTime.MaxValue.Ticks)
+                return false;
+            try { Context.NormalizeLoaded(); }
+            catch { return false; }
+            Cards = Cards ?? new Dictionary<string, WordCard>();
+            Chat = Chat ?? new List<ChatTurn>();
+            Draft = Draft ?? "";
+            SourceKind = SourceKind ?? "";
+            Translation = Translation ?? "";
+            var cards = new Dictionary<string, WordCard>();
+            foreach (var pair in Cards) {
+                var card = pair.Value;
+                if (card == null || string.IsNullOrWhiteSpace(card.meaning)) continue;
+                card.sections = (card.sections ?? new List<LearningSection>()).Where(s => s != null).ToList();
+                foreach (var section in card.sections) {
+                    section.title = section.title ?? ""; section.content = section.content ?? "";
+                }
+                cards[pair.Key] = card;
+            }
+            Cards = cards;
+            var chat = new List<ChatTurn>(); ChatTurn pending = null;
+            foreach (var turn in Chat) {
+                if (turn == null || (turn.Role != "user" && turn.Role != "assistant")) continue;
+                if (turn.Role == "user") { pending = turn; continue; }
+                if (pending != null) { chat.Add(pending); chat.Add(turn); pending = null; }
+            }
+            Chat = chat;
+            if (string.IsNullOrWhiteSpace(CacheKey)) CacheKey = CacheKeys.For(Source, Context);
+            return true;
+        }
     }
     public static class CacheKeys
     {
@@ -209,7 +272,13 @@ namespace Leaf
             var context = Json.Copy(record.Context);
             context.Providers = new List<ProviderProfile> { Json.Copy(provider) };
             context.ProviderId = provider.Id;
-            return word.Key + ":" + For(Json.Write(new { record.Source, record.Translation, word.Start, word.Length }), context);
+            // The word-card prompt version is part of the key: a cached card written by an
+            // older teaching style never satisfies a new lookup. The translation key in For
+            // carries no such version and stays unchanged.
+            return word.Key + ":" + For(Json.Write(new {
+                prompt = Prompts.WordPromptVersion,
+                record.Source, record.Translation, word.Start, word.Length
+            }), context);
         }
         public static string For(string text, Settings settings)
         {
@@ -238,6 +307,9 @@ namespace Leaf
     public static class TextTools
     {
         private static readonly Regex Words = new Regex(@"[\p{L}\p{M}]+(?:['’\-][\p{L}\p{M}]+)*|\p{N}+(?:[.,]\p{N}+)*", RegexOptions.Compiled);
+        private static readonly Regex ContinuousScript = new Regex(
+            @"[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff\u0e00-\u0eff\u1000-\u109f\u1780-\u17ff]|\p{Cs}", RegexOptions.Compiled);
+        private static readonly Regex SentenceMarker = new Regex(@"[.!?。！？；;]", RegexOptions.Compiled);
         public static List<TextPiece> Pieces(string source)
         {
             var pieces = new List<TextPiece>(); int cursor = 0;
@@ -249,7 +321,28 @@ namespace Leaf
             if (cursor < source.Length) pieces.Add(new TextPiece { Start = cursor, Length = source.Length - cursor, Text = source.Substring(cursor) });
             return pieces;
         }
-        public static bool IsWordInput(string source) { return source.Length <= 80 && Pieces(source).Count(p => p.IsWord) == 1; }
+        public static bool IsWordInput(string source)
+        {
+            source = (source ?? "").Trim();
+            return source.Length > 0 && source.Length <= 80 &&
+                !ContinuousScript.IsMatch(source) && !SentenceMarker.IsMatch(source) &&
+                Pieces(source).Count(p => p.IsWord) == 1;
+        }
+        // Truncates on .NET Framework text-element boundaries so surrogate pairs and combining marks stay intact.
+        public static string TruncateElements(string value, int maxUtf16)
+        {
+            value = value ?? "";
+            if (maxUtf16 < 0) throw new ArgumentOutOfRangeException("maxUtf16");
+            if (value.Length <= maxUtf16) return value;
+            int end = 0;
+            var elements = System.Globalization.StringInfo.GetTextElementEnumerator(value);
+            while (elements.MoveNext()) {
+                int candidate = elements.ElementIndex + elements.GetTextElement().Length;
+                if (candidate > maxUtf16) break;
+                end = candidate;
+            }
+            return value.Substring(0, end);
+        }
         public static string ValidateInput(string text)
         {
             text = (text ?? "").Trim();
@@ -258,10 +351,37 @@ namespace Leaf
             return text;
         }
     }
+    public static class ConversationContext
+    {
+        // Keeps the learning language/context and the single related provider, dropping
+        // presets, placement, startup and other unrelated runtime preferences.
+        public static Settings Snapshot(Settings source)
+        {
+            source = source ?? Settings.Defaults();
+            ProviderProfile provider = null;
+            if (source.Providers != null) provider = source.Providers.FirstOrDefault(p => p.Id == source.ProviderId);
+            if (provider == null && source.Providers != null && source.Providers.Count > 0) provider = source.Providers[0];
+            if (provider == null) provider = Settings.Defaults().Provider;
+            return new Settings {
+                Version = 3,
+                ProviderId = provider.Id,
+                Providers = new List<ProviderProfile> { Json.Copy(provider) },
+                TargetLanguage = source.TargetLanguage,
+                Scene = source.Scene, SceneDetail = source.SceneDetail,
+                SceneDetails = new Dictionary<string, string>(),
+                GameTextType = source.GameTextType, Style = source.Style,
+                Learning = (source.Learning ?? new List<LearningOption>())
+                    .Where(option => option != null).Select(Json.Copy).ToList(),
+                Presets = new List<LearningPreset>(),
+                Placement = null
+            };
+        }
+    }
     public sealed class UserError : Exception
     {
         public string Code { get; private set; }
-        public UserError(string code, string message) : base(message) { Code = code; }
+        public UserError(string code, string message) : this(code, message, null) { }
+        public UserError(string code, string message, Exception inner) : base(message, inner) { Code = code; }
     }
     public sealed class RequestGate
     {

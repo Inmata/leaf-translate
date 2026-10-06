@@ -37,7 +37,7 @@ Open [the latest release](https://github.com/Inmata/leaf-translate/releases/late
 
 1. **Extract the entire ZIP** into a folder you intend to keep.
 2. Keep `Leaf.exe` and `Leaf.exe.config` together, then launch `Leaf.exe`.
-3. The settings window opens on first launch. Configure an API to begin translating.
+3. The settings page inside the popup opens on first launch. Configure an API to begin translating.
 
 | Item | Requirement or behavior |
 | --- | --- |
@@ -92,68 +92,42 @@ Click a word in the original text to open a word card. For example, when reading
 
 For a phrase or text that is awkward to select word by word, drag across the original text and choose **Explain selected passage (解释选中片段)** from its context menu.
 
-Click **Ask (追问)** to reveal the input. Questions concern the selected word or passage; **Back to sentence (返回整句)** switches back to the passage. Press `Enter` to send or `Shift+Enter` for a new line.
+Click **Ask (追问)** to reveal the input. Questions concern the selected word or passage; **Back to sentence (返回整句)** switches back to the passage. Press `Enter` or the light arrow button to send, or `Shift+Enter` for a new line.
 
 ### 4. Type or edit your own text
 
-The shortcut immediately opens an editable popup when no text is captured. With existing text, click the pencil beside the source, or enable **Direct input on shortcut (快捷键唤起后直接输入)** to focus and select it automatically. `Enter` or **Translate ↵ (翻译 ↵)** submits a new conversation; `Shift+Enter` inserts a new line. Drag to select translated text, then use `Ctrl+C` or the copy context menu. There is no separate copy-translation button.
+When no text is captured, the shortcut quietly reopens the popup with its previous page, translation, and draft intact; it does not automatically enter editing. Click the source pencil to get ready for manual input. Successful captures can focus the source when direct input is enabled. `Enter` or the arrow beside the editor submits a new conversation; `Shift+Enter` inserts a new line. Clearing the draft without submitting keeps the current result: invoking the shortcut on the same text restores the conversation without repeating the request. Translation and learning text support continuous selection and `Ctrl+C`. Select a different passage inside Leaf and invoke the shortcut to translate it; the return entry restores the original conversation.
 
 [![Manual source editing and translation](docs/images/manual-input.png)](docs/images/manual-input.png)
 
 ## Screenshots
 
-These views are rendered from the v0.4.1 Clear paper interface. Text, model choices, conversations, saved-key state, and history are demonstration content; no live API was called. The app UI is currently Chinese. Click an image to view it at full size.
+These views are rendered from the v0.5.0 Clear paper interface. Text, model choices, conversations, saved-key state, and history are demonstration content; no live API was called. The app UI is currently Chinese. Click an image to view it at full size.
 
-<table>
-  <tr>
-    <td valign="top" width="50%">
-      <strong>Translation and word cards</strong><br>
-      Keep the original passage visible, explore a word, and highlight a matching translation phrase when available.<br><br>
-      <a href="docs/images/popup.png"><img src="docs/images/popup.png" alt="Leaf translation popup with a contextual word card and synonym comparison" width="380"></a>
-    </td>
-    <td valign="top" width="50%">
-      <strong>Follow-up questions</strong><br>
-      Continue discussing the same passage, review the conversation, and reveal the input when needed.<br><br>
-      <a href="docs/images/follow-up.png"><img src="docs/images/follow-up.png" alt="Follow-up conversation and question input in the Leaf popup" width="380"></a>
-    </td>
-  </tr>
-  <tr>
-    <td valign="top">
-      <strong>API and reading context</strong><br>
-      Choose a provider, model, context, and target language, with details specific to the selected context.<br><br>
-      <a href="docs/images/settings.png"><img src="docs/images/settings.png" alt="Provider, API key, book context, and target language settings" width="380"></a>
-    </td>
-    <td valign="top">
-      <strong>Learning options and presets</strong><br>
-      Select what to learn, add a custom option, and save combinations for later.<br><br>
-      <a href="docs/images/learning.png"><img src="docs/images/learning.png" alt="Learning preferences, custom options, and preset management" width="380"></a>
-    </td>
-  </tr>
-  <tr>
-    <td valign="top">
-      <strong>Desktop preferences</strong><br>
-      Set clipboard behavior, the shortcut, startup, and history retention.<br><br>
-      <a href="docs/images/behavior.png"><img src="docs/images/behavior.png" alt="Clipboard, shortcut, startup, and history preferences" width="380"></a>
-    </td>
-    <td valign="top">
-      <strong>Local history</strong><br>
-      Search source text or translations, reopen a record, and resume learning.<br><br>
-      <a href="docs/images/history.png"><img src="docs/images/history.png" alt="Searchable local translation history with reopen and delete controls" width="380"></a>
-    </td>
-  </tr>
-  <tr>
-    <td valign="top">
-      <strong>Advanced model options</strong><br>
-      Automatic defaults, with thinking effort and output limits available when needed.<br><br>
-      <a href="docs/images/advanced.png"><img src="docs/images/advanced.png" alt="GLM-5.3 Flash automatic thinking, light effort, and output cap" width="380"></a>
-    </td>
-    <td valign="top">
-      <strong>A compact popup</strong><br>
-      Smaller text and spacing, full-size buttons, and scrollable longer content.<br><br>
-      <a href="docs/images/compact.png"><img src="docs/images/compact.png" alt="A smaller Leaf popup showing source text, translation, and a word card" width="300"></a>
-    </td>
-  </tr>
-</table>
+Translation and learning: source, translation, and continuously selectable learning text.
+
+[![Translation and learning](docs/images/popup.png)](docs/images/popup.png)
+
+Settings inside the popup: service configuration and return to reading.
+
+[![Settings inside the popup](docs/images/settings.png)](docs/images/settings.png)
+
+Follow-up questions: continue discussing the current word or passage.
+
+[![Follow-up questions](docs/images/follow-up.png)](docs/images/follow-up.png)
+
+Source editing: explicit input and submission.
+
+[![Source editing](docs/images/manual-input.png)](docs/images/manual-input.png)
+
+Compact popup: the smaller reading view.
+
+[![Compact popup](docs/images/compact.png)](docs/images/compact.png)
+
+Local history: search and reopen saved records.
+
+[![Local history](docs/images/history.png)](docs/images/history.png)
+
 
 ## Make it work for your learning
 
@@ -184,6 +158,7 @@ The new option becomes selectable alongside the built-in options. **Preference p
 | `Ctrl+Alt+T` | Translate the selection or clipboard; configurable in settings |
 | Click a word in the original | Open its contextual word card |
 | `Enter` / `Shift+Enter` in the question input | Send / insert a new line |
+| **Retry (重试)** after **Stop (停止)** | Repeat only the stopped word lookup or follow-up, never the whole translation |
 | Click outside an unpinned popup | Hide it while keeping the conversation and draft |
 | Click the pin button | Keep it visible; asking a question does not pin automatically |
 | Click the hide button | Hide the popup while keeping Leaf in the tray |
@@ -195,7 +170,7 @@ Smaller windows use slightly smaller body text, line spacing, and padding, with 
 
 The visible popup has a taskbar entry; hiding it keeps the tray icon. You can set `Alt+Space` in settings. While Leaf runs, that combination translates instead of opening the Windows system menu. If another shortcut utility uses the same combination, change it in one of the apps.
 
-Opening preserves focus by default. Enable **Direct input on shortcut (快捷键唤起后直接输入)** to focus and select the source automatically. The gear beside the pin opens settings; **History (历史记录)** is available from the tray menu. Check the hidden-icons area if you cannot find Leaf.
+Opening preserves focus by default. Enable **Direct input on shortcut (快捷键唤起后直接输入)** to focus and select the source automatically. The settings button beside the pin toggles the settings page inside the popup; **History (历史记录)** is available from the tray menu. Check the hidden-icons area if you cannot find Leaf.
 
 ## Data and privacy
 
@@ -219,7 +194,7 @@ Check that Leaf is running in the tray. If the shortcut is already in use, choos
 
 ### Why does my API request fail after entering a key?
 
-Check the provider, model, endpoint, and account quota. Leaf displays errors for network failures, timeouts, invalid keys, rate limits, and malformed responses. Apply service configuration after a successful connection test. A stored key appears as dark password dots inside the field, with its saved status below. Stored keys are not filled back into the editor; typing replaces the key, while leaving it blank preserves it. The mask does not reveal key length. Changing the endpoint requires entering the key again. Applying keeps settings open; changes to a previously configured model apply automatically.
+Check the provider, model, endpoint, and account quota. Leaf displays errors for network failures, timeouts, invalid keys, rate limits, and malformed responses. Apply service configuration after a successful connection test. A stored key appears as dark password dots inside the field, with its saved status below. Stored keys are not filled back into the editor; typing replaces the key, while leaving it blank preserves it. The mask does not reveal key length. Changing the endpoint requires entering the key again. A saved key is bound to its endpoint: an upgrade migrates it to the currently saved address, and a key saved for an old address is never sent to a new one. Applying keeps settings open; changes to a previously configured model apply automatically.
 
 ### Can I use another language or compatible service?
 
@@ -236,7 +211,6 @@ This version is Windows-only and does not include OCR, screenshot translation, o
 ## Documentation and feedback
 
 - [Measured resource usage](docs/PERFORMANCE-v0.4.0.md)
-
 - [English user guide](docs/USAGE.en.md)
 - [中文使用说明](docs/USAGE.md)
 - [Development and contribution guide](CONTRIBUTING.md)

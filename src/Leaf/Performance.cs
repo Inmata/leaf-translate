@@ -88,7 +88,7 @@ namespace Leaf
             foreach (var provider in settings.Providers) provider.Id = prefix + provider.Id;
             settings.ProviderId = settings.Providers[0].Id;
             settings.Provider.Model = "benchmark-fixture"; settings.Provider.BaseUrl = "https://benchmark.invalid/v1";
-            settings.Shortcut = "Ctrl+Alt+Shift+F12"; store.SaveSettings(settings);
+            settings.Shortcut = "Ctrl+Alt+Shift+F12"; await store.SaveSettingsAsync(SettingsUpdate.Full(settings));
             var phases = new List<object>(); long ready;
             using (var shell = new AppShell(store, true, new LlmClient(new FixtureHandler()))) {
                 shell.CredentialReader = p => "isolated-benchmark-fixture";
@@ -104,13 +104,15 @@ namespace Leaf
                 }));
                 shell.PopulateDemo(); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
                 phases.Add(await Measure("word_card", () => Task.Delay(3000)));
+                phases.Add(await MeasureHistory("history_long_200", Path.Combine(folder, "history-200"), 200, true));
+                phases.Add(await MeasureHistory("history_long_1000_encode", Path.Combine(folder, "history-1000"), 1000, false));
                 shell.OpenSettings(); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
                 phases.Add(await Measure("settings_window", () => Task.Delay(3000)));
-                foreach (Window window in Application.Current.Windows.Cast<Window>().Where(w => w != shell.Popup).ToArray()) window.Close();
                 phases.Add(await Measure("settings_open_close_15_times", async () => {
                     for (int i = 0; i < 15; i++) {
                         shell.OpenSettings(); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
-                        foreach (Window window in Application.Current.Windows.Cast<Window>().Where(w => w != shell.Popup).ToArray()) window.Close();
+                        await shell.TryLeaveSettingsPageAsync();
+                        await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
                         await Task.Delay(100);
                     }
                     await Task.Delay(2000);
@@ -121,6 +123,7 @@ namespace Leaf
             File.WriteAllText(Path.Combine(folder, "result.json"), Json.Write(new {
                 version = typeof(Program).Assembly.GetName().Version.ToString(), utc = DateTime.UtcNow.ToString("o"),
                 windows = Environment.OSVersion.Version.ToString(), logical_processors = Environment.ProcessorCount,
+                processor = Environment.GetEnvironmentVariable("PROCESSOR_IDENTIFIER"),
                 process_64bit = Environment.Is64BitProcess, app_ready_ms = ready, phases = phases,
                 lifetime_peak_working_set_mib = MiB((long)Memory().PeakWorking.ToUInt64()), wpf_render_tier = System.Windows.Media.RenderCapability.Tier >> 16,
                 note = "Isolated native tray/WPF process; local delayed SSE fixture, no real API. Samples every 100ms. CPU total is normalized by logical processors. Startup is Main-to-ready with existing OS caches; not a cold boot. Memory includes WPF and benchmark overhead; no forced GC or working-set trimming."
@@ -151,6 +154,60 @@ namespace Leaf
                     io_read_bytes = after.ReadBytes - before.ReadBytes, io_write_bytes = after.WriteBytes - before.WriteBytes
                 };
             }
+        }
+        private static async Task<object> MeasureHistory(string name, string directory, int sampleCount, bool sequential)
+        {
+            var store = new LocalStore(directory);
+            var records = new List<TranslationRecord>();
+            for (int i = 0; i < sampleCount; i++) records.Add(LongRecord(i, store.Settings));
+            var watch = Stopwatch.StartNew();
+            var gaps = new List<long>(); var gapWatch = Stopwatch.StartNew(); long lastBeat = 0;
+            // Normal priority so the 20 ms heartbeat is observed even when the real work only
+            // lasts a few tens of milliseconds; Background ticks would lose to the resumption.
+            var timer = new DispatcherTimer(DispatcherPriority.Normal) { Interval = TimeSpan.FromMilliseconds(20) };
+            timer.Tick += (s, e) => { long now = gapWatch.ElapsedMilliseconds; gaps.Add(now - lastBeat); lastBeat = now; };
+            timer.Start();
+            HistorySnapshots.HistoryPayload encoded = null;
+            try {
+                if (sequential) {
+                    await Task.Yield();
+                    foreach (var record in records) await store.SaveAsync(record, store.HistoryEpoch);
+                    await store.FlushAsync();
+                } else {
+                    // One background pass: linear Encode of the 1000 candidates and a real atomic
+                    // file commit, while the dispatcher keeps its 20 ms heartbeat.
+                    encoded = await Task.Run(() => {
+                        HistorySnapshots.ResetEncodeCalls();
+                        var payload = HistorySnapshots.Encode(records, records.Count);
+                        var batch = new AtomicFileBatch(directory, new PhysicalStoreFiles());
+                        batch.Commit(new Dictionary<string, string> {
+                            { AtomicFileBatch.HistoryName, payload.Json }
+                        }, null, null, null);
+                        return payload;
+                    });
+                }
+            } finally { timer.Stop(); }
+            watch.Stop();
+            string historyPath = Path.Combine(directory, "history.json");
+            long historyBytes = File.Exists(historyPath) ? new FileInfo(historyPath).Length : 0;
+            return new {
+                phase = name, duration_ms = watch.ElapsedMilliseconds, samples = sampleCount,
+                sequential_saves = sequential, encode_calls = HistorySnapshots.EncodeCalls,
+                records_kept = encoded == null ? -1 : encoded.Records.Count,
+                utf8_bytes = encoded == null ? -1 : encoded.Utf8Bytes,
+                heartbeat_beats = gaps.Count, heartbeat_max_gap_ms = gaps.Count == 0 ? -1 : gaps.Max(),
+                history_file_bytes = historyBytes,
+                note = "Real PhysicalStoreFiles; LongRecord = 2000-char source + 2000-char translation + 24x600-char chat. The 1000-record phase is one background linear Encode plus one real atomic commit, not 1000 sequential rewrites; heartbeat numbers are for this machine only."
+            };
+        }
+        private static TranslationRecord LongRecord(int index, Settings context)
+        {
+            var record = TranslationRecord.Create(index.ToString() + new string('a', 2000), "夹具", context);
+            record.Completed = true; record.Translation = new string('中', 2000);
+            for (int i = 0; i < 24; i++) record.Chat.Add(new ChatTurn {
+                Role = i % 2 == 0 ? "user" : "assistant", Content = new string('字', 600), Topic = "原句"
+            });
+            return record;
         }
         private static double MiB(long bytes) { return Math.Round(bytes / 1048576.0, 2); }
         private sealed class FixtureHandler : HttpMessageHandler

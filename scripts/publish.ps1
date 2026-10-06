@@ -1,29 +1,20 @@
-param([switch]$CheckOnly, [switch]$WithRelease, [string]$Version = '0.4.1')
+param([switch]$CheckOnly, [switch]$WithRelease, [string]$Version)
 $ErrorActionPreference = 'Stop'
-if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid version.' }
+. (Join-Path $PSScriptRoot 'version.ps1')
+. (Join-Path $PSScriptRoot 'public-source.ps1')
+. (Join-Path $PSScriptRoot 'sync-public-source.ps1')
 $projectRoot = Split-Path -Parent $PSScriptRoot
+$versionInfo = Get-LeafVersion -ProjectRoot $projectRoot
+if ([string]::IsNullOrWhiteSpace($Version)) { $Version = $versionInfo.SemVer }
+elseif ($Version -cne $versionInfo.SemVer) {
+    throw ('Explicit version ' + $Version + ' does not match the version constant ' + $versionInfo.SemVer + '.')
+}
+[void](Assert-LeafVersionString -Value $Version -Label 'The publish version')
 $repository = 'Inmata/leaf-translate'
-$allowedRoots = @('.github', '.gitignore', 'AGENTS.md', 'README.md', 'README.en.md', 'CONTRIBUTING.md', 'docs', 'scripts', 'src', 'tests')
-$publicFiles = @()
-foreach ($relativeRoot in $allowedRoots) {
-    $sourcePath = Join-Path $projectRoot $relativeRoot
-    if (-not (Test-Path -LiteralPath $sourcePath)) { throw ('Missing public source: ' + $relativeRoot) }
-    if ((Get-Item -LiteralPath $sourcePath).PSIsContainer) {
-        $publicFiles += Get-ChildItem -LiteralPath $sourcePath -Recurse -File -Force
-    } else { $publicFiles += Get-Item -LiteralPath $sourcePath }
-}
-$publicFiles = @($publicFiles | Sort-Object FullName)
-foreach ($file in $publicFiles) {
-    if ($file.Name -match '^(settings|history)\.json$|^\.env($|\.)' -or $file.Extension -match '^\.(pfx|key|log)$') {
-        throw ('Private/local file found in public source: ' + $file.Name)
-    }
-    if ($file.Extension -notin @('.png', '.ico') -and [IO.File]::ReadAllText($file.FullName) -match '(sk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|BEGIN [A-Z ]*PRIVATE KEY)') {
-        throw ('Possible credential found: ' + $file.Name)
-    }
-}
-Write-Output ('Public source: ' + $publicFiles.Count + ' files; repository: ' + $repository)
+$manifest = Get-PublicSourceManifest -ProjectRoot $projectRoot
+Write-Output ('Public source: ' + $manifest.Files.Count + ' files; repository: ' + $repository)
 if ($CheckOnly) {
-    $publicFiles | ForEach-Object { $_.FullName.Substring($projectRoot.Length + 1) }
+    $manifest.Files | ForEach-Object { $_.RelativePath }
     exit 0
 }
 
@@ -35,11 +26,11 @@ if (-not (Test-Path -LiteralPath $ghPath)) { throw 'GitHub CLI is required. Open
 $env:PATH = (Split-Path -Parent $ghPath) + [IO.Path]::PathSeparator + $env:PATH
 $accountJson = & $ghPath api user
 if ($LASTEXITCODE -ne 0) { throw 'GitHub CLI is not authenticated. Run gh auth login in your own terminal.' }
-$account = ($accountJson -join "`n") | ConvertFrom-Json
+$account = ([regex]::Replace(($accountJson -join "`n"), '\x1B\[[0-?]*[ -/]*[@-~]', '')) | ConvertFrom-Json
 if ($account.login -cne 'Inmata') { throw 'Use the Inmata account first: gh auth switch --hostname github.com --user Inmata' }
 $metadataJson = & $ghPath repo view $repository --json nameWithOwner,visibility,defaultBranchRef
 if ($LASTEXITCODE -ne 0) { throw 'Cannot access the repository.' }
-$metadata = ($metadataJson -join "`n") | ConvertFrom-Json
+$metadata = ([regex]::Replace(($metadataJson -join "`n"), '\x1B\[[0-?]*[ -/]*[@-~]', '')) | ConvertFrom-Json
 if ($metadata.nameWithOwner -cne $repository -or $metadata.visibility -ne 'PUBLIC' -or $metadata.defaultBranchRef.name -ne 'main') {
     throw 'Expected the public Inmata/leaf-translate repository initialized on main.'
 }
@@ -52,17 +43,16 @@ $helper = '!gh auth git-credential'
 if ($LASTEXITCODE -ne 0) { throw 'Clone failed.' }
 & git -C $publishRoot config core.autocrlf false
 if ($LASTEXITCODE -ne 0) { throw 'Could not configure source line endings.' }
-foreach ($file in $publicFiles) {
-    $relativePath = $file.FullName.Substring($projectRoot.Length + 1)
-    $destination = Join-Path $publishRoot $relativePath
-    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
-    Copy-Item -LiteralPath $file.FullName -Destination $destination -Force
-}
+# Preserve Windows source bytes while still checking actual trailing whitespace.
+& git -C $publishRoot config core.whitespace 'blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol'
+if ($LASTEXITCODE -ne 0) { throw 'Could not configure the source whitespace check.' }
+$plan = Sync-PublicSource -ProjectRoot $projectRoot -PublishRoot $publishRoot
+Write-Output ('Publication mirror: ' + $plan.Copy.Count + ' copied, ' + $plan.Delete.Count + ' removed.')
 & git -C $publishRoot config user.name 'Inmata'
 if ($LASTEXITCODE -ne 0) { throw 'Could not configure commit author.' }
 & git -C $publishRoot config user.email ($account.id.ToString() + '+Inmata@users.noreply.github.com')
 if ($LASTEXITCODE -ne 0) { throw 'Could not configure commit email.' }
-& git -C $publishRoot add -- $allowedRoots
+& git -C $publishRoot add -A -- @($manifest.Roots)
 if ($LASTEXITCODE -ne 0) { throw 'Staging failed.' }
 & git -C $publishRoot diff --cached --check
 if ($LASTEXITCODE -ne 0) { throw 'Source whitespace check failed.' }
@@ -88,7 +78,7 @@ if ($WithRelease) {
     if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ine $expectedChecksum) { throw 'Package checksum mismatch.' }
     $releasesJson = & $ghPath release list --repo $repository --limit 100 --json tagName
     if ($LASTEXITCODE -ne 0) { throw 'Source is published, but the release list could not be read.' }
-    $existingReleases = ($releasesJson -join "`n") | ConvertFrom-Json
+    $existingReleases = ([regex]::Replace(($releasesJson -join "`n"), '\x1B\[[0-?]*[ -/]*[@-~]', '')) | ConvertFrom-Json
     if (@($existingReleases | Where-Object { $_.tagName -eq $tag }).Count -gt 0) { Write-Output ('Release ' + $tag + ' already exists; existing assets were kept.') }
     else {
         & $ghPath release create $tag $archive $checksumFile --repo $repository --target $remoteSha --title ('Leaf ' + $tag) --notes-file (Join-Path $projectRoot ('docs\RELEASE-' + $tag + '.md'))

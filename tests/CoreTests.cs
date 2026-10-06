@@ -14,10 +14,24 @@ using Leaf;
 public static class CoreTests
 {
     private static int assertions;
+    private static readonly List<string> softFailures = new List<string>();
     private static void Check(bool condition, string label)
     {
         if (!condition) throw new Exception("FAILED: " + label);
         assertions++; Console.WriteLine("PASS " + label);
+    }
+    // Task 1 red/green evidence collects each multilingual/Unicode defect in one run.
+    private static void SoftCheck(bool condition, string label)
+    {
+        if (!condition) { softFailures.Add(label); Console.Error.WriteLine("FAILED " + label); return; }
+        assertions++; Console.WriteLine("PASS " + label);
+    }
+    private static void FlushSoftChecks()
+    {
+        if (softFailures.Count == 0) return;
+        string message = "FAILED: " + string.Join("; ", softFailures.ToArray());
+        softFailures.Clear();
+        throw new Exception(message);
     }
     private static void Throws(Action action, string code, string label)
     {
@@ -35,7 +49,12 @@ public static class CoreTests
         string folder = Path.Combine(Path.GetTempPath(), "leaf-tests-" + Guid.NewGuid().ToString("N"));
         try {
             if (args.Contains("--native")) return WindowsNativeTests.Run(folder);
-            Domain(); Storage(folder); Transport().GetAwaiter().GetResult(); Diagnostics(folder).GetAwaiter().GetResult();
+            if (args.Length > 2 && args[0] == "--exit-scenario") return ExitScenarioTests.Run(args[1], args[2]);
+            Domain(); Storage(folder);
+            assertions += TranslationPresentationTests.Run();
+            assertions += SelectionTests.Run().GetAwaiter().GetResult();
+            Transport().GetAwaiter().GetResult(); Diagnostics(folder).GetAwaiter().GetResult();
+            assertions += StorageRegressionTests.Run(Path.Combine(folder, "storage-regression")).GetAwaiter().GetResult();
             assertions += ApplicationTests.Run(Path.Combine(folder, "app"));
             Console.WriteLine("SUCCESS: " + assertions + " assertions"); return 0;
         } catch (Exception error) { Console.Error.WriteLine(error); return 1; }
@@ -69,6 +88,60 @@ public static class CoreTests
         Check(key != CacheKeys.For("prowess", other), "Learning changes invalidate cache");
         Check(key == CacheKeys.For("  prowess  ", settings), "Boundary whitespace does not duplicate cache");
         Check(CacheKeys.For("His prowess", settings) != CacheKeys.For("Her prowess", settings), "Sentence context is retained");
+        var wordSettings = Json.Copy(settings);
+        wordSettings.Learning.First(x => x.Id == "collocations").Enabled = true;
+        var wordRecord = TranslationRecord.Create("His combat prowess gives him an edge.", "剪贴板", wordSettings);
+        wordRecord.Translation = "他出色的战斗本领让他占据优势。";
+        var wordPiece = TextTools.Pieces(wordRecord.Source).First(p => p.Text == "prowess");
+        string wordKey = CacheKeys.ForWord(wordRecord, wordPiece, wordSettings.Provider);
+        Check(wordKey.StartsWith(wordPiece.Key + ":") && wordKey != CacheKeys.For(wordRecord.Source, wordSettings),
+            "The word cache key is separate from the translation cache key");
+        Check(wordKey == CacheKeys.ForWord(wordRecord, wordPiece, Json.Copy(wordSettings.Provider)),
+            "The word cache key is deterministic for the same word, context and provider");
+        // CacheKeys.ForWord reads the record's own context, so a learning change must be
+        // carried by an independent record; the provider argument alone cannot change it.
+        var changedSettings = Json.Copy(wordSettings); changedSettings.Learning[0].Enabled = !changedSettings.Learning[0].Enabled;
+        var changedRecord = TranslationRecord.Create(wordRecord.Source, "剪贴板", changedSettings);
+        changedRecord.Translation = wordRecord.Translation;
+        Check(CacheKeys.ForWord(wordRecord, wordPiece, wordSettings.Provider) != CacheKeys.ForWord(changedRecord, wordPiece, changedSettings.Provider),
+            "Learning context changes invalidate cached cards");
+        // The legacy key formula, before the prompt version joined the hashed payload: a card
+        // written under it must no longer satisfy a new lookup.
+        string legacyKey = wordPiece.Key + ":" + CacheKeys.For(Json.Write(new {
+            wordRecord.Source, wordRecord.Translation, wordPiece.Start, wordPiece.Length
+        }), wordRecord.Context);
+        Check(wordKey != legacyKey,
+            "The versioned word key invalidates cards written by the older key formula");
+        var wordMessages = Prompts.Word(wordRecord, wordPiece);
+        string wordUserTurn = wordMessages[1].Content;
+        Check(wordUserTurn.Contains("selected_text") && wordUserTurn.Contains("source_sentence") && wordUserTurn.Contains("existing_translation"),
+            "The word prompt carries the sentence, its translation and the selected piece");
+        // The payload is JSON and its Chinese values are escaped, so forwarding is asserted on
+        // the parsed object instead of on raw substrings.
+        Func<string, List<Dictionary<string, object>>> forwarded = turn =>
+            ((object[])((Dictionary<string, object>)Json.Read(turn))["learning_options"])
+                .Cast<Dictionary<string, object>>().ToList();
+        var sent = forwarded(wordUserTurn);
+        Check(sent.Select(o => (string)o["id"]).SequenceEqual(new[] { "lemma", "synonyms", "collocations" }),
+            "Enabled learning categories are forwarded with their ids in the saved order");
+        Check(!sent.Any(o => (string)o["id"] == "roots") && !sent.Any(o => (string)o["id"] == "examples"),
+            "Disabled learning categories are never forwarded, so the model cannot fill them in");
+        var allSettings = Json.Copy(wordSettings);
+        foreach (var option in allSettings.Learning) option.Enabled = true;
+        var allRecord = TranslationRecord.Create(wordRecord.Source, "剪贴板", allSettings);
+        allRecord.Translation = wordRecord.Translation;
+        var allSent = forwarded(Prompts.Word(allRecord, wordPiece)[1].Content);
+        Check(allSent.Select(o => (string)o["id"]).SequenceEqual(new[] { "lemma", "synonyms", "roots", "collocations", "examples" }),
+            "All five enabled categories are forwarded together");
+        var custom = new LearningOption { Id = "custom-oral", Name = "口语说法", Instruction = "告诉我地道的口语说法", Enabled = true, Custom = true };
+        var customSettings = Json.Copy(wordSettings); customSettings.Learning.Add(custom);
+        var customRecord = TranslationRecord.Create(wordRecord.Source, "剪贴板", customSettings);
+        customRecord.Translation = wordRecord.Translation;
+        var customSent = forwarded(Prompts.Word(customRecord, wordPiece)[1].Content).Single(o => (string)o["id"] == "custom-oral");
+        Check((string)customSent["title"] == "口语说法" && (string)customSent["instruction"] == "告诉我地道的口语说法",
+            "A custom learning option is forwarded with the user's own name and instruction");
+        Check(wordMessages[0].Content.Contains("sections") && wordMessages[0].Content.Contains("自定义类别沿用用户起的名称"),
+            "The word card JSON contract stays unchanged and custom options keep the user's name");
         string source = "L'homme dit : Grüße, Grüße! 😀";
         var pieces = TextTools.Pieces(source);
         Check(string.Concat(pieces.Select(p => p.Text)) == source, "Unicode tokenization preserves every character");
@@ -76,6 +149,25 @@ public static class CoreTests
         Check(repeated.Count == 2 && repeated[0].Key != repeated[1].Key, "Repeated words have independent offsets");
         Check(pieces.Any(p => p.Text == "L'homme" && p.IsWord), "French apostrophes stay in the word");
         Check(TextTools.Pieces("e\u0301lan").Count == 1, "Combining marks are preserved");
+        SoftCheck(!TextTools.IsWordInput("这是一句需要翻译的完整中文句子。"),
+            "A complete Chinese sentence uses the translation path");
+        SoftCheck(!TextTools.IsWordInput("彼は本を読んでいます。"),
+            "A complete Japanese sentence uses the translation path");
+        SoftCheck(!TextTools.IsWordInput("这句话没有标点"),
+            "Continuous-script input is not inferred to be one word");
+        SoftCheck(!TextTools.IsWordInput("สวัสดี"),
+            "Non-segmented script defaults to translation");
+        SoftCheck(TextTools.IsWordInput("l'homme") && TextTools.IsWordInput("re-enter") &&
+            TextTools.IsWordInput("e\u0301te\u0301"),
+            "Apostrophes, hyphens and combining marks retain word support");
+        var surrogateCard = WordCard.Parse(Json.Write(new { meaning = "本领", lemma = new string('a', 249) + "😀" }), "word", "本领");
+        SoftCheck(surrogateCard.lemma == new string('a', 249),
+            "Word card truncation does not split a surrogate pair");
+        SoftCheck(TextTools.TruncateElements(new string('a', 249) + "😀", 250) ==
+            new string('a', 249), "Truncation does not split a surrogate pair");
+        SoftCheck(TextTools.TruncateElements("Ae\u0301", 2) == "A",
+            "Truncation does not detach a combining mark");
+        FlushSoftChecks();
         Throws(() => TextTools.ValidateInput(" "), "empty", "Empty input fails explicitly");
         Throws(() => TextTools.ValidateInput(new string('x', 6001)), "length", "Long input is bounded");
         var card = WordCard.Parse(Json.Write(new {

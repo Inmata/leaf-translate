@@ -18,7 +18,7 @@ Once the endpoint is known, Leaf automatically fetches models after you finish t
 
 A catalog entry does not establish account access or quota; test the connection after selecting it. A stored key is represented only by dark password dots inside the field; its saved status appears below. The real key is never inserted into the editor, and the mask does not reveal its length. When **Key saved (已保存密钥)** appears below it, leaving the field empty continues using that key. Fetching a catalog authenticates with the configured service without sending your text or conversation.
 
-Expand **Endpoint (接口地址)** to change the URL or request deletion of a saved key. Changing the URL requires entering the key again. HTTPS endpoints are accepted; localhost HTTP is available for development.
+Expand **Endpoint (接口地址)** to change the URL or request deletion of a saved key. Changing the URL requires entering the key again. A saved key is bound to the endpoint you applied: an upgrade migrates it to the currently saved address, and a key saved for an old address is never sent to a new one. HTTPS endpoints are accepted; localhost HTTP is available for development.
 
 **Test connection (测试连接)** sends a short request using the currently edited configuration. It may count toward provider usage. After a successful test, click **Apply service configuration (应用服务配置)** to apply the configuration. Model availability and pricing are determined by your provider account.
 
@@ -38,9 +38,11 @@ Source text is limited to 6000 UTF-16 code units per request. Split long passage
 
 ## Type and copy text
 
-When nothing is captured, the shortcut opens a source editor immediately. With existing text, use the pencil beside the source or enable direct input. Press `Enter` or Translate ↵ (翻译 ↵) to submit a new conversation; `Shift+Enter` inserts a new line. `Esc` exits editing and restores the original display.
+When nothing is captured, the shortcut quietly reopens the popup and preserves its current page, translation, and draft without entering editing. Click the source pencil when ready for manual input. Successful captures focus the source only when direct input is enabled. `Enter` or the arrow button submits a new conversation; `Shift+Enter` inserts a new line. `Esc` exits editing and restores the source display.
 
-Select translated text and press `Ctrl+C`, or use its copy context menu. `Ctrl+A` selects all. Clipboard contention produces a visible error without blocking the UI. There is no separate copy button. Ask is at the lower left; its input can be collapsed.
+On the shortcut: a confirmed empty selection is not an error and preserves the page. When the selection could not be read, the source badge says no selection was captured and its tooltip gives the reason. Invoking the shortcut on the same text restores the translation, word card, and follow-up draft without repeating the request or adding an API call, including after clearing the editor without submitting. An edited but unsubmitted draft is kept.
+
+Translation and learning headings/body support continuous selection and `Ctrl+C` or the copy context menu. `Ctrl+A` selects the document. Select different text inside Leaf and invoke the shortcut to start a child conversation; the return entry restores its root, word card, and draft. Matching the current source does not create another session. The settings button opens a page inside the same popup; click it again or use Return to resume reading without losing content. Ask is at the lower left; its input can be collapsed.
 
 ## Explore words and phrases
 
@@ -52,7 +54,9 @@ For phrases or scripts without spaces, select text inside the popup and use **Ex
 
 **Ask (追问)** reveals the question input. It does not pin the popup automatically. Questions concern either the current word or the passage; the topic is displayed above the input.
 
-Use `Enter` to send or `Shift+Enter` for a new line. A new source opens a new conversation. Completed conversations can be restored from history.
+Use `Enter` or the arrow button under the input to send, and `Shift+Enter` for a new line. A new source opens a new conversation. Completed conversations can be restored from history.
+
+**Stop (停止)** cancels whatever translation, word lookup or follow-up is running. The **Retry (重试)** entry that appears then repeats only what was stopped: a stopped word lookup looks up that same word again, and a stopped follow-up sends the original question again even if the input has been edited since. When a word lookup and a follow-up run together, both are restored. It never turns into re-translating the whole sentence, and the existing translation and conversation are kept.
 
 ## Set context and learning preferences
 
@@ -66,7 +70,7 @@ Expand **Add a learning preference (添加自己的学习偏好)** to provide a 
 
 ## Window and desktop preferences
 
-The popup preserves focus by default. Enable Direct input on shortcut (快捷键唤起后直接输入) to focus and select the source after capture. The gear beside the pin opens settings. Clicking outside hides an unpinned window; pinning keeps it visible. The hide button remains available when pinned.
+The popup preserves focus by default. Enable Direct input on shortcut (快捷键唤起后直接输入) to focus and select the source after capture. The settings button beside the pin toggles the settings page inside the popup. Clicking outside hides an unpinned window; pinning keeps it visible. The hide button remains available when pinned.
 
 The first popup appears on the right of the primary display. Moving and resizing automatically saves the last position and size for subsequent shortcuts and restarts. Retry keeps a visible popup in place. Drag to a secondary monitor directly; if it is removed or the work area shrinks, Leaf brings the popup into an available area.
 
@@ -84,9 +88,9 @@ Successful translations are saved locally by default. The original passage, tran
 
 Open **History (历史记录)** from the tray, search the source or translation, and double-click a record or choose **View and continue (查看与继续追问)**. Reopening makes no API call. New word lookups and follow-ups use the current API endpoint and model while preserving the record's learning context.
 
-History keeps the latest 200 entries by default. Retention can be set to 20–1000, with an additional content-size limit. Delete or clear records as needed. **Disabling history saving clears existing records and prevents new ones.**
+History keeps the latest 200 entries by default. Retention can be set to 20–1000, with an additional content-size limit. History is saved on a background queue and exiting waits for the flush; after deleting, clearing or disabling history, late results cannot reappear. If saving fails, Leaf keeps a retryable snapshot and reports it instead of pretending to succeed. History is trimmed to a 4 MiB UTF-8 soft limit (at least one record is kept), and a single record above 32 MiB is refused with a message. Delete or clear records as needed. **Disabling history saving clears existing records and prevents new ones.**
 
-Settings and history are stored in `%LOCALAPPDATA%\LeafTranslate`. If a file cannot be read, Leaf attempts to preserve a `.corrupt-...` backup. API keys are stored separately in Windows Credential Manager under `LeafTranslate/provider-id`.
+Settings and history are stored in `%LOCALAPPDATA%\LeafTranslate`. If a file cannot be read, Leaf attempts to preserve a `.corrupt-<time>-<random>` backup; individually broken records inside otherwise valid JSON are skipped and the original file is kept as a `.quarantine-<time>-<random>` copy. API keys are stored separately in Windows Credential Manager under an endpoint-bound target such as `LeafTranslate/provider-id/endpoint/<digest>`.
 
 Translation sends source text and context to the configured endpoint. Word lookups and follow-ups also send relevant translations, preferences, or recent conversation. Leaf has no project-operated relay server. Stopping a request ends the local wait but does not guarantee the provider will waive usage charges.
 
@@ -94,7 +98,7 @@ Translation sends source text and context to the configured endpoint. Word looku
 
 Use **Open logs (打开日志)** in the tray to open `%LOCALAPPDATA%\LeafTranslate\logs`. The current file is `leaf.log`, with backups `leaf.1.log` through `leaf.4.log`. Each file is limited to 1 MiB and rotates automatically.
 
-Each line is a JSON record containing time, version, request ID, provider/model, endpoint host, duration, HTTP status, provider code/related parameter, exception type, and application method locations. API keys, source text, translations, learning context, questions, and raw error bodies are excluded. Nothing is automatically uploaded. A `started` record with no ending record can indicate a forced shutdown.
+Each line is a JSON record containing time, version, request ID, provider/model, endpoint host, duration, HTTP status, provider code/related parameter, exception type, and application method locations. Capture and request records are classified by outcome (success, empty selection, unavailable capability, failure) and exclude source text, window titles, and control content. API keys, source text, translations, learning context, questions, and raw error bodies are excluded. Nothing is automatically uploaded. A `started` record with no ending record can indicate a forced shutdown.
 
 For a bug report, provide reproduction steps and the error time, and optionally the relevant log. Review it before sharing; do not attach credentials or private history. An unwritable log directory does not stop translation.
 

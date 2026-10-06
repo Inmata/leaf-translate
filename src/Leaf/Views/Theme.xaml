@@ -6,8 +6,20 @@
   <SolidColorBrush x:Key="Soft" Color="#F1F2F4"/>
   <SolidColorBrush x:Key="Line" Color="#D9DCE1"/>
   <SolidColorBrush x:Key="WordHighlight" Color="#E9D7A0"/>
+  <!-- The paper's one typeface, shared by the window default and every document built in
+       code so no two of them can drift apart. Source Han Sans SC is embedded in Leaf.exe
+       and loaded through the assembly's resource container, so the reading page renders in
+       it on a machine that never installed the font. The fragment names the real family
+       inside the two bundled faces (Regular and Bold) and is the only name here: a pack URI
+       is not a plain family name, so no system-installed family follows it as a fallback.
+       Icons stay Segoe MDL2 Assets, and the SIL Open Font License for the embedded faces
+       travels in the same executable. Source and terms: src/Leaf/Assets/Fonts/SOURCE.txt. -->
+  <FontFamily x:Key="PaperFontFamily">pack://application:,,,/Leaf;component/Assets/Fonts/#Source Han Sans SC</FontFamily>
+  <Geometry x:Key="SubmitArrow">M4,12 L20,12 M13,5 L20,12 L13,19</Geometry>
+  <Geometry x:Key="ChatOutline">M4,4 L20,4 L20,16 L10,16 L5,20 L5,16 L4,16 Z</Geometry>
+  <Geometry x:Key="FoldChevron">M5,15 L12,8 L19,15</Geometry>
   <Style TargetType="Window">
-    <Setter Property="FontFamily" Value="Segoe UI, Microsoft YaHei UI"/>
+    <Setter Property="FontFamily" Value="{StaticResource PaperFontFamily}"/>
     <Setter Property="Foreground" Value="{StaticResource Ink}"/>
     <Setter Property="FontSize" Value="14"/>
     <Setter Property="Background" Value="White"/>
@@ -19,7 +31,7 @@
   </Style>
   <Style x:Key="Caption" TargetType="TextBlock">
     <Setter Property="Foreground" Value="{StaticResource Muted}"/>
-    <Setter Property="FontSize" Value="12"/>
+    <Setter Property="FontSize" Value="13"/>
     <Setter Property="Margin" Value="0,0,0,8"/>
   </Style>
   <Style x:Key="SectionTitle" TargetType="TextBlock">
@@ -58,7 +70,7 @@
     <Setter Property="Background" Value="Transparent"/>
     <Setter Property="Foreground" Value="{StaticResource Secondary}"/>
     <Setter Property="Padding" Value="8,6"/>
-    <Setter Property="FontSize" Value="12"/>
+    <Setter Property="FontSize" Value="13"/>
     <Style.Triggers>
       <Trigger Property="IsMouseOver" Value="True"><Setter Property="Background" Value="{StaticResource Soft}"/></Trigger>
     </Style.Triggers>
@@ -69,20 +81,83 @@
     <Setter Property="FontSize" Value="14"/>
     <Setter Property="Padding" Value="0"/>
   </Style>
+  <!-- Lightweight vector action: transparent until hover or keyboard focus. -->
+  <Style x:Key="PopupActionButton" TargetType="Button" BasedOn="{StaticResource GhostButton}">
+    <Setter Property="Width" Value="30"/><Setter Property="Height" Value="30"/>
+    <Setter Property="Padding" Value="0"/>
+    <Setter Property="Foreground" Value="{StaticResource Ink}"/>
+    <Setter Property="Background" Value="Transparent"/>
+    <Style.Triggers>
+      <Trigger Property="IsKeyboardFocused" Value="True"><Setter Property="Background" Value="{StaticResource Soft}"/></Trigger>
+      <Trigger Property="IsKeyboardFocusWithin" Value="True"><Setter Property="Background" Value="{StaticResource Soft}"/></Trigger>
+    </Style.Triggers>
+  </Style>
+  <!-- The popup's multi-line editor: no frame, no single-line centring, placeholder shares typography. -->
+  <Style x:Key="PopupEditor" TargetType="TextBox">
+    <Setter Property="Background" Value="Transparent"/>
+    <Setter Property="BorderThickness" Value="0"/>
+    <Setter Property="Padding" Value="0,3"/>
+    <Setter Property="VerticalContentAlignment" Value="Top"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="TextBox">
+          <ScrollViewer x:Name="PART_ContentHost" VerticalAlignment="Top" Background="Transparent"
+                        BorderThickness="0" Padding="0"/>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+  <!-- Field frame: a two-pixel accent ring that only becomes visible on focus. The ring and
+       its inner gap are always laid out, so gaining focus never shifts the layout. -->
+  <Style x:Key="FieldFocusRing" TargetType="Border">
+    <Setter Property="BorderThickness" Value="2"/>
+    <Setter Property="BorderBrush" Value="Transparent"/>
+    <Setter Property="CornerRadius" Value="10"/>
+    <Setter Property="Padding" Value="1"/>
+    <Setter Property="SnapsToDevicePixels" Value="True"/>
+  </Style>
+  <!-- Field content host: a presenter without scrollbar rows, so the single-line editor
+       is exactly one 20-dip line centred in the field. The editor copies the field's
+       padding into the host, so the presenter must not bind it again or the line gets
+       squeezed twice and the desired height inflates past the 44-dip field. -->
+  <Style x:Key="FieldContentHost" TargetType="ScrollViewer">
+    <Setter Property="HorizontalScrollBarVisibility" Value="Hidden"/>
+    <Setter Property="VerticalScrollBarVisibility" Value="Auto"/>
+    <Setter Property="Focusable" Value="False"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="ScrollViewer">
+          <ScrollContentPresenter Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}" CanContentScroll="{TemplateBinding CanContentScroll}"/>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
   <Style TargetType="TextBox">
     <Setter Property="Background" Value="White"/>
     <Setter Property="BorderBrush" Value="{StaticResource Line}"/>
     <Setter Property="BorderThickness" Value="1"/>
-    <Setter Property="Padding" Value="11,9"/>
+    <Setter Property="FontSize" Value="14"/>
+    <Setter Property="MinHeight" Value="44"/>
+    <Setter Property="Padding" Value="12,8"/>
     <Setter Property="VerticalContentAlignment" Value="Center"/>
     <Setter Property="Template">
       <Setter.Value>
         <ControlTemplate TargetType="TextBox">
-          <Border x:Name="Chrome" CornerRadius="8" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}">
-            <ScrollViewer x:Name="PART_ContentHost" Margin="{TemplateBinding Padding}"/>
+          <Border Style="{StaticResource FieldFocusRing}" x:Name="FocusRing">
+            <Border x:Name="Chrome" CornerRadius="8" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}">
+              <ScrollViewer x:Name="PART_ContentHost" Style="{StaticResource FieldContentHost}" Margin="{TemplateBinding Padding}" VerticalAlignment="Center" MinHeight="20"/>
+            </Border>
           </Border>
           <ControlTemplate.Triggers>
-            <Trigger Property="IsKeyboardFocusWithin" Value="True"><Setter TargetName="Chrome" Property="BorderBrush" Value="{StaticResource Accent}"/></Trigger>
+            <Trigger Property="IsKeyboardFocusWithin" Value="True">
+              <Setter TargetName="FocusRing" Property="BorderBrush" Value="{StaticResource Accent}"/>
+            </Trigger>
+            <!-- Multi-line editors stretch their content host and top-align the text
+                 instead of reusing the single-line 20-dip centred line. -->
+            <Trigger Property="AcceptsReturn" Value="True">
+              <Setter Property="VerticalContentAlignment" Value="Top"/>
+              <Setter TargetName="PART_ContentHost" Property="VerticalAlignment" Value="Stretch"/>
+            </Trigger>
           </ControlTemplate.Triggers>
         </ControlTemplate>
       </Setter.Value>
@@ -90,16 +165,24 @@
   </Style>
   <Style TargetType="PasswordBox">
     <Setter Property="Background" Value="White"/><Setter Property="BorderBrush" Value="{StaticResource Line}"/>
-    <Setter Property="Padding" Value="11,9"/><Setter Property="VerticalContentAlignment" Value="Center"/>
+    <Setter Property="FontSize" Value="14"/>
+    <Setter Property="MinHeight" Value="44"/>
+    <Setter Property="Padding" Value="12,8"/><Setter Property="VerticalContentAlignment" Value="Center"/>
     <Setter Property="PasswordChar" Value="●"/>
     <Setter Property="Template">
       <Setter.Value>
         <ControlTemplate TargetType="PasswordBox">
-          <Border x:Name="Chrome" CornerRadius="8" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="1">
-            <ScrollViewer x:Name="PART_ContentHost" Margin="{TemplateBinding Padding}"/>
+          <Border Style="{StaticResource FieldFocusRing}" x:Name="FocusRing" Height="{TemplateBinding MinHeight}">
+            <Border x:Name="Chrome" CornerRadius="8" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="1">
+              <!-- Centered with a real minimum height so the genuine caret renders as a full
+                   vertical line, never as a squat dot; no fake caret is drawn. -->
+              <ScrollViewer x:Name="PART_ContentHost" Style="{StaticResource FieldContentHost}" Margin="{TemplateBinding Padding}" VerticalAlignment="Center" MinHeight="20"/>
+            </Border>
           </Border>
           <ControlTemplate.Triggers>
-            <Trigger Property="IsKeyboardFocusWithin" Value="True"><Setter TargetName="Chrome" Property="BorderBrush" Value="{StaticResource Accent}"/></Trigger>
+            <Trigger Property="IsKeyboardFocusWithin" Value="True">
+              <Setter TargetName="FocusRing" Property="BorderBrush" Value="{StaticResource Accent}"/>
+            </Trigger>
           </ControlTemplate.Triggers>
         </ControlTemplate>
       </Setter.Value>
@@ -121,30 +204,35 @@
   </Style>
   <Style TargetType="ComboBox">
     <Setter Property="Background" Value="White"/><Setter Property="BorderBrush" Value="{StaticResource Line}"/>
-    <Setter Property="Padding" Value="11,9"/><Setter Property="MinHeight" Value="38"/>
+    <Setter Property="FontSize" Value="14"/><Setter Property="MinHeight" Value="44"/>
     <Setter Property="Template">
       <Setter.Value>
         <ControlTemplate TargetType="ComboBox">
-          <Grid>
-            <ToggleButton Focusable="False" IsChecked="{Binding IsDropDownOpen, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay}" ClickMode="Press">
-              <ToggleButton.Template>
-                <ControlTemplate TargetType="ToggleButton">
-                  <Border Background="White" CornerRadius="8" BorderBrush="{StaticResource Line}" BorderThickness="1"><Grid><Path Data="M 0 0 L 4 4 L 8 0" Stroke="{StaticResource Muted}" StrokeThickness="1" Width="8" Height="4" HorizontalAlignment="Right" Margin="0,0,12,0"/></Grid></Border>
-                </ControlTemplate>
-              </ToggleButton.Template>
-            </ToggleButton>
-            <ContentPresenter x:Name="SelectionDisplay" Margin="11,9,30,9" IsHitTestVisible="False" Content="{TemplateBinding SelectionBoxItem}" ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}" VerticalAlignment="Center"/>
-            <TextBox x:Name="PART_EditableTextBox" Style="{x:Null}" Visibility="Collapsed" Margin="11,8,30,8" Background="Transparent" BorderThickness="0" Padding="0" MaxLength="100" VerticalContentAlignment="Center"/>
-            <Popup x:Name="PART_Popup" IsOpen="{TemplateBinding IsDropDownOpen}" Placement="Bottom" AllowsTransparency="True" Focusable="False" PopupAnimation="Fade">
-              <Border Background="White" CornerRadius="8" BorderBrush="{StaticResource Line}" BorderThickness="1" Padding="4" MinWidth="{Binding ActualWidth, RelativeSource={RelativeSource TemplatedParent}}" Margin="0,4,0,0">
-                <ScrollViewer MaxHeight="260"><ItemsPresenter/></ScrollViewer>
-              </Border>
-            </Popup>
-          </Grid>
+          <Border Style="{StaticResource FieldFocusRing}" x:Name="FocusRing">
+            <Grid>
+              <ToggleButton Focusable="False" IsChecked="{Binding IsDropDownOpen, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay}" ClickMode="Press">
+                <ToggleButton.Template>
+                  <ControlTemplate TargetType="ToggleButton">
+                    <Border Background="White" CornerRadius="8" BorderBrush="{StaticResource Line}" BorderThickness="1"><Grid><Path Data="M 0 0 L 4 4 L 8 0" Stroke="{StaticResource Muted}" StrokeThickness="1" Width="8" Height="4" HorizontalAlignment="Right" Margin="0,0,12,0"/></Grid></Border>
+                  </ControlTemplate>
+                </ToggleButton.Template>
+              </ToggleButton>
+              <ContentPresenter x:Name="SelectionDisplay" Margin="12,9,30,9" IsHitTestVisible="False" Content="{TemplateBinding SelectionBoxItem}" ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}" VerticalAlignment="Center"/>
+              <TextBox x:Name="PART_EditableTextBox" Style="{x:Null}" Visibility="Collapsed" Margin="12,8,30,8" Background="Transparent" BorderThickness="0" Padding="0" MaxLength="100" VerticalContentAlignment="Center"/>
+              <Popup x:Name="PART_Popup" IsOpen="{TemplateBinding IsDropDownOpen}" Placement="Bottom" AllowsTransparency="True" Focusable="False" PopupAnimation="Fade">
+                <Border Background="White" CornerRadius="8" BorderBrush="{StaticResource Line}" BorderThickness="1" Padding="4" MinWidth="{Binding ActualWidth, RelativeSource={RelativeSource TemplatedParent}}" Margin="0,4,0,0">
+                  <ScrollViewer MaxHeight="260"><ItemsPresenter/></ScrollViewer>
+                </Border>
+              </Popup>
+            </Grid>
+          </Border>
           <ControlTemplate.Triggers>
             <Trigger Property="IsEditable" Value="True">
               <Setter TargetName="SelectionDisplay" Property="Visibility" Value="Collapsed"/>
               <Setter TargetName="PART_EditableTextBox" Property="Visibility" Value="Visible"/>
+            </Trigger>
+            <Trigger Property="IsKeyboardFocusWithin" Value="True">
+              <Setter TargetName="FocusRing" Property="BorderBrush" Value="{StaticResource Accent}"/>
             </Trigger>
           </ControlTemplate.Triggers>
         </ControlTemplate>
@@ -182,6 +270,12 @@
     <Setter Property="Cursor" Value="Hand"/>
     <Style.Triggers>
       <Trigger Property="IsMouseOver" Value="True"><Setter Property="Background" Value="#F4EACD"/><Setter Property="Foreground" Value="{StaticResource Ink}"/></Trigger>
+      <!-- Keyboard focus is visible without moving focus when the popup opens. -->
+      <Trigger Property="IsKeyboardFocused" Value="True">
+        <Setter Property="Background" Value="{StaticResource Soft}"/>
+        <Setter Property="Foreground" Value="{StaticResource Ink}"/>
+        <Setter Property="TextDecorations" Value="Underline"/>
+      </Trigger>
     </Style.Triggers>
   </Style>
   <Style TargetType="Expander">
@@ -205,7 +299,7 @@
   </Style>
   <Style x:Key="ScrollThumb" TargetType="Thumb">
     <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Thumb">
-      <Border Background="#929BA5" CornerRadius="3" Margin="1,2"/>
+      <Border Background="#C4CBD2" CornerRadius="3" Margin="1,2"/>
     </ControlTemplate></Setter.Value></Setter>
   </Style>
   <Style x:Key="ScrollTrackButton" TargetType="RepeatButton">
@@ -214,15 +308,22 @@
   </Style>
   <Style TargetType="ScrollBar">
     <Setter Property="Width" Value="7"/><Setter Property="MinHeight" Value="20"/>
-    <Setter Property="Background" Value="Transparent"/><Setter Property="Opacity" Value="0.55"/>
+    <Setter Property="Background" Value="Transparent"/><Setter Property="Opacity" Value="0.7"/>
     <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ScrollBar">
       <Track x:Name="PART_Track" IsDirectionReversed="True" Orientation="{TemplateBinding Orientation}">
         <Track.DecreaseRepeatButton><RepeatButton Style="{StaticResource ScrollTrackButton}" Command="ScrollBar.PageUpCommand"/></Track.DecreaseRepeatButton>
-        <Track.Thumb><Thumb Style="{StaticResource ScrollThumb}" MinHeight="24"/></Track.Thumb>
+        <Track.Thumb><Thumb x:Name="Thumb" Style="{StaticResource ScrollThumb}" MinHeight="24"/></Track.Thumb>
         <Track.IncreaseRepeatButton><RepeatButton Style="{StaticResource ScrollTrackButton}" Command="ScrollBar.PageDownCommand"/></Track.IncreaseRepeatButton>
       </Track>
+      <!-- A thin neutral bar that only strengthens on hover; the reserved SlimScrollViewer
+           column keeps it from ever changing the text's usable width. -->
+      <ControlTemplate.Triggers>
+        <Trigger Property="IsMouseOver" Value="True">
+          <Setter Property="Opacity" Value="1"/>
+          <Setter TargetName="Thumb" Property="Background" Value="{StaticResource Muted}"/>
+        </Trigger>
+      </ControlTemplate.Triggers>
     </ControlTemplate></Setter.Value></Setter>
-    <Style.Triggers><Trigger Property="IsMouseOver" Value="True"><Setter Property="Opacity" Value="1"/></Trigger></Style.Triggers>
   </Style>
   <Style TargetType="ScrollViewer"><Setter Property="HorizontalScrollBarVisibility" Value="Disabled"/><Setter Property="PanningMode" Value="VerticalOnly"/></Style>
   <Style x:Key="SlimScrollViewer" TargetType="ScrollViewer" BasedOn="{StaticResource {x:Type ScrollViewer}}">
@@ -238,9 +339,26 @@
     <Setter Property="IsUndoEnabled" Value="False"/>
     <Setter Property="BorderThickness" Value="0"/><Setter Property="Background" Value="Transparent"/>
     <Setter Property="Padding" Value="0"/><Setter Property="IsReadOnly" Value="True"/>
-    <Setter Property="IsDocumentEnabled" Value="True"/><Setter Property="VerticalScrollBarVisibility" Value="Disabled"/>
+    <Setter Property="IsDocumentEnabled" Value="True"/>
+    <Setter Property="VerticalScrollBarVisibility" Value="Disabled"/>
     <Setter Property="HorizontalScrollBarVisibility" Value="Disabled"/><Setter Property="MinHeight" Value="0"/>
     <Setter Property="SelectionBrush" Value="#BACCDD"/>
+    <!-- The reading text hosts its own flow directly: the frame and the host padding the
+         stock template adds around the document are gone, so the first glyph starts at the
+         control's own left edge - the same edge the label above and the original beside it
+         start from. The document, its selectable read-only text and the wheel's own inner
+         scroller all stay: PART_ContentHost is still the ScrollViewer that hosts and scrolls
+         the flow, and it is still what a wheel notch over the text finds first. -->
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="RichTextBox">
+          <ScrollViewer x:Name="PART_ContentHost" VerticalAlignment="Top" Background="Transparent"
+                        BorderThickness="0" Padding="0" Focusable="False"
+                        VerticalScrollBarVisibility="{TemplateBinding VerticalScrollBarVisibility}"
+                        HorizontalScrollBarVisibility="{TemplateBinding HorizontalScrollBarVisibility}"/>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
   </Style>
   <Style TargetType="ListBoxItem">
     <Setter Property="Padding" Value="16,14"/>

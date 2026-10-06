@@ -1,0 +1,16 @@
+Source Han Sans SC, taken unmodified from Adobe's official repository:
+
+  https://github.com/adobe-fonts/source-han-sans
+  release branch, OTF/SimplifiedChinese/ (version 2.005)
+
+Files kept here, byte for byte as published:
+
+  SourceHanSansSC-Regular.otf  16529832 bytes
+  SourceHanSansSC-Bold.otf     16963428 bytes
+  LICENSE.txt                     4463 bytes (SIL Open Font License 1.1)
+
+Both faces carry the family name "Source Han Sans SC" internally. They are embedded in
+Leaf.exe and used through the paper typeface declared in src/Leaf/Views/Theme.xaml, so the
+reading page renders in them on a machine that never installed the font. Nothing is
+subsetted, renamed or otherwise modified, and the faces are never distributed on their own:
+the licence travels inside the executable with them.
