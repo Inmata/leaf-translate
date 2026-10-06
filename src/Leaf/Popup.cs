@@ -388,38 +388,48 @@ namespace Leaf
         {
             double scale = TypographyScale(Popup.Width, Popup.Height);
             var source = Ui.Get<TextBox>(Popup, "SourceText");
-            source.FontSize = 16 * scale;
+            source.FontSize = 18 * scale;
             source.MaxHeight = 100 * scale;
             var translation = Ui.Get<RichTextBox>(Popup, "TranslationText");
-            translation.FontSize = translation.Document.FontSize = Math.Max(14, 17 * scale);
-            foreach (var paragraph in translation.Document.Blocks.OfType<Paragraph>()) paragraph.LineHeight = 27 * scale;
+            translation.FontSize = translation.Document.FontSize = Math.Max(14, 20 * scale);
+            foreach (var paragraph in translation.Document.Blocks.OfType<Paragraph>()) paragraph.LineHeight = 30 * scale;
             Ui.Get<TextBox>(Popup, "SourceInput").FontSize = Math.Max(14, 16 * scale);
-            SetTypography("WordTitle", Math.Max(14, 18 * scale), 0);
-            ApplyReadingTypography(Ui.Get<RichTextBox>(Popup, "WordMeaning"), Math.Max(14, 16 * scale), 25 * scale);
-            ApplyReadingTypography(Ui.Get<RichTextBox>(Popup, "WordMeta"), 12, 0);
+            SetTypography("WordTitle", Math.Max(14, 20 * scale), 0);
+            ApplyReadingTypography(Ui.Get<RichTextBox>(Popup, "WordMeaning"), Math.Max(14, 17 * scale), 27 * scale);
+            ApplyReadingTypography(Ui.Get<RichTextBox>(Popup, "WordMeta"), 13, 0);
             SetTypography("ErrorText", Math.Max(12, 13 * scale), 21 * scale);
-            // Label/content pairs alternate in these panels; content is a reading box.
-            foreach (string name in new[] { "LearningSections", "ChatMessages" }) {
-                var children = Ui.Get<StackPanel>(Popup, name).Children;
-                for (int i = 0; i < children.Count; i++) {
-                    bool label = i % 2 == 0;
-                    var text = children[i] as TextBlock;
-                    if (text != null) {
-                        text.FontSize = label ? 13 : Math.Max(13, 14 * scale);
-                        if (!label) text.LineHeight = 24 * scale;
-                        text.Margin = new Thickness(0, 0, 0, (label ? 7 : 20) * scale);
-                        continue;
-                    }
-                    var reading = children[i] as RichTextBox;
-                    if (reading == null) continue;
-                    ApplyReadingTypography(reading, Math.Max(13, 14 * scale), 24 * scale);
-                    reading.Margin = new Thickness(0, 0, 0, 20 * scale);
+            // Learning sections: a 16 SemiBold title 8 over 16/26 reading content, with 24
+            // between sections. Chat labels stay small and tight.
+            var learning = Ui.Get<StackPanel>(Popup, "LearningSections").Children;
+            for (int i = 0; i < learning.Count; i++) {
+                bool label = i % 2 == 0;
+                var text = learning[i] as TextBlock;
+                if (text != null) {
+                    text.FontSize = Math.Max(13, 16 * scale);
+                    if (label) text.FontWeight = FontWeights.SemiBold;
+                    text.Margin = new Thickness(0, 0, 0, 8 * scale);
+                    continue;
+                }
+                var reading = learning[i] as RichTextBox;
+                if (reading == null) continue;
+                ApplyReadingTypography(reading, Math.Max(13, 16 * scale), 26 * scale);
+                reading.Margin = new Thickness(0, 0, 0, 24 * scale);
+            }
+            var chat = Ui.Get<StackPanel>(Popup, "ChatMessages").Children;
+            for (int i = 0; i < chat.Count; i++) {
+                bool label = i % 2 == 0;
+                var text = chat[i] as TextBlock;
+                if (text != null) {
+                    text.FontSize = label ? 13 : Math.Max(13, 14 * scale);
+                    if (!label) text.LineHeight = 24 * scale;
+                    text.Margin = new Thickness(0, 0, 0, (label ? 7 : 20) * scale);
+                    continue;
                 }
             }
             double compact = (scale - 0.84) / 0.16;
             Ui.Get<Grid>(Popup, "PopupContent").Margin = new Thickness(18 + 8 * compact, 12, 18 + 8 * compact, 16 + 8 * compact);
             Ui.Get<Border>(Popup, "SourcePanel").Padding = new Thickness(0, 8 + 4 * compact, 0, 6 + 6 * compact);
-            Ui.Get<ScrollViewer>(Popup, "BodyScroll").Margin = new Thickness(0, 16 + 4 * compact, 0, 0);
+            Ui.Get<ScrollViewer>(Popup, "BodyScroll").Margin = new Thickness(0, 20 + 4 * compact, 0, 0);
             var input = Ui.Get<TextBox>(Popup, "QuestionInput"); input.FontSize = Math.Max(12, 14 * scale); input.Height = 66 * scale;
         }
         private void SetTypography(string name, double font, double line)
@@ -740,7 +750,7 @@ namespace Leaf
             }.Where(x => !string.IsNullOrWhiteSpace(x))));
             var panel = Ui.Get<StackPanel>(Popup, "LearningSections"); panel.Children.Clear();
             foreach (var section in card.sections) {
-                panel.Children.Add(new TextBlock { Text = section.title, FontSize = 13, FontWeight = FontWeights.Medium, Foreground = Ui.Brush("Ink"), Margin = new Thickness(0, 0, 0, 7) });
+                panel.Children.Add(new TextBlock { Text = section.title, FontSize = 16, FontWeight = FontWeights.SemiBold, Foreground = Ui.Brush("Ink"), Margin = new Thickness(0, 0, 0, 8) });
                 var content = NewReadingBox();
                 SetReadingText(content, section.content);
                 panel.Children.Add(content);
@@ -847,8 +857,8 @@ namespace Leaf
             return new WordCard {
                 word = word, lemma = word, part_of_speech = "名词", meaning = "高超的本领；非凡的技艺",
                 target_phrase = "本领", sections = new List<LearningSection> {
-                    new LearningSection { title = "近义词比较", content = "prowess 强调在某个领域展现出的高超能力。\npower 更广，可以指力量、权力或影响力。" },
-                    new LearningSection { title = "语境", content = "combat prowess 指战斗本领；an edge 在这里是「优势」，不是物体的边缘。" }
+                    new LearningSection { title = "与 power 有什么区别？", content = "prowess 强调某个领域的高超能力。\npower 更广，可以指力量、权力或影响力。" },
+                    new LearningSection { title = "放回这句话", content = "combat prowess 指战斗本领；an edge 在这里是「优势」。" }
                 }
             };
         }
