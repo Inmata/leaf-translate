@@ -73,6 +73,16 @@ namespace Leaf
         public object Data { get { return data; } }
     }
 
+    // The clipboard formats of one data object, as the backup needs them. A data object cannot
+    // be built off-desktop, so this is the one step a check scripts; the rule that decides
+    // whether a backup is complete stays in Native.Materialize.
+    public interface IClipboardFormatSource
+    {
+        string[] Formats { get; }
+        // False when this format could not be read at all.
+        bool TryRead(string format, out object value);
+    }
+
     // The desktop operations the copy worker is allowed to perform, so its sequence,
     // ownership, cancellation and restore rules can be checked with a scripted host.
     public interface ICopyHost
@@ -425,6 +435,38 @@ namespace Leaf
         }
         private static bool ModifierKeysDown() { return new[] { 16, 17, 18, 91, 92 }.Any(key => (GetAsyncKeyState(key) & 0x8000) != 0); }
 
+        // The old clipboard is materialised while it can still be read: a delayed-rendering
+        // proxy belongs to the source application and could not be rendered after this copy
+        // replaced it. Anything short of every format read successfully stays unknown, because
+        // a partial copy must never be put back as if it were what the user had.
+        public static ClipboardBackup Materialize(IClipboardFormatSource source)
+        {
+            if (source == null) return null;
+            string[] formats = source.Formats;
+            if (formats == null || formats.Length == 0) return null;
+            var copy = new Forms.DataObject();
+            foreach (string format in formats) {
+                object value;
+                try { if (!source.TryRead(format, out value)) return null; }
+                catch { return null; }
+                if (value != null) copy.SetData(format, value);
+            }
+            return copy.GetFormats(false).Length == 0 ? null : ClipboardBackup.Of(copy);
+        }
+
+        // The real clipboard behind the materialisation: one data object, read once per format.
+        private sealed class ClipboardFormatSource : IClipboardFormatSource
+        {
+            private readonly Forms.IDataObject data;
+            public ClipboardFormatSource(Forms.IDataObject data) { this.data = data; }
+            public string[] Formats { get { return data.GetFormats(false); } }
+            public bool TryRead(string format, out object value)
+            {
+                try { value = data.GetData(format, false); return true; }
+                catch { value = null; return false; }
+            }
+        }
+
         // Everything the copy worker does to the desktop. The worker's decisions are the
         // part worth checking, so they run against this seam instead of the real clipboard.
         private sealed class DesktopCopyHost : ICopyHost
@@ -455,14 +497,7 @@ namespace Leaf
             {
                 var data = Forms.Clipboard.GetDataObject();
                 if (data == null) return ClipboardBackup.Empty();
-                string[] formats = data.GetFormats(false);
-                if (formats == null || formats.Length == 0) return null;
-                var copy = new Forms.DataObject();
-                foreach (string format in formats) {
-                    try { object value = data.GetData(format, false); if (value != null) copy.SetData(format, value); }
-                    catch { return null; }
-                }
-                return copy.GetFormats(false).Length == 0 ? null : ClipboardBackup.Of(copy);
+                return Materialize(new ClipboardFormatSource(data));
             }
             public void Restore(ClipboardBackup backup)
             {
