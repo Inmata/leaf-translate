@@ -39,6 +39,16 @@ namespace Leaf
             Popup.Closed += (s, e) => { if (settingsController != null) settingsController.Detach(); };
         }
 
+        // The top-bar entry is a toggle: while its page is open the same control leaves it,
+        // through the exact flush the back entry runs, so a pending edit is applied and a
+        // failed flush keeps the page open with its reason. Every other entry - the tray, the
+        // error panel's 打开设置, the recovery barrier - still only opens the page.
+        private void ToggleSettingsPage()
+        {
+            if (IsSettingsPageOpen) { var ignored = TryLeaveSettingsPageAsync(); return; }
+            ShowSettingsPage();
+        }
+
         public void ShowSettingsPage()
         {
             if (exiting || IsSettingsPageOpen) return;

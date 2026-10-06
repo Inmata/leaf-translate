@@ -46,6 +46,11 @@ namespace Leaf
         private int pendingHighlightStart = -1, pendingHighlightEnd = -1;
         private double bodyScrollBackup;
         private PreviousSessionSnapshot previousSession;
+        // The learning card's own state: the entry being explained and the one placeholder
+        // line shown while no card is ready. The finished card itself is selectedCard; all
+        // three are rendered by the single document builder below.
+        private string wordCardWord;
+        private string wordCardNotice;
 
         private sealed class PreviousSessionSnapshot
         {
@@ -72,7 +77,7 @@ namespace Leaf
             Popup.LocationChanged += (s, e) => QueuePlacementSave();
             Popup.SizeChanged += (s, e) => { UpdatePopupTypography(); QueuePlacementSave(); };
             Ui.Click(Popup, "HideButton", () => { var ignored = LeaveSettingsThenAsync(HidePopup); });
-            Ui.Click(Popup, "SettingsButton", ShowSettingsPage);
+            Ui.Click(Popup, "SettingsButton", ToggleSettingsPage);
             Ui.Click(Popup, "EditSourceButton", () => BeginSourceEdit(true));
             Ui.Click(Popup, "TranslateButton", async () => await SubmitSourceAsync());
             var sourceInput = Ui.Get<TextBox>(Popup, "SourceInput");
@@ -161,6 +166,7 @@ namespace Leaf
                 wordGeneration.Next();
                 if (wordCancellation != null) wordCancellation.Cancel();
                 wordBusy = false; selectedWord = null; selectedCard = null;
+                wordCardWord = null; wordCardNotice = null;
                 HighlightSource(); DrawTranslation(""); Ui.Visible(Ui.Get<Border>(Popup, "WordPanel"), false); Topic(); Busy();
             });
             var contextMenu = new ContextMenu();
@@ -184,9 +190,10 @@ namespace Leaf
                     async (s, e) => { e.Handled = true; await CopySelectionAsync(SelectionTextOf(reading)); },
                     (s, e) => { e.CanExecute = SelectionTextOf(reading).Length > 0; e.Handled = true; }));
             }
-            foreach (string name in new[] { "WordMeaning", "WordMeta" })
-                WireSelectableReading(Ui.Get<RichTextBox>(Popup, name));
-            WireLearningText(Ui.Get<TextBox>(Popup, "WordTitle"));
+            // One marked control now carries the whole learning card; the internal selection
+            // read takes the user's own range straight from it, with no automation and no
+            // simulated copy.
+            WireSelectableReading(Ui.Get<RichTextBox>(Popup, "WordCard"));
             InitializeSettingsPage();
             WireWheelRouting();
             UpdateTopBarState();
@@ -384,51 +391,60 @@ namespace Leaf
             menu.Items.Add(new MenuItem { Header = "全选", Command = ApplicationCommands.SelectAll });
             box.ContextMenu = menu;
         }
-        // A learning heading is ordinary paper text, not a control label: the same read-only
-        // box as the reading area, so the word entry and every section title answer Ctrl+C
-        // and the in-window selection shortcut with the text under the user's own selection.
-        private TextBox NewLearningTitle(string text)
+        // The paper's one typeface, read from the same resource the window style uses, so a
+        // document built here and a window-wide default can never drift apart.
+        private static FontFamily PaperFontFamily
         {
-            var box = new TextBox {
-                Style = (Style)Popup.FindResource("PaperTitle"), Text = text ?? "",
-                FontWeight = FontWeights.SemiBold, Foreground = Ui.Brush("Ink"), IsTabStop = false
+            get { return (FontFamily)Application.Current.Resources["PaperFontFamily"]; }
+        }
+        // One place builds the whole learning card as a single read-only document: the entry,
+        // the meaning, the part of speech and lemma, and every section heading and body, laid
+        // out as paragraphs of one flow. A drag that starts on a heading therefore runs
+        // straight on into the content under it, which separate controls could never do.
+        // Only a card change, a loading or failed state, or a real typography change rebuilds
+        // it - never a selection, a scroll or a wheel notch.
+        private void DrawWordCard()
+        {
+            double scale = TypographyScale(Popup.Width, Popup.Height);
+            var document = new FlowDocument {
+                PagePadding = new Thickness(0), FontFamily = PaperFontFamily,
+                FontSize = Math.Max(13, 16 * scale)
             };
-            WireLearningText(box);
-            return box;
+            if (!string.IsNullOrEmpty(wordCardWord))
+                document.Blocks.Add(CardParagraph(wordCardWord, Math.Max(14, 18 * scale), FontWeights.SemiBold,
+                    Ui.Brush("Ink"), new Thickness(0, 0, 0, 10 * scale), 0));
+            string meaning = selectedCard != null ? selectedCard.meaning : wordCardNotice;
+            if (!string.IsNullOrWhiteSpace(meaning))
+                document.Blocks.Add(CardParagraph(meaning, Math.Max(13, 16 * scale), FontWeights.Normal,
+                    Ui.Brush("Ink"), new Thickness(0, 0, 0, 4 * scale), 25 * scale));
+            if (selectedCard != null) {
+                string meta = string.Join(" · ", new[] {
+                    selectedCard.part_of_speech, string.IsNullOrEmpty(selectedCard.lemma) ? "" : "原形 " + selectedCard.lemma
+                }.Where(x => !string.IsNullOrWhiteSpace(x)));
+                if (meta.Length > 0)
+                    document.Blocks.Add(CardParagraph(meta, 13, FontWeights.Normal, Ui.Brush("Muted"),
+                        new Thickness(0, 0, 0, 0), 0));
+                // A section keeps the old hierarchy - a 15 SemiBold heading over 16/25 reading
+                // text - with a little more air between one section and the next.
+                foreach (var section in selectedCard.sections ?? new List<LearningSection>()) {
+                    if (!string.IsNullOrWhiteSpace(section.title))
+                        document.Blocks.Add(CardParagraph(section.title, Math.Max(13, 15 * scale), FontWeights.SemiBold,
+                            Ui.Brush("Ink"), new Thickness(0, 20 * scale, 0, 9 * scale), 0));
+                    if (!string.IsNullOrWhiteSpace(section.content))
+                        document.Blocks.Add(CardParagraph(section.content, Math.Max(12, 16 * scale), FontWeights.Normal,
+                            Ui.Brush("Secondary"), new Thickness(0, 0, 0, 6 * scale), 25 * scale));
+                }
+            }
+            Ui.Get<RichTextBox>(Popup, "WordCard").Document = document;
         }
-        // The 复制/全选 menu and the shared selectable mark the reading boxes carry, for the
-        // learning titles too: the word entry and every section heading are the same ordinary
-        // paper text, so the in-window shortcut reads their selection exactly as it reads the
-        // reading controls'.
-        private static void WireLearningText(TextBox box)
-        {
-            box.Tag = "LeafSelectableText";
-            var menu = new ContextMenu();
-            menu.Items.Add(new MenuItem { Header = "复制", Command = ApplicationCommands.Copy });
-            menu.Items.Add(new MenuItem { Header = "全选", Command = ApplicationCommands.SelectAll });
-            box.ContextMenu = menu;
-        }
-        private RichTextBox NewReadingBox()
-        {
-            var box = new RichTextBox { Style = (Style)Application.Current.Resources["ReadingText"], Foreground = Ui.Brush("Secondary") };
-            box.Document = new FlowDocument { PagePadding = new Thickness(0), FontFamily = new FontFamily("Microsoft YaHei UI, Segoe UI") };
-            WireSelectableReading(box);
-            return box;
-        }
-        // Plain text into a reading box: "\n" inside a Run paints a line break, so
+        // Plain text into one card paragraph: "\n" inside a Run paints a line break, so
         // paragraphs, surrogate pairs and combining marks survive without markup.
-        private static void SetReadingText(RichTextBox box, string text)
+        private static Paragraph CardParagraph(string text, double font, FontWeight weight, Brush foreground, Thickness margin, double lineHeight)
         {
-            box.Document.Blocks.Clear();
-            var paragraph = new Paragraph { Margin = new Thickness(0) };
+            var paragraph = new Paragraph { FontSize = font, FontWeight = weight, Foreground = foreground, Margin = margin };
+            if (lineHeight > 0) paragraph.LineHeight = lineHeight;
             paragraph.Inlines.Add(new Run(text ?? ""));
-            box.Document.Blocks.Add(paragraph);
-        }
-        private static void ApplyReadingTypography(RichTextBox box, double font, double line)
-        {
-            box.FontSize = box.Document.FontSize = font;
-            if (line <= 0) return;
-            foreach (var paragraph in box.Document.Blocks.OfType<Paragraph>()) paragraph.LineHeight = line;
+            return paragraph;
         }
         public void BeginSourceEdit(bool focus)
         {
@@ -503,25 +519,12 @@ namespace Leaf
             foreach (var paragraph in translation.Document.Blocks.OfType<Paragraph>()) paragraph.LineHeight = 27 * scale;
             var editor = Ui.Get<TextBox>(Popup, "SourceInput");
             editor.FontSize = Math.Max(13, 16 * scale);
-            Ui.Get<TextBox>(Popup, "WordTitle").FontSize = Math.Max(14, 18 * scale);
-            ApplyReadingTypography(Ui.Get<RichTextBox>(Popup, "WordMeaning"), Math.Max(13, 16 * scale), 25 * scale);
-            ApplyReadingTypography(Ui.Get<RichTextBox>(Popup, "WordMeta"), 13, 0);
             SetTypography("ErrorText", 13, 21);
-            // Learning sections: a 15 SemiBold title 8 over 16/25 reading content, with 24
-            // between sections. Chat labels stay small and tight.
-            var learning = Ui.Get<StackPanel>(Popup, "LearningSections").Children;
-            for (int i = 0; i < learning.Count; i++) {
-                var title = learning[i] as TextBox;
-                if (title != null) {
-                    title.FontSize = Math.Max(13, 15 * scale);
-                    title.Margin = new Thickness(0, 0, 0, 8 * scale);
-                    continue;
-                }
-                var reading = learning[i] as RichTextBox;
-                if (reading == null) continue;
-                ApplyReadingTypography(reading, Math.Max(12, 16 * scale), 25 * scale);
-                reading.Margin = new Thickness(0, 0, 0, 24 * scale);
-            }
+            // The learning card's own ladder - an 18 entry, 16 reading, a 13 auxiliary line
+            // and 15 headings - lives in the one document it is built from, so a scale change
+            // rebuilds that document and patches no control paragraph by paragraph. A hidden
+            // card is left alone; the next card change rebuilds it at the current scale.
+            if (Ui.Get<Border>(Popup, "WordPanel").Visibility == Visibility.Visible) DrawWordCard();
             var chat = Ui.Get<StackPanel>(Popup, "ChatMessages").Children;
             for (int i = 0; i < chat.Count; i++) {
                 bool label = i % 2 == 0;
@@ -791,11 +794,11 @@ namespace Leaf
             // History keeps its language/learning context, while new calls use the current saved API.
             var provider = Json.Copy(Store.Settings.Provider);
             string cardKey = demo ? word.Key : CacheKeys.ForWord(record, word, provider);
-            Ui.Get<TextBox>(Popup, "WordTitle").Text = word.Text;
-            SetReadingText(Ui.Get<RichTextBox>(Popup, "WordMeaning"), "正在查词…");
-            SetReadingText(Ui.Get<RichTextBox>(Popup, "WordMeta"), "");
-            Ui.Get<StackPanel>(Popup, "LearningSections").Children.Clear();
+            // The loading state is the same document as the finished card: the entry with one
+            // short line under it, so nothing is swapped out when the card arrives.
+            wordCardWord = word.Text; wordCardNotice = "正在查词…";
             Ui.Visible(Ui.Get<Border>(Popup, "WordPanel"), true);
+            DrawWordCard();
             Ui.Visible(Ui.Get<Button>(Popup, "ExpandWordButton"), false);
             WordCard cached;
             if (!force && record.Cards.TryGetValue(cardKey, out cached)) { selectedCard = cached; wordBusy = false; DrawCard(cached); Busy(); return; }
@@ -821,7 +824,8 @@ namespace Leaf
             catch (Exception error) {
                 Log.Event("word_card_failed", error);
                 if (Current == record && wordGeneration.IsCurrent(version)) {
-                    wordBusy = false; Busy(); SetReadingText(Ui.Get<RichTextBox>(Popup, "WordMeaning"), "词卡暂未完成。");
+                    wordBusy = false; Busy();
+                    wordCardNotice = "词卡暂未完成。"; DrawWordCard();
                     var bundle = new RetryBundle(new[] { operation });
                     ShowError(error is UserError ? error.Message : "查词没有完成，请重试。", () => { var ignored = RetryAsync(bundle); });
                 }
@@ -835,19 +839,9 @@ namespace Leaf
 
         private void DrawCard(WordCard card)
         {
-            SetReadingText(Ui.Get<RichTextBox>(Popup, "WordMeaning"), card.meaning);
-            SetReadingText(Ui.Get<RichTextBox>(Popup, "WordMeta"), string.Join(" · ", new[] {
-                card.part_of_speech, string.IsNullOrEmpty(card.lemma) ? "" : "原形 " + card.lemma
-            }.Where(x => !string.IsNullOrWhiteSpace(x))));
-            var panel = Ui.Get<StackPanel>(Popup, "LearningSections"); panel.Children.Clear();
-            foreach (var section in card.sections) {
-                panel.Children.Add(NewLearningTitle(section.title));
-                var content = NewReadingBox();
-                SetReadingText(content, section.content);
-                panel.Children.Add(content);
-            }
+            wordCardNotice = null;
+            DrawWordCard();
             HighlightSource(); DrawTranslation(card.target_phrase); Topic();
-            UpdatePopupTypography();
         }
         private void Topic()
         {
@@ -940,7 +934,7 @@ namespace Leaf
             var word = TextTools.Pieces(Current.Source).First(p => p.Text == "prowess");
             Current.Cards[word.Key] = DemoCard("prowess");
             DisplayRecord(); selectedWord = word; selectedCard = Current.Cards[word.Key];
-            Ui.Get<TextBox>(Popup, "WordTitle").Text = word.Text;
+            wordCardWord = word.Text;
             Ui.Visible(Ui.Get<Border>(Popup, "WordPanel"), true); DrawCard(selectedCard);
         }
         private static WordCard DemoCard(string word)

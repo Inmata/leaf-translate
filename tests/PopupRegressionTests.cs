@@ -109,7 +109,7 @@ internal static class PopupRegressionTests
             await Until(() => record.Cards.Count > 0);
             Check(record.Cards.Count == 1 && record.Cards.Values.All(c => c.meaning == "新的词义"),
                 "Only the retried word lookup lands in the conversation");
-            Check(Reading(shell.Popup, "WordMeaning") == "新的词义",
+            Check(Reading(shell.Popup, "WordCard").Contains("新的词义"),
                 "A retried word lookup settles on its card instead of staying busy");
 
             // A retry stops mattering once another conversation replaces the stopped one.
@@ -269,7 +269,7 @@ internal static class PopupRegressionTests
             var word = TextTools.Pieces(record.Source).First(p => p.IsWord);
             await shell.SelectWordAsync(word, false);
             Check(Ui.Get<Border>(shell.Popup, "WordPanel").Visibility == Visibility.Visible &&
-                Ui.Get<TextBox>(shell.Popup, "WordTitle").Text == word.Text,
+                CardHeadword(shell.Popup) == word.Text,
                 "The word card is on screen before recovery");
             Check(shell.WordHighlighted,
                 "The selected word is highlighted before recovery");
@@ -280,8 +280,8 @@ internal static class PopupRegressionTests
             Check(handler.Calls == calls && ReferenceEquals(shell.Current, record),
                 "Recovering the same text makes no API call");
             Check(Ui.Get<Border>(shell.Popup, "WordPanel").Visibility == Visibility.Visible &&
-                Ui.Get<TextBox>(shell.Popup, "WordTitle").Text == word.Text &&
-                Reading(shell.Popup, "WordMeaning") == "夹具词义",
+                CardHeadword(shell.Popup) == word.Text &&
+                Reading(shell.Popup, "WordCard").Contains("夹具词义"),
                 "Recovery keeps the word card instead of rebuilding the record");
             Check(shell.WordHighlighted,
                 "Recovery keeps the highlight on the selected word");
@@ -401,7 +401,7 @@ internal static class PopupRegressionTests
                 Ui.Get<Grid>(shell.Popup, "TranslatePage").Visibility == Visibility.Visible,
                 "Leaving settings returns to the reading page");
             Check(Ui.Get<Border>(shell.Popup, "WordPanel").Visibility == Visibility.Visible &&
-                Ui.Get<TextBox>(shell.Popup, "WordTitle").Text == word.Text &&
+                CardHeadword(shell.Popup) == word.Text &&
                 Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text == "draft across settings",
                 "The round trip keeps the word card, the conversation and the draft");
             Check(Ui.Get<TextBlock>(shell.Popup, "SourceBadge").Text == "选中文本",
@@ -881,7 +881,7 @@ internal static class PopupRegressionTests
             Check(ReferenceEquals(shell.Current, record) && handler.Calls == 3,
                 "Returning to the previous session restores it without any API call");
             Check(Ui.Get<Border>(shell.Popup, "WordPanel").Visibility == Visibility.Visible &&
-                Ui.Get<TextBox>(shell.Popup, "WordTitle").Text == word.Text,
+                CardHeadword(shell.Popup) == word.Text,
                 "The return restores the previous session's word card");
             Check(Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text == "return draft",
                 "The return restores the previous session's follow-up draft");
@@ -895,7 +895,7 @@ internal static class PopupRegressionTests
         }
     }
 
-    // Learning content is read-only selectable text, marked for the selection source.
+    // Learning content is one read-only selectable document, marked for the selection source.
     private static async Task LearningContentSelectable(string folder)
     {
         var handler = new FixtureHandler();
@@ -904,14 +904,20 @@ internal static class PopupRegressionTests
             var record = shell.Current;
             var word = TextTools.Pieces(record.Source).First(p => p.IsWord);
             await shell.SelectWordAsync(word, false);
-            var meaning = Ui.Get<RichTextBox>(shell.Popup, "WordMeaning");
-            Check(Reading(shell.Popup, "WordMeaning") == "夹具词义",
+            var card = Ui.Get<RichTextBox>(shell.Popup, "WordCard");
+            Check(Reading(shell.Popup, "WordCard").Contains("夹具词义"),
                 "The word meaning renders in the selectable reading control");
-            Check(meaning.IsReadOnly && (string)meaning.Tag == "LeafSelectableText",
-                "The word meaning is read-only and marked for selection");
-            var sections = Ui.Get<StackPanel>(shell.Popup, "LearningSections").Children.OfType<RichTextBox>().ToList();
-            Check(sections.Count > 0 && sections.All(b => b.IsReadOnly && (string)b.Tag == "LeafSelectableText"),
-                "Every learning section is a read-only selectable reading control");
+            Check(card.IsReadOnly && (string)card.Tag == "LeafSelectableText",
+                "The word card is read-only and marked for selection");
+            // The entry, the meaning and every section head and body are paragraphs of that
+            // one document, so a drag from a heading runs on into the content under it.
+            var paragraphs = card.Document.Blocks.OfType<Paragraph>()
+                .Select(p => new TextRange(p.ContentStart, p.ContentEnd).Text.Trim()).ToList();
+            Check(paragraphs.Contains(word.Text) && paragraphs.Contains("词形") && paragraphs.Contains("仅供隔离测试"),
+                "The entry, the section heading and its content are paragraphs of one document");
+            Check(shell.Popup.FindName("WordTitle") == null && shell.Popup.FindName("WordMeaning") == null &&
+                shell.Popup.FindName("LearningSections") == null,
+                "The learning card is no longer split across separate controls");
             Check((string)Ui.Get<RichTextBox>(shell.Popup, "TranslationText").Tag == "LeafSelectableText" &&
                 (string)Ui.Get<TextBox>(shell.Popup, "SourceText").Tag == "LeafSelectableText",
                 "The translation and the original are marked for selection too");
@@ -965,7 +971,7 @@ internal static class PopupRegressionTests
             // of them.
             var cases = new List<ReadingSelection> {
                 new ReadingSelection { Label = "a learning control", Expected = "learning section text", Select = () =>
-                    SelectRange(Ui.Get<StackPanel>(shell.Popup, "LearningSections").Children.OfType<RichTextBox>().First(), "learning section text") },
+                    SelectRange(Ui.Get<RichTextBox>(shell.Popup, "WordCard"), "learning section text") },
                 new ReadingSelection { Label = "the read-only original", Expected = "read-only original text",
                     Select = () => SelectOriginalRange(Ui.Get<TextBox>(shell.Popup, "SourceText"), "read-only original text") },
                 new ReadingSelection { Label = "the original editor", Expected = "editor", Select = () => {
@@ -1299,6 +1305,15 @@ internal static class PopupRegressionTests
     {
         var box = Ui.Get<RichTextBox>(popup, name);
         return new TextRange(box.Document.ContentStart, box.Document.ContentEnd).Text.Trim();
+    }
+
+    // The merged word card's headword is its first paragraph, the same place the entry was
+    // read from when the card was split across separate controls.
+    private static string CardHeadword(Window popup)
+    {
+        var box = Ui.Get<RichTextBox>(popup, "WordCard");
+        var first = box.Document.Blocks.FirstBlock;
+        return first == null ? "" : new TextRange(first.ContentStart, first.ContentEnd).Text.Trim();
     }
 
     private static async Task Until(Func<bool> condition)

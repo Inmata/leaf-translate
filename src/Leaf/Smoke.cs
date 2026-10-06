@@ -600,20 +600,22 @@ namespace Leaf
                 shell.PopulateDemo();
                 Check(Ui.Get<Border>(shell.Popup, "InputPanel").Visibility == Visibility.Collapsed, "Input is hidden before Ask", checks);
                 Check(Ui.Get<Border>(shell.Popup, "WordPanel").Visibility == Visibility.Visible, "Word card is visible for the selected occurrence", checks);
-                var meaning = Ui.Get<RichTextBox>(shell.Popup, "WordMeaning");
-                Check(meaning.IsReadOnly && (meaning.Tag as string) == "LeafSelectableText" &&
-                    new System.Windows.Documents.TextRange(meaning.Document.ContentStart, meaning.Document.ContentEnd).Text.Contains("高超的本领"),
-                    "Word meaning is selectable read-only text", checks);
-                var sections = Ui.Get<StackPanel>(shell.Popup, "LearningSections");
-                Check(sections.Children.OfType<RichTextBox>().Any() &&
-                    sections.Children.OfType<RichTextBox>().All(x => x.IsReadOnly && (x.Tag as string) == "LeafSelectableText"),
-                    "Learning section content is selectable read-only text", checks);
-                // The headings are the same ordinary paper text as the reading boxes, so the
-                // in-window selection read has to find them by the same mark.
-                Check((Ui.Get<TextBox>(shell.Popup, "WordTitle").Tag as string) == "LeafSelectableText" &&
-                    sections.Children.OfType<TextBox>().Any() &&
-                    sections.Children.OfType<TextBox>().All(x => (x.Tag as string) == "LeafSelectableText"),
-                    "Learning headings are marked for the same selection read", checks);
+                // The whole card is one read-only document: the entry, the meaning and every
+                // section heading and body are paragraphs of the same flow, so a drag that
+                // starts on a heading runs on into the content under it, and the in-window
+                // selection read finds it by the same mark as the other reading controls.
+                var card = Ui.Get<RichTextBox>(shell.Popup, "WordCard");
+                var cardParagraphs = card.Document.Blocks.OfType<System.Windows.Documents.Paragraph>()
+                    .Select(p => new System.Windows.Documents.TextRange(p.ContentStart, p.ContentEnd).Text.Trim()).ToList();
+                Check(card.IsReadOnly && (card.Tag as string) == "LeafSelectableText" &&
+                    cardParagraphs.Contains("高超的本领；非凡的技艺"),
+                    "The word card is one selectable read-only document", checks);
+                Check(cardParagraphs.Contains("prowess") && cardParagraphs.Contains("与 power 有什么区别？") &&
+                    cardParagraphs.Contains("放回这句话"),
+                    "The entry and the learning headings are paragraphs of the same card", checks);
+                Check(shell.Popup.FindName("WordTitle") == null && shell.Popup.FindName("WordMeaning") == null &&
+                    shell.Popup.FindName("LearningSections") == null,
+                    "The learning card is no longer split across separate controls", checks);
                 Check(shell.Popup.FindName("SceneCombo") == null, "Popup contains no scene picker", checks);
                 Check(!shell.Popup.ShowActivated, "Popup does not activate on Show", checks);
                 Check(shell.Popup.ShowInTaskbar && shell.Popup.Icon != null, "Popup has a branded taskbar entry", checks);
@@ -630,12 +632,9 @@ namespace Leaf
                 Check(translation.IsReadOnly && shell.Popup.FindName("CopyButton") == null, "Translation supports selection with no redundant copy button", checks);
                 Check(shell.Popup.FindName("SettingsButton") != null, "Settings is available beside pin in the popup", checks);
                 Check(Ui.Get<TextBox>(shell.Popup, "SourceText").FontSize < 16, "Compact popup scales the reading source too", checks);
-                Check(Ui.Get<StackPanel>(shell.Popup, "LearningSections").Children.Cast<object>().All(x => {
-                    var text = x as TextBlock;
-                    if (text != null) return text.FontSize >= 11;
-                    var reading = x as RichTextBox;
-                    return reading == null || reading.FontSize >= 11;
-                }), "Learning text has a readable minimum", checks);
+                Check(Ui.Get<RichTextBox>(shell.Popup, "WordCard").Document.Blocks
+                    .OfType<System.Windows.Documents.Paragraph>().All(p => p.FontSize >= 11),
+                    "Learning text has a readable minimum", checks);
                 Ui.Render(shell.Popup, Path.Combine(folder, "popup-small-question.png"));
                 // The compact screenshot is the state the production collapse click leaves
                 // behind, so it keeps the follow-up entry a user can still reach.

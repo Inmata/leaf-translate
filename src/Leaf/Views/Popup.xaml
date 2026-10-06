@@ -48,12 +48,6 @@
         <Trigger Property="IsMouseOver" Value="True"><Setter Property="Background" Value="{StaticResource Ink}"/></Trigger>
       </Style.Triggers>
     </Style>
-    <!-- A selectable paper title: the reading box without its minimum height, so a word
-         entry or section heading answers Ctrl+C without stranding a 44-dip row. -->
-    <Style x:Key="PaperTitle" TargetType="TextBox" BasedOn="{StaticResource PaperReader}">
-      <Setter Property="MinHeight" Value="0"/>
-      <Setter Property="TextWrapping" Value="Wrap"/>
-    </Style>
   </Window.Resources>
   <Border Margin="8" Background="White" CornerRadius="18" BorderBrush="{StaticResource Line}" BorderThickness="1">
     <Border.Effect><DropShadowEffect Color="#142334" BlurRadius="22" ShadowDepth="3" Opacity="0.16"/></Border.Effect>
@@ -137,8 +131,8 @@
         <ScrollViewer x:Name="BodyScroll" Style="{StaticResource SlimScrollViewer}" Grid.Row="1" VerticalScrollBarVisibility="Auto" Margin="0,24,0,0">
           <StackPanel>
             <TextBlock x:Name="TranslationCaption" Text="译文" Style="{StaticResource Caption}" FontSize="13"/>
-            <RichTextBox x:Name="TranslationText" Style="{StaticResource ReadingText}" FontSize="17" FontWeight="SemiBold" Margin="0,0,8,16">
-              <FlowDocument PagePadding="0" FontFamily="Microsoft YaHei UI, Segoe UI" FontSize="17" FontWeight="SemiBold"/>
+            <RichTextBox x:Name="TranslationText" Style="{StaticResource ReadingText}" FontSize="17" Margin="0,0,8,16">
+              <FlowDocument PagePadding="0" FontFamily="{StaticResource PaperFontFamily}" FontSize="17"/>
             </RichTextBox>
             <Grid x:Name="BusyPanel" Visibility="Collapsed" Margin="0,6,0,10">
               <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
@@ -160,17 +154,15 @@
             <Button x:Name="ExpandWordButton" Content="展开学习" HorizontalAlignment="Left" Style="{StaticResource GhostButton}" Visibility="Collapsed"/>
             <Border x:Name="WordPanel" Visibility="Collapsed" BorderBrush="{StaticResource Line}" BorderThickness="0,1,0,0" Padding="0,24,0,0" Margin="0,24,0,0">
               <StackPanel>
-                <Grid Margin="0,0,0,9">
-                  <TextBox x:Name="WordTitle" Style="{StaticResource PaperTitle}" Text="prowess" FontSize="18" FontWeight="SemiBold" IsTabStop="False" AutomationProperties.Name="词条"/>
-                  <Button x:Name="BackToSentence" Content="收起释义" Style="{StaticResource GhostButton}" HorizontalAlignment="Right" Margin="0,-4,-8,0"/>
-                </Grid>
-                <RichTextBox x:Name="WordMeaning" Style="{StaticResource ReadingText}" FontSize="16" Margin="0,0,0,2" AutomationProperties.Name="词义">
-                  <FlowDocument PagePadding="0" FontFamily="Microsoft YaHei UI, Segoe UI" FontSize="16"/>
+                <!-- The card is one document now, so the collapse action keeps its own line
+                     above it instead of sharing the entry's row and covering the text. -->
+                <Button x:Name="BackToSentence" Content="收起释义" Style="{StaticResource GhostButton}" HorizontalAlignment="Right" Margin="0,-6,-8,-2"/>
+                <!-- The entry, the meaning, the part of speech and lemma, and every section
+                     heading and body are paragraphs of this one read-only flow: a drag that
+                     starts on a heading runs straight on into the content it belongs to. -->
+                <RichTextBox x:Name="WordCard" Style="{StaticResource ReadingText}" FontSize="16" AutomationProperties.Name="学习词卡">
+                  <FlowDocument PagePadding="0" FontFamily="{StaticResource PaperFontFamily}" FontSize="16"/>
                 </RichTextBox>
-                <RichTextBox x:Name="WordMeta" Style="{StaticResource ReadingText}" FontSize="13" Foreground="{StaticResource Muted}" Margin="0,5,0,0" AutomationProperties.Name="词形信息">
-                  <FlowDocument PagePadding="0" FontFamily="Microsoft YaHei UI, Segoe UI" FontSize="13"/>
-                </RichTextBox>
-                <StackPanel x:Name="LearningSections" Margin="0,15,0,4"/>
               </StackPanel>
             </Border>
             <Border x:Name="ChatPanel" Visibility="Collapsed" BorderBrush="{StaticResource Line}" BorderThickness="0,1,0,0" Padding="0,17,0,4" Margin="0,17,0,0">

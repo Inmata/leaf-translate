@@ -6,11 +6,16 @@
   <SolidColorBrush x:Key="Soft" Color="#F1F2F4"/>
   <SolidColorBrush x:Key="Line" Color="#D9DCE1"/>
   <SolidColorBrush x:Key="WordHighlight" Color="#E9D7A0"/>
+  <!-- The paper's one typeface, shared by the window default and every document built in
+       code so no two of them can drift apart. HarmonyOS Sans SC leads: a machine that has it
+       renders in it, and one that has not falls through to the Microsoft YaHei UI and
+       Segoe UI behind it rather than to a substituted face. Icons stay Segoe MDL2 Assets. -->
+  <FontFamily x:Key="PaperFontFamily">HarmonyOS Sans SC, Microsoft YaHei UI, Segoe UI</FontFamily>
   <Geometry x:Key="SubmitArrow">M4,12 L20,12 M13,5 L20,12 L13,19</Geometry>
   <Geometry x:Key="ChatOutline">M4,4 L20,4 L20,16 L10,16 L5,20 L5,16 L4,16 Z</Geometry>
   <Geometry x:Key="FoldChevron">M5,15 L12,8 L19,15</Geometry>
   <Style TargetType="Window">
-    <Setter Property="FontFamily" Value="Microsoft YaHei UI, Segoe UI"/>
+    <Setter Property="FontFamily" Value="{StaticResource PaperFontFamily}"/>
     <Setter Property="Foreground" Value="{StaticResource Ink}"/>
     <Setter Property="FontSize" Value="14"/>
     <Setter Property="Background" Value="White"/>
