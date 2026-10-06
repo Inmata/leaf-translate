@@ -26,11 +26,11 @@ if (-not (Test-Path -LiteralPath $ghPath)) { throw 'GitHub CLI is required. Open
 $env:PATH = (Split-Path -Parent $ghPath) + [IO.Path]::PathSeparator + $env:PATH
 $accountJson = & $ghPath api user
 if ($LASTEXITCODE -ne 0) { throw 'GitHub CLI is not authenticated. Run gh auth login in your own terminal.' }
-$account = ($accountJson -join "`n") | ConvertFrom-Json
+$account = ([regex]::Replace(($accountJson -join "`n"), '\x1B\[[0-?]*[ -/]*[@-~]', '')) | ConvertFrom-Json
 if ($account.login -cne 'Inmata') { throw 'Use the Inmata account first: gh auth switch --hostname github.com --user Inmata' }
 $metadataJson = & $ghPath repo view $repository --json nameWithOwner,visibility,defaultBranchRef
 if ($LASTEXITCODE -ne 0) { throw 'Cannot access the repository.' }
-$metadata = ($metadataJson -join "`n") | ConvertFrom-Json
+$metadata = ([regex]::Replace(($metadataJson -join "`n"), '\x1B\[[0-?]*[ -/]*[@-~]', '')) | ConvertFrom-Json
 if ($metadata.nameWithOwner -cne $repository -or $metadata.visibility -ne 'PUBLIC' -or $metadata.defaultBranchRef.name -ne 'main') {
     throw 'Expected the public Inmata/leaf-translate repository initialized on main.'
 }
@@ -75,7 +75,7 @@ if ($WithRelease) {
     if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ine $expectedChecksum) { throw 'Package checksum mismatch.' }
     $releasesJson = & $ghPath release list --repo $repository --limit 100 --json tagName
     if ($LASTEXITCODE -ne 0) { throw 'Source is published, but the release list could not be read.' }
-    $existingReleases = ($releasesJson -join "`n") | ConvertFrom-Json
+    $existingReleases = ([regex]::Replace(($releasesJson -join "`n"), '\x1B\[[0-?]*[ -/]*[@-~]', '')) | ConvertFrom-Json
     if (@($existingReleases | Where-Object { $_.tagName -eq $tag }).Count -gt 0) { Write-Output ('Release ' + $tag + ' already exists; existing assets were kept.') }
     else {
         & $ghPath release create $tag $archive $checksumFile --repo $repository --target $remoteSha --title ('Leaf ' + $tag) --notes-file (Join-Path $projectRoot ('docs\RELEASE-' + $tag + '.md'))
