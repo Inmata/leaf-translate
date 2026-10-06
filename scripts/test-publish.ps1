@@ -827,3 +827,5 @@ try {
 } finally {
     Remove-FixtureTree -Root $fixtureRoot
 }
+# Expected-failure fixtures must not leak their last native exit code to callers.
+exit 0
