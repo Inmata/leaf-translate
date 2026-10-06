@@ -179,6 +179,10 @@ namespace Leaf
                     await TranslateInternalSelectionAsync(page.Text);
                     return;
                 }
+                // The settings page is not the reading page: a shortcut there stays on the page
+                // and leaves the hidden session - its card, follow-up panel, draft and editor -
+                // exactly as it was, instead of restoring that page behind the settings.
+                if (IsSettingsPageOpen) return;
                 HandleLeafSelectionShortcut(invocation.FocusInputOnShortcut);
                 return;
             }
@@ -499,12 +503,17 @@ namespace Leaf
         public void OpenRecord(TranslationRecord record)
         {
             // Opening a record shows it on the reading page, so an open settings page is left
-            // first; a failed flush keeps that page instead of opening behind it.
-            var ignored = LeaveSettingsThenAsync(() => OpenRecordNow(record));
+            // first; a failed flush keeps that page instead of opening behind it. The epoch the
+            // record was found under is captured here: a clear, a delete or a history disable
+            // while that leave is still flushing invalidates the record, and the delayed entry
+            // must not re-save it under the newer epoch. With no settings page open the entry
+            // runs immediately, exactly as before.
+            long epoch = Store.HistoryEpoch;
+            var ignored = LeaveSettingsThenAsync(() => OpenRecordNow(record, epoch));
         }
-        private void OpenRecordNow(TranslationRecord record)
+        private void OpenRecordNow(TranslationRecord record, long epoch)
         {
-            CancelRequests(); demo = false; Current = record; currentHistoryEpoch = Store.HistoryEpoch;
+            CancelRequests(); demo = false; Current = record; currentHistoryEpoch = epoch;
             DisplayRecord(); ShowPopup();
         }
         public void Forget(string id)
@@ -598,6 +607,11 @@ namespace Leaf
         public async Task ExitAsync()
         {
             if (exiting) return;
+            // A shortcut being recorded is ended while the app is still leaving normally: the
+            // recording holds the global shortcut released, and ending it once `exiting` is set
+            // would skip re-registering it. A flush that fails keeps the app alive, so it must
+            // not be left without its shortcut; the leave's own deactivation is a no-op then.
+            if (settingsController != null) settingsController.OnHostDeactivated();
             exiting = true;
             CancelRequests();
             if (Current != null && !demo) Current.Draft = Ui.Get<TextBox>(Popup, "QuestionInput").Text;

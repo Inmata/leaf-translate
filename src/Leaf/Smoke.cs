@@ -367,6 +367,19 @@ namespace Leaf
             Check(shell.CanReturnToPreviousSession &&
                 Ui.Get<Button>(popup, "BackToPreviousButton").Visibility == Visibility.Visible,
                 "The replaced session offers its back entry", checks);
+            // The new internal session with that entry on screen, in the default size, so the
+            // state a reviewer has to look at exists as an image and not only as a visibility
+            // check. One capture of this state; no other state is rendered again here.
+            var backEntry = Ui.Get<Button>(popup, "BackToPreviousButton");
+            var pageContent = (FrameworkElement)popup.Content;
+            var backOrigin = backEntry.TranslatePoint(new Point(0, 0), pageContent);
+            Check(backOrigin.X >= 0 && backOrigin.Y >= 0 &&
+                backOrigin.X + backEntry.ActualWidth <= pageContent.ActualWidth &&
+                backOrigin.Y + backEntry.ActualHeight <= pageContent.ActualHeight,
+                "The back entry of the new internal session is laid out inside the popup body", checks);
+            string backPath = Capture(popup, folder, "internal-selection-back", checks);
+            Check(CountInkInRect(backPath, new Rect(backOrigin, new Size(backEntry.ActualWidth, backEntry.ActualHeight))) > 0,
+                "The new internal session's back entry paints in its image", checks);
             shell.ReturnToPreviousSession();
             await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
             Layout(popup);

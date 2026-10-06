@@ -32,6 +32,10 @@ namespace Leaf
         private void InitializeSettingsPage()
         {
             Ui.Click(Popup, "SettingsBackButton", () => { var ignored = TryLeaveSettingsPageAsync(); });
+            // The popup is the settings host, so its own Deactivated event keeps the entry the
+            // tray window's Deactivated had: a topmost popup can lose activation without the
+            // page being left, and a recording started there must not stay open behind it.
+            Popup.Deactivated += (s, e) => { if (settingsController != null) settingsController.OnHostDeactivated(); };
             Popup.Closed += (s, e) => { if (settingsController != null) settingsController.Detach(); };
         }
 
