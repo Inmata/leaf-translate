@@ -55,11 +55,31 @@ namespace Leaf
         // resize really changes it and rebuilds the card; every other refresh - a scroll, a
         // selection, a chat message at the same scale - leaves that document alone.
         private double wordCardScale = double.NaN;
+        // A hand-dragged window edge is not a content change: while the drag runs the reading
+        // page keeps the scale it started from, so its type never steps through sizes, and the
+        // highlight layer paints nothing. The window's own size still changes and the text
+        // re-wraps with it; the size the drag ends at is applied once, through the one
+        // typography pass. A programmatic resize never reaches this state at all.
+        private bool interactiveResize;
+        private double resizeFrozenScale = double.NaN;
+        // A drag that a hide interrupted never wrote the size it ended at. The drag's ticks
+        // write nothing at all, so this one flag is all that is left to carry: the next show
+        // spends it on a single pass at the window's real size, and an ordinary show - the
+        // overwhelming case - reads it once and does nothing else.
+        private bool resizeTypographyPending;
         // The column the floating collapse action occupies over the card's first line: the
         // button's own width - a 14 dip label with an 8,6 padding on each side - with enough
         // clearance left that the entry can never run under it. Only the first paragraph
         // reserves it; the rest of the document keeps the full reading column.
         private const double WordCardActionColumn = 88;
+        // What each paragraph of the learning card is, carried on that paragraph's own Tag: a
+        // window resize rewrites the same ladder in place instead of rebuilding the document,
+        // and the role is how that pass knows which tier a paragraph belongs to.
+        private const string CardEntryRole = "entry";
+        private const string CardMeaningRole = "meaning";
+        private const string CardMetaRole = "meta";
+        private const string CardHeadingRole = "heading";
+        private const string CardBodyRole = "body";
 
         private sealed class PreviousSessionSnapshot
         {
@@ -191,7 +211,12 @@ namespace Leaf
                 if (wordCancellation != null) wordCancellation.Cancel();
                 wordBusy = false; selectedWord = null; selectedCard = null;
                 wordCardNotice = null;
-                HighlightSource(); DrawTranslation(""); Ui.Visible(Ui.Get<Border>(Popup, "WordPanel"), false); Topic(); Busy();
+                HighlightSource(); DrawTranslation(""); Ui.Visible(Ui.Get<Border>(Popup, "WordPanel"), false);
+                // Collapsing returns to the sentence, so the finished word session gets its
+                // expansion entry back; a second expansion reuses the card the session already
+                // holds, and the translation, session and follow-up draft are untouched.
+                UpdateExpandWordEntry();
+                Topic(); Busy();
             });
             var contextMenu = new ContextMenu();
             var explain = new MenuItem { Header = "解释选中片段" };
@@ -429,10 +454,11 @@ namespace Leaf
         // the meaning, the part of speech and lemma, and every section heading and body, laid
         // out as paragraphs of one flow. A drag that starts on a heading therefore runs
         // straight on into the content under it, which separate controls could never do.
-        // Only a card change, a loading or failed state, or a real typography change rebuilds
-        // it - never a selection, a scroll or a wheel notch. The ladder it lays out is the
-        // fixed one UpdatePopupTypography documents: a 20 dip entry over a 16 dip meaning, a
-        // 14 dip part-of-speech line, and 16 dip headings over 16/26 reading text.
+        // Only a card change or a loading or failed state rebuilds it - never a selection, a
+        // scroll, a wheel notch, or a window resize, which rewrites the same ladder in place
+        // (ApplyWordCardTypography) and so keeps the reader's selection. The ladder it lays out
+        // is the fixed one UpdatePopupTypography documents: a 22 dip entry over a 16 dip
+        // meaning, a 14 dip part-of-speech line, and 16 dip headings over 16/26 reading text.
         //
         // Gaps are carried by one side of each pair - the lower block's bottom margin, or the
         // section heading's top margin - so the same spacing comes out whether or not the flow
@@ -440,7 +466,7 @@ namespace Leaf
         // edge: the reading column is shared with the translation above it.
         private void DrawWordCard()
         {
-            double scale = TypographyScale(Popup.Width, Popup.Height);
+            double scale = CurrentTypographyScale();
             var document = new FlowDocument {
                 PagePadding = new Thickness(0), FontFamily = PaperFontFamily,
                 FontSize = Math.Max(13, 16 * scale)
@@ -452,49 +478,97 @@ namespace Leaf
             // restored session cannot show one word's meaning under another word's heading.
             string entry = selectedWord == null ? null : selectedWord.Text;
             if (!string.IsNullOrEmpty(entry))
-                document.Blocks.Add(CardParagraph(entry, Math.Max(14, 22 * scale), FontWeights.Bold,
-                    Ui.Brush("Ink"), CardMargin(new Thickness(0, 0, 0, 16 * scale), ref columnTaken), 0));
+                document.Blocks.Add(CardParagraph(entry, CardEntryRole, FontWeights.Bold,
+                    Ui.Brush("Ink"), CardMargin(ref columnTaken)));
             string meaning = selectedCard != null ? selectedCard.meaning : wordCardNotice;
             if (!string.IsNullOrWhiteSpace(meaning))
-                document.Blocks.Add(CardParagraph(meaning, Math.Max(13, 16 * scale), FontWeights.Normal,
-                    Ui.Brush("Ink"), CardMargin(new Thickness(0, 0, 0, 8), ref columnTaken), 26 * scale));
+                document.Blocks.Add(CardParagraph(meaning, CardMeaningRole, FontWeights.Normal,
+                    Ui.Brush("Ink"), CardMargin(ref columnTaken)));
             if (selectedCard != null) {
                 string meta = string.Join(" · ", new[] {
                     selectedCard.part_of_speech, string.IsNullOrEmpty(selectedCard.lemma) ? "" : "原形 " + selectedCard.lemma
                 }.Where(x => !string.IsNullOrWhiteSpace(x)));
                 if (meta.Length > 0)
-                    document.Blocks.Add(CardParagraph(meta, 14, FontWeights.Normal, Ui.Brush("Muted"),
-                        CardMargin(new Thickness(0, 0, 0, 0), ref columnTaken), 0));
+                    document.Blocks.Add(CardParagraph(meta, CardMetaRole, FontWeights.Normal,
+                        Ui.Brush("Muted"), CardMargin(ref columnTaken)));
                 // The heading keeps the body size and separates itself by the dark ink, the
                 // real bold face that ships in the executable, a 24 dip gap above it and an
                 // 8 dip one under it; the entry above stays ordinary weight.
                 foreach (var section in selectedCard.sections ?? new List<LearningSection>()) {
                     if (!string.IsNullOrWhiteSpace(section.title))
-                        document.Blocks.Add(CardParagraph(section.title, Math.Max(13, 16 * scale), FontWeights.Bold,
-                            Ui.Brush("Ink"), CardMargin(new Thickness(0, 24, 0, 8), ref columnTaken), 0));
+                        document.Blocks.Add(CardParagraph(section.title, CardHeadingRole, FontWeights.Bold,
+                            Ui.Brush("Ink"), CardMargin(ref columnTaken)));
                     if (!string.IsNullOrWhiteSpace(section.content))
-                        document.Blocks.Add(CardParagraph(section.content, Math.Max(12, 16 * scale), FontWeights.Normal,
-                            Ui.Brush("Secondary"), CardMargin(new Thickness(0, 0, 0, 0), ref columnTaken), 26 * scale));
+                        document.Blocks.Add(CardParagraph(section.content, CardBodyRole, FontWeights.Normal,
+                            Ui.Brush("Secondary"), CardMargin(ref columnTaken)));
                 }
             }
+            foreach (var paragraph in document.Blocks.OfType<Paragraph>()) ApplyCardParagraph(paragraph, scale);
             Ui.Get<RichTextBox>(Popup, "WordCard").Document = document;
             wordCardScale = scale;
         }
-        // The card's first paragraph yields its right edge to the floating collapse button and
-        // every later one takes the full column back.
-        private static Thickness CardMargin(Thickness margin, ref bool columnTaken)
+        // A window resize is not a content change: the card keeps its document - and with it
+        // the reader's selection - and only its own ladder of sizes, line heights and gaps is
+        // written again at the new scale. A changed card, a loading state or a failed lookup
+        // still goes through DrawWordCard and rebuilds the document.
+        private void ApplyWordCardTypography(double scale)
         {
-            Thickness result = columnTaken ? margin
-                : new Thickness(margin.Left, margin.Top, WordCardActionColumn, margin.Bottom);
+            var document = Ui.Get<RichTextBox>(Popup, "WordCard").Document;
+            document.FontSize = Math.Max(13, 16 * scale);
+            foreach (var paragraph in document.Blocks.OfType<Paragraph>()) ApplyCardParagraph(paragraph, scale);
+            wordCardScale = scale;
+        }
+        // The card's ladder in one place, read both when the document is built and when a
+        // resize rewrites it, so a rebuilt card and a re-scaled one can never drift apart.
+        // What a paragraph is travels on its own Tag; the left, top and bottom edges come from
+        // here, while the right edge - the collapse button's column on the first paragraph -
+        // stays exactly as the builder set it.
+        private static void ApplyCardParagraph(Paragraph paragraph, double scale)
+        {
+            switch (paragraph.Tag as string) {
+                case CardEntryRole:
+                    paragraph.FontSize = Math.Max(14, 22 * scale);
+                    CardSpacing(paragraph, 0, 16 * scale);
+                    break;
+                case CardMeaningRole:
+                    paragraph.FontSize = Math.Max(13, 16 * scale);
+                    paragraph.LineHeight = 26 * scale;
+                    CardSpacing(paragraph, 0, 8);
+                    break;
+                case CardMetaRole:
+                    paragraph.FontSize = 14;
+                    CardSpacing(paragraph, 0, 0);
+                    break;
+                case CardHeadingRole:
+                    paragraph.FontSize = Math.Max(13, 16 * scale);
+                    CardSpacing(paragraph, 24, 8);
+                    break;
+                default:
+                    paragraph.FontSize = Math.Max(12, 16 * scale);
+                    paragraph.LineHeight = 26 * scale;
+                    CardSpacing(paragraph, 0, 0);
+                    break;
+            }
+        }
+        private static void CardSpacing(Paragraph paragraph, double top, double bottom)
+        {
+            paragraph.Margin = new Thickness(paragraph.Margin.Left, top, paragraph.Margin.Right, bottom);
+        }
+        // The card's first paragraph yields its right edge to the floating collapse button and
+        // every later one takes the full column back; the other three edges belong to the
+        // shared ladder and are written by ApplyCardParagraph.
+        private static Thickness CardMargin(ref bool columnTaken)
+        {
+            Thickness result = columnTaken ? new Thickness(0) : new Thickness(0, 0, WordCardActionColumn, 0);
             columnTaken = true;
             return result;
         }
-        // Plain text into one card paragraph: "\n" inside a Run paints a line break, so
-        // paragraphs, surrogate pairs and combining marks survive without markup.
-        private static Paragraph CardParagraph(string text, double font, FontWeight weight, Brush foreground, Thickness margin, double lineHeight)
+        // Plain text into one card paragraph, tagged with what it is so a later resize can
+        // rewrite the ladder above without touching the document: "\n" inside a Run paints a
+        // line break, so paragraphs, surrogate pairs and combining marks survive without markup.
+        private static Paragraph CardParagraph(string text, string role, FontWeight weight, Brush foreground, Thickness margin)
         {
-            var paragraph = new Paragraph { FontSize = font, FontWeight = weight, Foreground = foreground, Margin = margin };
-            if (lineHeight > 0) paragraph.LineHeight = lineHeight;
+            var paragraph = new Paragraph { FontWeight = weight, Foreground = foreground, Margin = margin, Tag = role };
             paragraph.Inlines.Add(new Run(text ?? ""));
             return paragraph;
         }
@@ -557,9 +631,66 @@ namespace Leaf
         {
             return Math.Max(0.84, Math.Min(1, Math.Min(width / 456.0, height / 620.0)));
         }
+        // The scale the reading page is built at right now: a hand-dragged edge keeps the one
+        // the drag started from, and every other pass reads the window's own size.
+        private double CurrentTypographyScale()
+        {
+            return interactiveResize && !double.IsNaN(resizeFrozenScale)
+                ? resizeFrozenScale : TypographyScale(Popup.Width, Popup.Height);
+        }
+        // The user has started dragging the window's edge. Moving the window raises the same
+        // ends of the modal loop without ever sizing it, so only a sizing message reaches
+        // here: the scale is frozen for the whole drag and the highlight stops drawing.
+        private void BeginInteractiveResize()
+        {
+            if (disposed || interactiveResize) return;
+            interactiveResize = true;
+            resizeFrozenScale = TypographyScale(Popup.Width, Popup.Height);
+            if (highlightLayer != null) highlightLayer.Suspend();
+        }
+        // The drag is over at its final size: the highlight comes back, and the whole
+        // typography ladder is written once for the size the window really has now. Every
+        // later pass - the one a coalesced size change still raises - reads that same size.
+        private void EndInteractiveResize()
+        {
+            if (!interactiveResize) return;
+            interactiveResize = false;
+            resizeFrozenScale = double.NaN;
+            if (highlightLayer != null) highlightLayer.Resume();
+            UpdatePopupTypography();
+        }
+        // The popup is going away mid-drag: the frozen scale is released so the next show
+        // reads the window's own size, and the pass the paused layer had queued is dropped
+        // instead of painted on a window that is no longer shown. Nothing is redrawn here -
+        // a window nobody is looking at is not worth a layout - so the release also records
+        // that the reading page still owes itself one pass at that final size.
+        private void CancelInteractiveResize()
+        {
+            if (!interactiveResize) return;
+            interactiveResize = false;
+            resizeFrozenScale = double.NaN;
+            resizeTypographyPending = true;
+            if (highlightLayer != null) highlightLayer.CancelPending();
+        }
+        // What the interrupted drag left owing: the reading page is written once for the size
+        // the window has now, and the highlight comes back from the selection that is current
+        // - the one the check the reader is on really is - rather than from a range a paused
+        // layer happened to keep.
+        private void ApplyPendingResizeTypography()
+        {
+            resizeTypographyPending = false;
+            UpdatePopupTypography();
+            HighlightSource();
+        }
         public void UpdatePopupTypography()
         {
-            double scale = TypographyScale(Popup.Width, Popup.Height);
+            // Two states write nothing here. A hand-dragged window edge writes the ladder once,
+            // when the drag ends, so every size change in between skips this pass entirely
+            // instead of walking the paragraphs and controls per tick; content a drag builds -
+            // a translation, a card - reads the frozen scale by itself. And a window closing
+            // for good must not rebuild the reading page from a layout the close itself raised.
+            if (interactiveResize || disposed) return;
+            double scale = CurrentTypographyScale();
             // The ladder is fixed: a 19 dip original, a 22 dip translation and a 22 dip bold
             // card entry at full size, then 16 dip section headings and reading body over a
             // 14 dip auxiliary tier - the original and translation labels, the part of speech
@@ -574,13 +705,17 @@ namespace Leaf
             var editor = Ui.Get<TextBox>(Popup, "SourceInput");
             editor.FontSize = Math.Max(13, 18 * scale);
             SetTypography("ErrorText", 13, 21);
-            // The learning card's own ladder - a 20 entry, 16 headings and reading body, a
-            // 14 auxiliary line - lives in the one document it is built from, so a real scale
-            // change rebuilds that document and patches no control paragraph by paragraph.
-            // A hidden card is left alone; the next card change rebuilds it at the current
-            // scale. A refresh at the scale the document already has - this method also runs
-            // for every chat message - keeps the document, and with it the reader's selection.
-            if (Ui.Get<Border>(Popup, "WordPanel").Visibility == Visibility.Visible && wordCardScale != scale) DrawWordCard();
+            // The learning card's own ladder - a 22 entry, 16 headings and reading body, a
+            // 14 auxiliary line - lives in the one document it is built from. A real scale
+            // change rewrites that ladder in place, keeping the document and the reader's
+            // selection, so dragging the window's edge never re-parses the card on every tick;
+            // only a card whose content changed - or one not built yet - is rebuilt. A hidden
+            // card is left alone, and a refresh at the scale the document already has - this
+            // method also runs for every chat message - keeps the document untouched.
+            if (Ui.Get<Border>(Popup, "WordPanel").Visibility == Visibility.Visible) {
+                if (double.IsNaN(wordCardScale)) DrawWordCard();
+                else if (wordCardScale != scale) ApplyWordCardTypography(scale);
+            }
             var chat = Ui.Get<StackPanel>(Popup, "ChatMessages").Children;
             for (int i = 0; i < chat.Count; i++) {
                 bool label = i % 2 == 0;
@@ -727,6 +862,15 @@ namespace Leaf
             return kind == "选中文字" ? "选中文本" : kind;
         }
 
+        // The word-expansion entry belongs to a finished word session and steps aside only
+        // while that word's card is open; collapsing the card puts it back, and the card the
+        // session already holds is what a second expansion reuses. One place keeps the three
+        // states - a new record, a finished translation and a collapsed card - in agreement.
+        private void UpdateExpandWordEntry()
+        {
+            Ui.Visible(Ui.Get<Button>(Popup, "ExpandWordButton"),
+                Current != null && Current.Completed && TextTools.IsWordInput(Current.Source));
+        }
         private void DisplayRecord()
         {
             selectedWord = null; selectedCard = null; ClearError();
@@ -736,7 +880,7 @@ namespace Leaf
             ShowSourceReadOnly();
             Ui.Visible(Ui.Get<Border>(Popup, "WordPanel"), false);
             Ui.Visible(Ui.Get<Border>(Popup, "InputPanel"), false);
-            Ui.Visible(Ui.Get<Button>(Popup, "ExpandWordButton"), Current != null && Current.Completed && TextTools.IsWordInput(Current.Source));
+            UpdateExpandWordEntry();
             if (Current == null) {
                 if (displayedSource != null) { source.Clear(); displayedSource = null; }
                 DrawTranslation("");
@@ -809,7 +953,7 @@ namespace Leaf
         {
             var box = Ui.Get<RichTextBox>(Popup, "TranslationText");
             box.Document.Blocks.Clear();
-            var block = new Paragraph { Margin = new Thickness(0), LineHeight = 27 * TypographyScale(Popup.Width, Popup.Height) };
+            var block = new Paragraph { Margin = new Thickness(0), LineHeight = 27 * CurrentTypographyScale() };
             box.Document.Blocks.Add(block);
             string translation = Current == null ? "" : Current.Translation;
             if (string.IsNullOrWhiteSpace(translation)) { block.Inlines.Add(new Run(Current != null ? "正在翻译…" : "译文会显示在这里。")); return; }
@@ -936,7 +1080,7 @@ namespace Leaf
                 record.Translation = result;
                 record.Completed = true; translating = false;
                 DrawTranslation(""); Busy();
-                Ui.Visible(Ui.Get<Button>(Popup, "ExpandWordButton"), TextTools.IsWordInput(record.Source));
+                UpdateExpandWordEntry();
                 await SaveCurrentAsync();
             } catch (OperationCanceledException) { }
             catch (Exception error) {
