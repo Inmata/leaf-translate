@@ -634,8 +634,8 @@ try {
     Assert-Check $tamperedRejected 'Version helper rejects an Assembly constant not derived from SemVer'
 
     $projectVersion = Get-LeafVersion -ProjectRoot $projectRoot
-    Assert-Check ($projectVersion.SemVer -eq '0.5.0') 'Project keeps the approved SemVer version'
-    Assert-Check ($projectVersion.Assembly -eq '0.5.0.0') 'Assembly version derives the approved value'
+    Assert-Check ($projectVersion.SemVer -eq '0.5.1') 'Project keeps the approved SemVer version'
+    Assert-Check ($projectVersion.Assembly -eq '0.5.1.0') 'Assembly version derives the approved value'
 
     $verificationRoot = Join-Path $projectRoot 'work\verification'
     $exePath = Join-Path $verificationRoot 'Leaf.exe'
