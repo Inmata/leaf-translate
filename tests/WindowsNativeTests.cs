@@ -191,18 +191,27 @@ public static class WindowsNativeTests
                 word.RaiseEvent(new RoutedEventArgs(System.Windows.Documents.Hyperlink.ClickEvent));
                 await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
                 Check(transport.Calls > beforeLookup, "Activating the focused word starts its explanation");
-                // An external window owns the foreground, so the collapse check never compares
-                // Leaf with Leaf's own handle.
+                // A second top-level window of this same test process stands in for the window
+                // that owns the foreground. It is not an external application, so what is checked
+                // here is that the popup's own reveal paths ask for no foreground at all; the real
+                // cross-application foreground still needs the manual desktop pass.
                 var foreign = new Window {
                     Title = "Leaf focus fixture", Width = 240, Height = 120, Left = 16, Top = 16, ShowInTaskbar = false
                 };
-                foreign.Show(); foreign.Activate(); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                foreign.Show();
+                await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
                 IntPtr foreignHandle = new WindowInteropHelper(foreign).Handle;
-                shell.ShowPopup(); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
-                Check(Native.GetForegroundWindow() == foreignHandle,
+                // Windows hands the foreground over asynchronously and can refuse while another
+                // application holds it. The two checks below only mean anything while the other
+                // window really owns it, so the premise is established and named first instead of
+                // being assumed: a refused hand-over must never be reported as the popup taking it.
+                Check(await OwnsForegroundAsync(foreign, foreignHandle),
+                    "The other window owns the foreground before the popup is shown");
+                shell.ShowPopup();
+                Check(await ObserveForegroundAsync(popupHandle) == foreignHandle,
                     "Showing the popup leaves the foreground to the other window that owns it");
-                shell.HidePopup(); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
-                Check(Native.GetForegroundWindow() == foreignHandle, "Collapsing the popup leaves the foreground application alone");
+                shell.HidePopup();
+                Check(await ObserveForegroundAsync(popupHandle) == foreignHandle, "Collapsing the popup leaves the foreground application alone");
                 foreign.Close(); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
                 if (!OpenClipboard(new WindowInteropHelper(shell.Popup).Handle)) throw new Exception("Could not reserve clipboard for the isolated contention check.");
                 try {
@@ -257,6 +266,30 @@ public static class WindowsNativeTests
                 Console.WriteLine("NATIVE-EVIDENCE cleanup provider=" + scope + " credential_present=" + (Credentials.Read(scope) == "" ? "false" : "true"));
             }
         }
+    }
+    // The foreground is handed over asynchronously and Windows can refuse while another
+    // application holds it, so the hand-over is asked for again and verified rather than assumed.
+    private static async Task<bool> OwnsForegroundAsync(Window window, IntPtr handle)
+    {
+        for (int attempt = 0; attempt < 20; attempt++) {
+            if (Native.GetForegroundWindow() == handle) return true;
+            window.Activate();
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            if (Native.GetForegroundWindow() == handle) return true;
+            await Task.Delay(50);
+        }
+        return Native.GetForegroundWindow() == handle;
+    }
+    // A reveal path that asked for the foreground may only take it a moment later, so the check
+    // is held over a settle window and reports the popup itself if it ever held the foreground.
+    private static async Task<IntPtr> ObserveForegroundAsync(IntPtr popup)
+    {
+        for (int sample = 0; sample < 8; sample++) {
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            if (Native.GetForegroundWindow() == popup) return popup;
+            await Task.Delay(25);
+        }
+        return Native.GetForegroundWindow();
     }
     private static List<System.Windows.Documents.Hyperlink> WordLinks(Window popup)
     {
