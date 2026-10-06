@@ -43,6 +43,9 @@ $helper = '!gh auth git-credential'
 if ($LASTEXITCODE -ne 0) { throw 'Clone failed.' }
 & git -C $publishRoot config core.autocrlf false
 if ($LASTEXITCODE -ne 0) { throw 'Could not configure source line endings.' }
+# Preserve Windows source bytes while still checking actual trailing whitespace.
+& git -C $publishRoot config core.whitespace 'blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol'
+if ($LASTEXITCODE -ne 0) { throw 'Could not configure the source whitespace check.' }
 $plan = Sync-PublicSource -ProjectRoot $projectRoot -PublishRoot $publishRoot
 Write-Output ('Publication mirror: ' + $plan.Copy.Count + ' copied, ' + $plan.Delete.Count + ' removed.')
 & git -C $publishRoot config user.name 'Inmata'
