@@ -440,6 +440,11 @@ internal static class SelectionTests
 
         Check(Native.Materialize(new ScriptedClipboardFormats()) == null && Native.Materialize(null) == null,
             "A clipboard that reports no formats is unknown rather than a verified empty");
+
+        // The desktop read is the same rule at its source: a data object the clipboard did not
+        // hand over is unknown, never a verified empty that a later restore may clear.
+        Check(Native.BackupFrom(null) == null,
+            "A desktop read that handed over no data object is unknown rather than a verified empty");
     }
 
     // The production copy worker against a scripted desktop: sequence, ownership,
@@ -464,7 +469,21 @@ internal static class SelectionTests
                 "A restore that was not performed is reported with an honest reason");
         }
 
-        // A clipboard that was read and found empty can be restored as empty.
+        // The answer the desktop adapter itself gives for a data object the clipboard did not
+        // hand over, run through the real worker: it may not become a clear of the clipboard.
+        var unhanded = new ScriptedCopyHost { BackupResult = Native.BackupFrom(null) };
+        using (var deadline = new CancellationTokenSource()) {
+            var outcome = Native.CopyOnSta(target, deadline, new List<CaptureStep>(), unhanded);
+            Check(unhanded.RestoreCalls == 0 && unhanded.EmptyRestoreCalls == 0,
+                "A data object the desktop did not hand over never becomes a clear of the clipboard");
+            Check(Step(outcome, "clipboard_restore") != null && !Step(outcome, "clipboard_restore").ClipboardChanged &&
+                Step(outcome, "clipboard_restore").Reason == CaptureReason.ClipboardOriginUnknown,
+                "An unhanded data object is recorded as an unknown restore that did not happen");
+        }
+
+        // A clipboard that was read and found empty can be restored as empty. The fixture
+        // stands for that verified empty: the desktop read cannot establish it, and answers
+        // unknown for a data object the clipboard never handed over.
         var emptyClipboard = new ScriptedCopyHost { BackupResult = ClipboardBackup.Empty() };
         using (var deadline = new CancellationTokenSource()) {
             var outcome = Native.CopyOnSta(target, deadline, new List<CaptureStep>(), emptyClipboard);

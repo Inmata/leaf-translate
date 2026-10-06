@@ -67,6 +67,8 @@ namespace Leaf
     {
         private readonly object data;
         private ClipboardBackup(object data) { this.data = data; }
+        // An empty clipboard that was verified as empty. Nothing on the desktop path produces
+        // one: a data object the clipboard did not hand over is unknown instead.
         public static ClipboardBackup Empty() { return new ClipboardBackup(null); }
         public static ClipboardBackup Of(object data) { return new ClipboardBackup(data); }
         public bool IsEmpty { get { return data == null; } }
@@ -470,10 +472,13 @@ namespace Leaf
 
         // The desktop read behind the host's Backup(): the data object the clipboard handed
         // over. Split out so a check can drive the real adapter - including the object it was
-        // handed - with no real clipboard.
+        // handed - with no real clipboard. A data object the clipboard did not hand over is
+        // unknown, exactly like a partial read: .NET answers null both for a clipboard that
+        // held nothing and for one it could not read, so Empty here would let a later restore
+        // Clear a clipboard that may well have held something.
         public static ClipboardBackup BackupFrom(Forms.IDataObject data)
         {
-            if (data == null) return ClipboardBackup.Empty();
+            if (data == null) return null;
             return Materialize(new ClipboardFormatSource(data));
         }
 
