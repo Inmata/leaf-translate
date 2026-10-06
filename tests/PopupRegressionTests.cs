@@ -52,6 +52,10 @@ internal static class PopupRegressionTests
         await ExplicitApplyIsFlushed(Path.Combine(folder, "settings-apply-flush"));
         await ExplicitApplySurvivesPageLeave(Path.Combine(folder, "settings-apply-leave"));
         await InternalSelectionReturn(Path.Combine(folder, "internal-return"));
+        await InternalChildChain(Path.Combine(folder, "internal-chain"));
+        await SameSourceInternalSelectionReuse(Path.Combine(folder, "internal-reuse"));
+        await RootEntriesClearAnchor(Path.Combine(folder, "root-entries"));
+        await LateChildCannotTouchRoot(Path.Combine(folder, "late-child"));
         await ReturnAfterClearDoesNotResurrect(Path.Combine(folder, "return-cleared"));
         await OpenRecordDuringClearDoesNotResurrect(Path.Combine(folder, "open-record-cleared"));
         await LearningContentSelectable(Path.Combine(folder, "selectable"));
@@ -508,6 +512,143 @@ internal static class PopupRegressionTests
         // store's writes are slowed on purpose; wait for it so nothing outlives the scenario.
         shell.Dispose();
         try { await store.FlushAsync(); } catch { }
+    }
+
+    // Deeper internal selections stay anchored to the first root: A→B→C returns to A,
+    // never to the intermediate B, and leaving the root again keeps that anchor.
+    private static async Task InternalChildChain(string folder)
+    {
+        var handler = new FixtureHandler();
+        using (var shell = new AppShell(ConfiguredStore(folder), false, new LlmClient(handler))) {
+            await shell.TranslateAsync("The root conversation.", "选中文字", false);
+            var root = shell.Current;
+            await shell.TranslateInternalSelectionAsync("The first child conversation.");
+            var firstChild = shell.Current;
+            await shell.TranslateInternalSelectionAsync("The second child conversation.");
+            Check(!ReferenceEquals(shell.Current, firstChild) && !ReferenceEquals(shell.Current, root),
+                "A deeper internal selection opens yet another conversation");
+            Check(shell.CanReturnToPreviousSession &&
+                Ui.Get<Button>(shell.Popup, "BackToPreviousButton").Visibility == Visibility.Visible,
+                "The deeper child still offers the return entry");
+            shell.ReturnToPreviousSession();
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            Check(ReferenceEquals(shell.Current, root) && handler.Calls == 3,
+                "Returning from the deeper child goes back to the root, never to the first child");
+            await shell.TranslateInternalSelectionAsync("A fresh child after the return.");
+            shell.ReturnToPreviousSession();
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            Check(ReferenceEquals(shell.Current, root),
+                "Leaving the root again stays anchored to the same root");
+        }
+    }
+
+    // An internal selection equal to the text already on screen reuses the open session
+    // with no request and no history entry, and an uncommitted draft survives the reuse;
+    // the root's own text comes back through the return entry, not a new child.
+    private static async Task SameSourceInternalSelectionReuse(string folder)
+    {
+        var handler = new FixtureHandler();
+        using (var shell = new AppShell(ConfiguredStore(folder), false, new LlmClient(handler))) {
+            await shell.TranslateAsync("The reuse fixture sentence.", "选中文字", false);
+            var record = shell.Current;
+            int before = handler.Calls;
+            await shell.TranslateInternalSelectionAsync(record.Source);
+            Check(ReferenceEquals(shell.Current, record) && handler.Calls == before,
+                "An internal selection equal to the open session reuses it without a request");
+            Check(shell.Store.History("").Count == 1,
+                "The reuse writes no extra history entry");
+            shell.BeginSourceEdit(true);
+            var input = Ui.Get<TextBox>(shell.Popup, "SourceInput");
+            input.Text = "An uncommitted draft.";
+            await shell.TranslateInternalSelectionAsync(record.Source);
+            Check(ReferenceEquals(shell.Current, record),
+                "The same-text selection still reuses the open session with a draft open");
+            Check(Ui.Get<Grid>(shell.Popup, "SourceEditor").Visibility == Visibility.Visible &&
+                input.Text == "An uncommitted draft.",
+                "The uncommitted draft is restored instead of being discarded");
+            await shell.TranslateInternalSelectionAsync("A child over the reuse root.");
+            var child = shell.Current;
+            Check(!ReferenceEquals(shell.Current, record), "The child over the root opens its own conversation");
+            await shell.TranslateInternalSelectionAsync(record.Source);
+            Check(ReferenceEquals(shell.Current, record) && !ReferenceEquals(shell.Current, child),
+                "Selecting the root's own text returns to the root session");
+            Check(handler.Calls == before + 1,
+                "Returning to the root through the selection costs no request");
+        }
+    }
+
+    // Every root entry - an external capture, a manual submit, an opened history record,
+    // a forget - replaces the return relation, while a retry inside a child keeps it.
+    private static async Task RootEntriesClearAnchor(string folder)
+    {
+        var handler = new ControlledHandler();
+        using (var shell = new AppShell(ConfiguredStore(folder), false, new LlmClient(handler))) {
+            var root = shell.TranslateAsync("The anchor root.", "选中文字", false);
+            handler.ReplyStream(0, "root 译文");
+            await root;
+            var rootRecord = shell.Current;
+            // The child's first request fails, and its retry inherits the anchor.
+            var child = shell.TranslateInternalSelectionAsync("A child that fails once.");
+            handler.ReplyError(1, HttpStatusCode.InternalServerError);
+            await child;
+            Check(shell.CanReturnToPreviousSession, "The failed child still anchors to its root");
+            Click(shell.Popup, "RetryButton");
+            handler.ReplyStream(2, "child 译文");
+            await Until(() => shell.Current != null && shell.Current.Completed);
+            Check(shell.CanReturnToPreviousSession && shell.Current.Source == "A child that fails once.",
+                "Retrying a failed child keeps the anchor");
+            // An external capture starts a new root: the return relation is gone.
+            var external = shell.TranslateAsync("An external root sentence.", "剪贴板", false);
+            handler.ReplyStream(3, "external 译文");
+            await external;
+            Check(!shell.CanReturnToPreviousSession &&
+                Ui.Get<Button>(shell.Popup, "BackToPreviousButton").Visibility == Visibility.Collapsed,
+                "An external capture clears the return entry");
+            // A manual submit is a root of its own as well.
+            var childOverExternal = shell.TranslateInternalSelectionAsync("A child over the external root.");
+            handler.ReplyStream(4, "child 译文");
+            await childOverExternal;
+            Check(shell.CanReturnToPreviousSession, "The child over the external root anchors to it");
+            shell.BeginSourceEdit(true);
+            Ui.Get<TextBox>(shell.Popup, "SourceInput").Text = "A manually submitted root.";
+            var submit = shell.SubmitSourceAsync();
+            handler.ReplyStream(5, "submitted 译文");
+            await submit;
+            Check(!shell.CanReturnToPreviousSession,
+                "A manual submit clears the return entry");
+            // Opening a history record is a root; forgetting clears the anchor with it.
+            var historyRecord = rootRecord;
+            shell.OpenRecord(historyRecord);
+            await Until(() => ReferenceEquals(shell.Current, historyRecord));
+            Check(!shell.CanReturnToPreviousSession,
+                "Opening a history record clears the return entry");
+            shell.Forget(historyRecord.Id);
+            Check(shell.Current == null && !shell.CanReturnToPreviousSession,
+                "Forgetting the open record leaves nothing to return to");
+        }
+    }
+
+    // A child answered after its session was left must not write over the root: the
+    // cancelled request's late result changes neither the root's text nor its state.
+    private static async Task LateChildCannotTouchRoot(string folder)
+    {
+        var handler = new ControlledHandler();
+        using (var shell = new AppShell(ConfiguredStore(folder), false, new LlmClient(handler))) {
+            var root = shell.TranslateAsync("The root that stays.", "选中文字", false);
+            handler.ReplyStream(0, "root 译文");
+            await root;
+            var rootRecord = shell.Current;
+            var ignored = shell.TranslateInternalSelectionAsync("A child answered too late.");
+            await Until(() => handler.Requests.Count >= 2);
+            shell.ReturnToPreviousSession();
+            Check(ReferenceEquals(shell.Current, rootRecord), "The root is back while the child is still in flight");
+            handler.ReplyStream(1, "迟到的子会话译文");
+            await Settle();
+            Check(ReferenceEquals(shell.Current, rootRecord) && rootRecord.Completed && rootRecord.Translation == "root 译文",
+                "The late child result does not touch the restored root");
+            Check(Ui.Get<Border>(shell.Popup, "ErrorPanel").Visibility == Visibility.Collapsed,
+                "The restored root shows no error after the late result");
+        }
     }
 
     // Clearing history while a sub-session is on screen must not let the previous session come

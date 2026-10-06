@@ -13,6 +13,16 @@ using System.Windows.Threading;
 
 namespace Leaf
 {
+    // Why a translation starts, stated explicitly instead of guessed from the source kind:
+    // a root replaces the return relation, an inherit keeps the current anchor (retry,
+    // regenerate), and an internal child stays anchored to the root it was born from.
+    internal enum SessionIntent
+    {
+        Root,
+        Inherit,
+        InternalChild
+    }
+
     public sealed partial class AppShell
     {
         private bool fillingSource;
@@ -169,7 +179,7 @@ namespace Leaf
             translationMenu.Items.Add(new MenuItem { Header = "复制", Command = ApplicationCommands.Copy });
             translationMenu.Items.Add(new MenuItem { Header = "全选", Command = ApplicationCommands.SelectAll });
             var regenerate = new MenuItem { Header = "重新生成" };
-            regenerate.Click += async (s, e) => { if (Current != null) await TranslateAsync(Current.Source, Current.SourceKind, true); };
+            regenerate.Click += async (s, e) => { if (Current != null) await TranslateAsync(Current.Source, Current.SourceKind, true, SessionIntent.Inherit); };
             translationMenu.Items.Add(regenerate);
             Ui.Get<RichTextBox>(Popup, "TranslationText").ContextMenu = translationMenu;
             foreach (string name in new[] { "SourceText", "TranslationText" }) {
@@ -596,6 +606,10 @@ namespace Leaf
         }
         public async Task TranslateAsync(string text, string sourceKind, bool force)
         {
+            await TranslateAsync(text, sourceKind, force, SessionIntent.Root);
+        }
+        private async Task TranslateAsync(string text, string sourceKind, bool force, SessionIntent intent)
+        {
             if (exiting) return;
             try { text = TextTools.ValidateInput(text); }
             catch (UserError error) { ShowError(error.Message, null); ShowPopup(); return; }
@@ -611,6 +625,10 @@ namespace Leaf
             }
             if (BlockedByRecovery()) return;
             CancelRequests();
+            // A root conversation starts here: whatever return relation the reading page
+            // held is gone, because the replaced session is no longer reachable from the
+            // new conversation. Retry and internal children keep their anchor.
+            if (intent == SessionIntent.Root) { previousSession = null; UpdateBackEntry(); }
             Current = TranslationRecord.Create(text, sourceKind, Store.Settings);
             currentHistoryEpoch = Store.HistoryEpoch;
             var record = Current; long version = generation.Next();
@@ -619,13 +637,13 @@ namespace Leaf
             activeWord = null; activeFollowup = null;
             var operation = new RetryOperation {
                 Kind = RequestKind.Translation, RecordId = record.Id,
-                Run = () => TranslateAsync(record.Source, record.SourceKind, true)
+                Run = () => TranslateAsync(record.Source, record.SourceKind, true, SessionIntent.Inherit)
             };
             activeTranslation = operation;
             translating = true; DisplayRecord(); ShowPopup(); Busy();
             long lastProgress = 0;
             try {
-                record.Translation = await Client.CompleteAsync(record.Context.Provider, KeyFor(record.Context.Provider), Prompts.Translation(record), true, false,
+                string result = await Client.CompleteAsync(record.Context.Provider, KeyFor(record.Context.Provider), Prompts.Translation(record), true, false,
                     partial => {
                         long now = DateTime.UtcNow.Ticks;
                         if (now - lastProgress < TimeSpan.TicksPerMillisecond * 40) return;
@@ -634,7 +652,11 @@ namespace Leaf
                             if (generation.IsCurrent(version) && !record.Completed && translating) { record.Translation = partial; DrawTranslation(""); }
                         }));
                     }, cancellation.Token);
+                // The result lands on the record only while this request is still the
+                // current one: a cancelled or superseded response must never write over
+                // the conversation the user is looking at now.
                 if (!generation.IsCurrent(version)) return;
+                record.Translation = result;
                 record.Completed = true; translating = false;
                 DrawTranslation(""); Busy();
                 Ui.Visible(Ui.Get<Button>(Popup, "ExpandWordButton"), TextTools.IsWordInput(record.Source));
@@ -841,19 +863,59 @@ namespace Leaf
 
         // DSH bridge: translate a selection made inside Leaf itself. Validation and the
         // recovery barrier run first; on failure the current session stays untouched.
+        // The selection is placed relative to the sessions the user already has: the same
+        // text as the open one reuses it, the root's own text comes back through the
+        // return entry, and anything else becomes a child anchored to that root.
         public async Task TranslateInternalSelectionAsync(string text)
         {
             if (exiting) return;
             try { text = TextTools.ValidateInput(text); }
             catch (UserError error) { ShowError(error.Message, null); ShowPopup(); return; }
             if (BlockedByRecovery()) return;
+            // The open session IS this selection: bringing it back costs no request and no
+            // history entry, and an uncommitted draft that differs from the source survives.
+            if (!demo && Current != null && Current.Source == text) {
+                var editor = Ui.Get<Grid>(Popup, "SourceEditor");
+                bool editorOpen = editor.Visibility == Visibility.Visible;
+                string draft = editorOpen ? Ui.Get<TextBox>(Popup, "SourceInput").Text : null;
+                RestoreCurrentPresentation(false);
+                if (editorOpen && draft != Current.Source) RestoreSourceEditor(draft);
+                return;
+            }
+            // The root itself is one return away; no new child is built over it.
+            if (previousSession != null && !ReferenceEquals(Current, previousSession.Record) &&
+                previousSession.Record.Source == text) {
+                ReturnToPreviousSession();
+                return;
+            }
+            // The first child keeps the session it replaces; a deeper one keeps the same
+            // snapshot, so returning always goes back to the root A, never to an inner B.
             SavePreviousSessionSnapshot();
-            await TranslateAsync(text, "选中文字", true);
+            await TranslateAsync(text, "选中文字", true, SessionIntent.InternalChild);
+        }
+        // Reopens the source editor with a kept draft, exactly as the return entry does.
+        private void RestoreSourceEditor(string draft)
+        {
+            BeginSourceEdit(false);
+            var input = Ui.Get<TextBox>(Popup, "SourceInput");
+            fillingSource = true; input.Text = draft ?? ""; fillingSource = false;
+            Ui.Visible(Ui.Get<TextBox>(Popup, "SourcePlaceholder"), input.Text.Length == 0);
+            Ui.Visible(Ui.Get<Button>(Popup, "TranslateButton"), !string.IsNullOrWhiteSpace(input.Text));
+        }
+        // Drops the return relation: a new root (an external capture, a manual submit, an
+        // opened history record) or a cleared current session leaves nothing to go back to.
+        internal void ClearPreviousSession()
+        {
+            previousSession = null;
+            UpdateBackEntry();
         }
         // One in-memory layer: the session being replaced is kept so the light back entry
-        // can restore it without another API call. Nothing is persisted.
+        // can restore it without another API call. Nothing is persisted. A child never
+        // re-saves - A→B→C stays anchored to A - while leaving the root itself again,
+        // after returning to it, refreshes the kept state.
         private void SavePreviousSessionSnapshot()
         {
+            if (previousSession != null && !ReferenceEquals(Current, previousSession.Record)) return;
             if (Current == null) { previousSession = null; UpdateBackEntry(); return; }
             var editor = Ui.Get<Grid>(Popup, "SourceEditor");
             bool editorOpen = editor.Visibility == Visibility.Visible;
@@ -891,13 +953,7 @@ namespace Leaf
             else if (selectedWord != null) HighlightSource();
             Topic(); Busy();
             if (snapshot.ErrorVisible) ShowError(snapshot.ErrorText, snapshot.Retry);
-            if (snapshot.SourceEditorOpen) {
-                BeginSourceEdit(false);
-                var input = Ui.Get<TextBox>(Popup, "SourceInput");
-                fillingSource = true; input.Text = snapshot.SourceDraft ?? ""; fillingSource = false;
-                Ui.Visible(Ui.Get<TextBox>(Popup, "SourcePlaceholder"), input.Text.Length == 0);
-                Ui.Visible(Ui.Get<Button>(Popup, "TranslateButton"), !string.IsNullOrWhiteSpace(input.Text));
-            }
+            if (snapshot.SourceEditorOpen) RestoreSourceEditor(snapshot.SourceDraft);
             if (snapshot.InputPanelOpen) { Ui.Visible(Ui.Get<Border>(Popup, "InputPanel"), true); Topic(); Busy(); }
             RestoreReadingScroll(snapshot.BodyScrollOffset, snapshot.SourceScroll);
             ShowPopup();

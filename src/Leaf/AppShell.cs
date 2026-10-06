@@ -513,13 +513,16 @@ namespace Leaf
         }
         private void OpenRecordNow(TranslationRecord record, long epoch)
         {
+            // An opened history record is a root session of its own: the return relation
+            // the reading page held is replaced by the record being opened.
             CancelRequests(); demo = false; Current = record; currentHistoryEpoch = epoch;
+            ClearPreviousSession();
             DisplayRecord(); ShowPopup();
         }
         public void Forget(string id)
         {
             if (Current != null && (id == null || Current.Id == id)) {
-                CancelRequests(); Current = null; DisplayRecord();
+                CancelRequests(); Current = null; ClearPreviousSession(); DisplayRecord();
             }
         }
         public async Task WaitForPersistenceAsync()
