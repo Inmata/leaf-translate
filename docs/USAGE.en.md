@@ -18,7 +18,7 @@ Once the endpoint is known, Leaf automatically fetches models after you finish t
 
 A catalog entry does not establish account access or quota; test the connection after selecting it. A stored key is represented only by dark password dots inside the field; its saved status appears below. The real key is never inserted into the editor, and the mask does not reveal its length. When **Key saved (已保存密钥)** appears below it, leaving the field empty continues using that key. Fetching a catalog authenticates with the configured service without sending your text or conversation.
 
-Expand **Endpoint (接口地址)** to change the URL or request deletion of a saved key. Changing the URL requires entering the key again. HTTPS endpoints are accepted; localhost HTTP is available for development.
+Expand **Endpoint (接口地址)** to change the URL or request deletion of a saved key. Changing the URL requires entering the key again. A saved key is bound to the endpoint you applied: an upgrade migrates it to the currently saved address, and a key saved for an old address is never sent to a new one. HTTPS endpoints are accepted; localhost HTTP is available for development.
 
 **Test connection (测试连接)** sends a short request using the currently edited configuration. It may count toward provider usage. After a successful test, click **Apply service configuration (应用服务配置)** to apply the configuration. Model availability and pricing are determined by your provider account.
 
@@ -38,9 +38,9 @@ Source text is limited to 6000 UTF-16 code units per request. Split long passage
 
 ## Type and copy text
 
-When nothing is captured, the shortcut opens a source editor immediately; an existing translation is left in place. With existing text, use the pencil beside the source or enable direct input. Press `Enter` or the arrow button at the right of the input to submit a new conversation; `Shift+Enter` inserts a new line. `Esc` exits editing and restores the original display.
+When nothing is captured, the shortcut opens a source editor immediately, ready for manual input without a generic error, and without discarding an existing translation. With existing text, use the pencil beside the source or enable direct input. Press `Enter` or the arrow button at the right of the input to submit a new conversation; `Shift+Enter` inserts a new line. `Esc` exits editing and restores the original display.
 
-On the shortcut: a confirmed empty selection is not an error and only prepares manual input. When the selection could not be read, the source badge says no selection was captured and its tooltip gives the reason. Pressing the shortcut again on the same text returns to the existing translation, word card and follow-up draft without another request, including after clearing the editor without submitting. An edited but unsubmitted draft is kept rather than overwritten.
+On the shortcut: a confirmed empty selection is not an error and only prepares manual input. When the selection could not be read, the source badge says no selection was captured and its tooltip gives the reason. Pressing the shortcut again on the same text returns to the existing translation, word card and follow-up draft without repeating the request or adding an API call, including after clearing the editor without submitting. An edited but unsubmitted draft is kept rather than overwritten.
 
 Select translated text and press `Ctrl+C`, or use its copy context menu. `Ctrl+A` selects all. Clipboard contention produces a visible error without blocking the UI. There is no separate copy button. Ask is at the lower left; its input can be collapsed.
 
@@ -88,7 +88,7 @@ Successful translations are saved locally by default. The original passage, tran
 
 Open **History (历史记录)** from the tray, search the source or translation, and double-click a record or choose **View and continue (查看与继续追问)**. Reopening makes no API call. New word lookups and follow-ups use the current API endpoint and model while preserving the record's learning context.
 
-History keeps the latest 200 entries by default. Retention can be set to 20–1000, with an additional content-size limit. History is saved on a background queue and exiting waits for the flush; after deleting, clearing or disabling history, late results cannot reappear. Failed saves keep a retryable snapshot and are reported instead of pretending to succeed. History is trimmed to a 4 MiB UTF-8 soft limit (at least one record is kept), and a single record above 32 MiB is refused with a message. Delete or clear records as needed. **Disabling history saving clears existing records and prevents new ones.**
+History keeps the latest 200 entries by default. Retention can be set to 20–1000, with an additional content-size limit. History is saved on a background queue and exiting waits for the flush; after deleting, clearing or disabling history, late results cannot reappear. If saving fails, Leaf keeps a retryable snapshot and reports it instead of pretending to succeed. History is trimmed to a 4 MiB UTF-8 soft limit (at least one record is kept), and a single record above 32 MiB is refused with a message. Delete or clear records as needed. **Disabling history saving clears existing records and prevents new ones.**
 
 Settings and history are stored in `%LOCALAPPDATA%\LeafTranslate`. If a file cannot be read, Leaf attempts to preserve a `.corrupt-<time>-<random>` backup; individually broken records inside otherwise valid JSON are skipped and the original file is kept as a `.quarantine-<time>-<random>` copy. API keys are stored separately in Windows Credential Manager under an endpoint-bound target such as `LeafTranslate/provider-id/endpoint/<digest>`.
 
@@ -98,7 +98,7 @@ Translation sends source text and context to the configured endpoint. Word looku
 
 Use **Open logs (打开日志)** in the tray to open `%LOCALAPPDATA%\LeafTranslate\logs`. The current file is `leaf.log`, with backups `leaf.1.log` through `leaf.4.log`. Each file is limited to 1 MiB and rotates automatically.
 
-Each line is a JSON record containing time, version, request ID, provider/model, endpoint host, duration, HTTP status, provider code/related parameter, exception type, and application method locations. API keys, source text, translations, learning context, questions, and raw error bodies are excluded. Nothing is automatically uploaded. A `started` record with no ending record can indicate a forced shutdown.
+Each line is a JSON record containing time, version, request ID, provider/model, endpoint host, duration, HTTP status, provider code/related parameter, exception type, and application method locations. Capture and request records are classified by outcome (success, empty selection, unavailable capability, failure) and exclude source text, window titles, and control content. API keys, source text, translations, learning context, questions, and raw error bodies are excluded. Nothing is automatically uploaded. A `started` record with no ending record can indicate a forced shutdown.
 
 For a bug report, provide reproduction steps and the error time, and optionally the relevant log. Review it before sharing; do not attach credentials or private history. An unwritable log directory does not stop translation.
 

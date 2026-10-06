@@ -55,6 +55,15 @@ public static class WindowsNativeTests
         var migrationProfile = new ProviderProfile { Id = prefix + "migration", Name = "Migration",
             BaseUrl = "https://legacy.invalid/v1", Model = "legacy-model" };
         var invalidProfile = new ProviderProfile { Id = prefix + "migration-invalid", BaseUrl = "http://remote.example.invalid/v1" };
+        // Declare every credential scope this run can create: the migrated legacy target, the
+        // endpoint-bound target it moves to, the invalid profile's retained legacy target, and
+        // the endpoint-bound target the settings commit writes for the chosen provider.
+        var credentialScopes = new List<string> {
+            migrationProfile.Id,
+            Credentials.ScopedId(migrationProfile),
+            invalidProfile.Id,
+            Credentials.ScopedId(settings.Providers[2])
+        };
         try {
             Credentials.Save(migrationProfile.Id, "legacy-migration-fixture");
             Credentials.MigrateLegacyProfiles(new[] { migrationProfile });
@@ -66,10 +75,7 @@ public static class WindowsNativeTests
             Check(Credentials.Read(invalidProfile.Id) == "invalid-legacy-fixture",
                 "Migration keeps a legacy key when the profile has no valid endpoint");
         } finally {
-            foreach (var profile in new[] { migrationProfile, invalidProfile }) {
-                try { Credentials.Delete(profile); } catch { }
-                try { Credentials.Delete(profile.Id); } catch { }
-            }
+            foreach (var scope in credentialScopes) { try { Credentials.Delete(scope); } catch { } }
         }
         try {
             using (var transport = new FixtureTransport())
@@ -243,9 +249,12 @@ public static class WindowsNativeTests
                 shell.HidePopup();
             }
         } finally {
-            foreach (var provider in settings.Providers) {
-                try { Credentials.Delete(provider); } catch { }
-                try { Credentials.Delete(provider.Id); } catch { }
+            // The touched and cleanup sets are exactly the same declared scopes, and each is
+            // deleted before its absence is reported, so a leftover credential fails the run.
+            foreach (var scope in credentialScopes) Console.WriteLine("NATIVE-EVIDENCE touched provider=" + scope);
+            foreach (var scope in credentialScopes) { try { Credentials.Delete(scope); } catch { } }
+            foreach (var scope in credentialScopes) {
+                Console.WriteLine("NATIVE-EVIDENCE cleanup provider=" + scope + " credential_present=" + (Credentials.Read(scope) == "" ? "false" : "true"));
             }
         }
     }

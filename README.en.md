@@ -92,11 +92,11 @@ Click a word in the original text to open a word card. For example, when reading
 
 For a phrase or text that is awkward to select word by word, drag across the original text and choose **Explain selected passage (解释选中片段)** from its context menu.
 
-Click **Ask (追问)** to reveal the input. Questions concern the selected word or passage; **Back to sentence (返回整句)** switches back to the passage. Press `Enter` to send or `Shift+Enter` for a new line.
+Click **Ask (追问)** to reveal the input. Questions concern the selected word or passage; **Back to sentence (返回整句)** switches back to the passage. Press `Enter` or the light arrow button to send, or `Shift+Enter` for a new line.
 
 ### 4. Type or edit your own text
 
-The shortcut immediately opens an editable popup when no text is captured, without discarding an existing translation. With existing text, click the pencil beside the source, or enable **Direct input on shortcut (快捷键唤起后直接输入)** to focus and select it automatically. `Enter` or the arrow button at the right of the input submits a new conversation; `Shift+Enter` inserts a new line. Pressing the shortcut again on the same text returns to the existing translation, word card and follow-up draft without another request. Drag to select translated text, then use `Ctrl+C` or the copy context menu. There is no separate copy-translation button.
+When no text is captured, the shortcut immediately opens an editable popup ready for manual input, without a generic error and without discarding the existing translation. With existing text, click the pencil beside the source, or enable **Direct input on shortcut (快捷键唤起后直接输入)** to focus and select it automatically. `Enter` or the arrow beside the editor submits a new conversation; `Shift+Enter` inserts a new line. Clearing the draft without submitting keeps the current result: pressing the shortcut again on the same text restores that conversation's translation, word cards, and questions without repeating the request. Drag to select translated text, then use `Ctrl+C` or the copy context menu. There is no separate copy-translation button.
 
 [![Manual source editing and translation](docs/images/manual-input.png)](docs/images/manual-input.png)
 
@@ -220,7 +220,7 @@ Check that Leaf is running in the tray. If the shortcut is already in use, choos
 
 ### Why does my API request fail after entering a key?
 
-Check the provider, model, endpoint, and account quota. Leaf displays errors for network failures, timeouts, invalid keys, rate limits, and malformed responses. Apply service configuration after a successful connection test. A stored key appears as dark password dots inside the field, with its saved status below. Stored keys are not filled back into the editor; typing replaces the key, while leaving it blank preserves it. The mask does not reveal key length. Changing the endpoint requires entering the key again. Applying keeps settings open; changes to a previously configured model apply automatically.
+Check the provider, model, endpoint, and account quota. Leaf displays errors for network failures, timeouts, invalid keys, rate limits, and malformed responses. Apply service configuration after a successful connection test. A stored key appears as dark password dots inside the field, with its saved status below. Stored keys are not filled back into the editor; typing replaces the key, while leaving it blank preserves it. The mask does not reveal key length. Changing the endpoint requires entering the key again. A saved key is bound to its endpoint: an upgrade migrates it to the currently saved address, and a key saved for an old address is never sent to a new one. Applying keeps settings open; changes to a previously configured model apply automatically.
 
 ### Can I use another language or compatible service?
 
@@ -237,7 +237,6 @@ This version is Windows-only and does not include OCR, screenshot translation, o
 ## Documentation and feedback
 
 - [Measured resource usage](docs/PERFORMANCE-v0.4.0.md)
-
 - [English user guide](docs/USAGE.en.md)
 - [中文使用说明](docs/USAGE.md)
 - [Development and contribution guide](CONTRIBUTING.md)

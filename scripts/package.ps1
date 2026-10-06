@@ -1,7 +1,13 @@
-param([string]$Version = '0.4.1')
+param([string]$Version)
 $ErrorActionPreference = 'Stop'
-if ($Version -notmatch '^\d+\.\d+\.\d+([-.][A-Za-z0-9]+)*$') { throw 'Invalid version.' }
+. (Join-Path $PSScriptRoot 'version.ps1')
 $projectRoot = Split-Path -Parent $PSScriptRoot
+$versionInfo = Get-LeafVersion -ProjectRoot $projectRoot
+if ([string]::IsNullOrWhiteSpace($Version)) { $Version = $versionInfo.SemVer }
+elseif ($Version -cne $versionInfo.SemVer) {
+    throw ('Explicit version ' + $Version + ' does not match the version constant ' + $versionInfo.SemVer + '.')
+}
+[void](Assert-LeafVersionString -Value $Version -Label 'The package version')
 $packageBuildDirectory = 'bin\package-v' + $Version
 & (Join-Path $PSScriptRoot 'build.ps1') -OutputDirectory $packageBuildDirectory
 $packageBuildRoot = Join-Path $projectRoot $packageBuildDirectory

@@ -379,6 +379,7 @@ namespace Leaf
                 Check(!shell.Popup.ShowActivated, "Popup does not activate on Show", checks);
                 Check(shell.Popup.ShowInTaskbar && shell.Popup.Icon != null, "Popup has a branded taskbar entry", checks);
                 Ui.Render(shell.Popup, Path.Combine(folder, "popup.png"));
+                if (Environment.GetEnvironmentVariable("LEAF_SMOKE_FAIL_AFTER_RENDER") == "1") throw new InvalidOperationException("Fixture-requested smoke failure after the first render.");
                 Ui.Get<Button>(shell.Popup, "AskButton").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
                 Check(Ui.Get<Border>(shell.Popup, "InputPanel").Visibility == Visibility.Visible, "Ask reveals the input", checks);
                 Check(!shell.Pinned, "Asking does not pin the popup", checks);

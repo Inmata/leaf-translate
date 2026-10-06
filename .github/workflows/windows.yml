@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      native_checks:
+        description: Run native desktop checks (requires an interactive desktop)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -12,16 +17,44 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Build and verify
         shell: powershell
-        run: ./scripts/test.ps1
+        run: ./scripts/test.ps1 -OutputDirectory work/verification
+      - name: Check public source
+        shell: powershell
+        run: ./scripts/publish.ps1 -CheckOnly
+      - name: Verify publication fixtures and docs
+        shell: powershell
+        run: |
+          ./scripts/test-publish.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./scripts/check-docs.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Package portable app
         shell: powershell
         run: ./scripts/package.ps1
+      - name: Native desktop checks
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.native_checks }}
+        shell: powershell
+        run: |
+          ./scripts/native-checks.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Upload verification evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: Leaf-verification
+          path: |
+            work/ui-smoke/*.png
+            work/ui-smoke/result.json
+            work/verification-results/*
+            work/native-evidence/*
+          if-no-files-found: warn
       - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
         with:
           name: Leaf-windows
           path: |
