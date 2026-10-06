@@ -32,7 +32,7 @@
         <TextBlock Text="模型" Style="{StaticResource Caption}"/>
         <ComboBox x:Name="ModelInput" IsEditable="True" IsTextSearchEnabled="False" MaxDropDownHeight="260"/>
       </StackPanel>
-      <Expander x:Name="AdvancedExpander" Header="高级" FontSize="12" Foreground="{StaticResource Muted}" Margin="0,0,0,24">
+      <Expander x:Name="AdvancedExpander" Header="高级选项" FontSize="12" Foreground="{StaticResource Muted}" Margin="0,0,0,24">
         <StackPanel Margin="0,12,0,0">
           <TextBlock x:Name="ModelVendorHint" TextWrapping="Wrap" Foreground="{StaticResource Muted}" FontSize="11" Margin="0,0,0,10" Visibility="Collapsed"/>
           <Grid Margin="0,0,0,14">

@@ -107,25 +107,47 @@
     <Setter Property="Padding" Value="1"/>
     <Setter Property="SnapsToDevicePixels" Value="True"/>
   </Style>
+  <!-- Field content host: a presenter without scrollbar rows, so the single-line editor
+       is exactly one 20-dip line centred in the field. The editor copies the field's
+       padding into the host, so the presenter must not bind it again or the line gets
+       squeezed twice and the desired height inflates past the 44-dip field. -->
+  <Style x:Key="FieldContentHost" TargetType="ScrollViewer">
+    <Setter Property="HorizontalScrollBarVisibility" Value="Hidden"/>
+    <Setter Property="VerticalScrollBarVisibility" Value="Auto"/>
+    <Setter Property="Focusable" Value="False"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="ScrollViewer">
+          <ScrollContentPresenter Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}" CanContentScroll="{TemplateBinding CanContentScroll}"/>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
   <Style TargetType="TextBox">
     <Setter Property="Background" Value="White"/>
     <Setter Property="BorderBrush" Value="{StaticResource Line}"/>
     <Setter Property="BorderThickness" Value="1"/>
     <Setter Property="FontSize" Value="15"/>
     <Setter Property="MinHeight" Value="44"/>
-    <Setter Property="Padding" Value="12,10"/>
+    <Setter Property="Padding" Value="12,8"/>
     <Setter Property="VerticalContentAlignment" Value="Center"/>
     <Setter Property="Template">
       <Setter.Value>
         <ControlTemplate TargetType="TextBox">
           <Border Style="{StaticResource FieldFocusRing}" x:Name="FocusRing">
             <Border x:Name="Chrome" CornerRadius="8" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}">
-              <ScrollViewer x:Name="PART_ContentHost" Margin="{TemplateBinding Padding}" VerticalAlignment="Center" MinHeight="22"/>
+              <ScrollViewer x:Name="PART_ContentHost" Style="{StaticResource FieldContentHost}" Margin="{TemplateBinding Padding}" VerticalAlignment="Center" MinHeight="20"/>
             </Border>
           </Border>
           <ControlTemplate.Triggers>
             <Trigger Property="IsKeyboardFocusWithin" Value="True">
               <Setter TargetName="FocusRing" Property="BorderBrush" Value="{StaticResource Accent}"/>
+            </Trigger>
+            <!-- Multi-line editors stretch their content host and top-align the text
+                 instead of reusing the single-line 20-dip centred line. -->
+            <Trigger Property="AcceptsReturn" Value="True">
+              <Setter Property="VerticalContentAlignment" Value="Top"/>
+              <Setter TargetName="PART_ContentHost" Property="VerticalAlignment" Value="Stretch"/>
             </Trigger>
           </ControlTemplate.Triggers>
         </ControlTemplate>
@@ -136,16 +158,16 @@
     <Setter Property="Background" Value="White"/><Setter Property="BorderBrush" Value="{StaticResource Line}"/>
     <Setter Property="FontSize" Value="15"/>
     <Setter Property="MinHeight" Value="44"/>
-    <Setter Property="Padding" Value="12,10"/><Setter Property="VerticalContentAlignment" Value="Center"/>
+    <Setter Property="Padding" Value="12,8"/><Setter Property="VerticalContentAlignment" Value="Center"/>
     <Setter Property="PasswordChar" Value="●"/>
     <Setter Property="Template">
       <Setter.Value>
         <ControlTemplate TargetType="PasswordBox">
-          <Border Style="{StaticResource FieldFocusRing}" x:Name="FocusRing">
+          <Border Style="{StaticResource FieldFocusRing}" x:Name="FocusRing" Height="{TemplateBinding MinHeight}">
             <Border x:Name="Chrome" CornerRadius="8" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="1">
               <!-- Centered with a real minimum height so the genuine caret renders as a full
                    vertical line, never as a squat dot; no fake caret is drawn. -->
-              <ScrollViewer x:Name="PART_ContentHost" Margin="{TemplateBinding Padding}" VerticalAlignment="Center" MinHeight="22"/>
+              <ScrollViewer x:Name="PART_ContentHost" Style="{StaticResource FieldContentHost}" Margin="{TemplateBinding Padding}" VerticalAlignment="Center" MinHeight="20"/>
             </Border>
           </Border>
           <ControlTemplate.Triggers>

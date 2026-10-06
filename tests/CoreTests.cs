@@ -51,6 +51,7 @@ public static class CoreTests
             if (args.Contains("--native")) return WindowsNativeTests.Run(folder);
             if (args.Length > 2 && args[0] == "--exit-scenario") return ExitScenarioTests.Run(args[1], args[2]);
             Domain(); Storage(folder);
+            assertions += TranslationPresentationTests.Run();
             assertions += SelectionTests.Run().GetAwaiter().GetResult();
             Transport().GetAwaiter().GetResult(); Diagnostics(folder).GetAwaiter().GetResult();
             assertions += StorageRegressionTests.Run(Path.Combine(folder, "storage-regression")).GetAwaiter().GetResult();
