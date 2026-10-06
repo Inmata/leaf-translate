@@ -398,7 +398,8 @@ namespace Leaf
             Layout(popup);
             var paragraph = Ui.Get<RichTextBox>(popup, "TranslationText").Document.Blocks.OfType<System.Windows.Documents.Paragraph>().First();
             var visible = new System.Windows.Documents.TextRange(paragraph.ContentStart, paragraph.ContentEnd).Text;
-            var bold = paragraph.Inlines.OfType<System.Windows.Documents.Bold>().FirstOrDefault();
+            var bold = paragraph.Inlines.OfType<System.Windows.Documents.Run>()
+                .FirstOrDefault(run => run.FontWeight == FontWeights.Bold && run.Text == "document");
             Check(!visible.Contains("**") && bold != null &&
                 new System.Windows.Documents.TextRange(bold.ContentStart, bold.ContentEnd).Text == "document",
                 "Paired markdown emphasis renders document in bold without its markers", checks);
@@ -712,7 +713,11 @@ namespace Leaf
                 StopState(shell, transport, folder, checks);
                 shell.Forget(null);
                 await shell.WaitForPersistenceAsync();
-                Check(Ui.Get<Grid>(shell.Popup, "SourceEditor").Visibility == Visibility.Visible, "Empty popup is ready for manual input", checks);
+                Check(Ui.Get<Grid>(shell.Popup, "SourceEditor").Visibility == Visibility.Collapsed,
+                    "Empty popup stays quiet without automatically opening the editor", checks);
+                shell.BeginSourceEdit(false);
+                Check(Ui.Get<Grid>(shell.Popup, "SourceEditor").Visibility == Visibility.Visible,
+                    "Explicit editing opens manual input in the empty popup", checks);
                 Ui.Render(shell.Popup, Path.Combine(folder, "popup-input.png"));
             }
         }
