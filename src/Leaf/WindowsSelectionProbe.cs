@@ -85,6 +85,12 @@ namespace Leaf
         {
             return originTrusted && foregroundSame && captured != 0 && captured == current;
         }
+        // A saved clipboard is usable only while the clipboard is still the one it was read
+        // from: content the user copied in the meantime is newer than the save.
+        public static bool CanKeepBackup(uint savedAt, uint current)
+        {
+            return savedAt != 0 && savedAt == current;
+        }
         public static bool CanTrustOrigin(uint ownerProcess, uint expectedProcess)
         {
             return expectedProcess != 0 && ownerProcess == expectedProcess;

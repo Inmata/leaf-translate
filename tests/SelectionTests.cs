@@ -119,6 +119,7 @@ internal static class SelectionTests
         await Diagnostics(reader, probe);
         CopyStateMachine();
         await CopyWorker();
+        ClipboardBackups();
         await BoundedTraversal();
         return count + assertions;
     }
@@ -292,9 +293,38 @@ internal static class SelectionTests
             "The saved clipboard is restored only while its sequence and foreground still match");
         Check(!WindowsSelectionProbe.CanRestoreCopy(11, 11, true, false),
             "The saved clipboard is never restored over a clipboard another process now owns");
+        Check(WindowsSelectionProbe.CanKeepBackup(11, 11) && !WindowsSelectionProbe.CanKeepBackup(11, 12) &&
+            !WindowsSelectionProbe.CanKeepBackup(0, 0),
+            "A saved clipboard is usable only while its own sequence is still the current one");
         Check(!WindowsSelectionProbe.CanTrustOrigin(0, 456) && !WindowsSelectionProbe.CanTrustOrigin(789, 456) &&
             WindowsSelectionProbe.CanTrustOrigin(456, 456),
             "Clipboard content is used only when its owner is the captured process");
+    }
+
+    // What the worker is allowed to put back is decided by these rules, and the rule that
+    // materialises the old clipboard runs as production code over a scripted format source.
+    private static void ClipboardBackups()
+    {
+        var complete = new ScriptedClipboardFormats("UnicodeText", "HTML Format");
+        complete.Values["UnicodeText"] = "old clipboard";
+        complete.Values["HTML Format"] = "<b>old</b>";
+        var kept = Native.Materialize(complete);
+        Check(kept != null && !kept.IsEmpty && complete.Reads.Count == 2,
+            "A clipboard whose formats all read is materialised into one restorable backup");
+
+        var partial = new ScriptedClipboardFormats("UnicodeText", "HTML Format");
+        partial.Values["UnicodeText"] = "old clipboard";
+        Check(Native.Materialize(partial) == null,
+            "A clipboard with a format that read as nothing is unknown, not a complete backup");
+
+        var unreadable = new ScriptedClipboardFormats("UnicodeText", "HTML Format");
+        unreadable.Values["UnicodeText"] = "old clipboard";
+        unreadable.Unreadable.Add("HTML Format");
+        Check(Native.Materialize(unreadable) == null,
+            "A clipboard with a format that could not be read at all is unknown");
+
+        Check(Native.Materialize(new ScriptedClipboardFormats()) == null && Native.Materialize(null) == null,
+            "A clipboard that reports no formats is unknown rather than a verified empty");
     }
 
     // The production copy worker against a scripted desktop: sequence, ownership,
@@ -444,6 +474,35 @@ internal static class SelectionTests
                 "The restore the worker entered and declined is recorded as a cancelled restore");
             Check(outcome.Status == CaptureStatus.Cancelled && outcome.Text == "" && lateRestore.ReadCalls == 1,
                 "A capture cancelled while restoring its clipboard reports Cancelled instead of the text it read");
+        }
+
+        // The saved clipboard has to be the one this capture replaces. A clipboard that moved
+        // while it was being read makes the backup stale, so it must not be put back over what
+        // the user copied in the meantime.
+        var staleBackup = new ScriptedCopyHost();
+        staleBackup.OnBackup = () => staleBackup.Sequence++;
+        using (var deadline = new CancellationTokenSource()) {
+            var outcome = Native.CopyOnSta(target, deadline, new List<CaptureStep>(), staleBackup);
+            Check(staleBackup.BackupCalls == 1 && staleBackup.RestoreCalls == 0 && staleBackup.EmptyRestoreCalls == 0,
+                "A backup read while the user copied does not overwrite the newer clipboard");
+            Check(Step(outcome, "clipboard_restore") != null && !Step(outcome, "clipboard_restore").ClipboardChanged &&
+                Step(outcome, "clipboard_restore").Reason == CaptureReason.ClipboardOriginUnknown,
+                "A stale backup is reported as an unknown origin instead of a restore that happened");
+            Check(outcome.Status == CaptureStatus.Text && outcome.Text == "copy fixture",
+                "The copy itself is still this invocation's text after a stale backup was dropped");
+        }
+
+        // The same rule at the last check before the injection: the user copies while the
+        // worker is making it, and the backup no longer describes the clipboard it would
+        // overwrite.
+        var copiedBeforeSend = new ScriptedCopyHost();
+        copiedBeforeSend.OnForeground = () => { if (copiedBeforeSend.ForegroundReads == 3) copiedBeforeSend.Sequence++; };
+        using (var deadline = new CancellationTokenSource()) {
+            var outcome = Native.CopyOnSta(target, deadline, new List<CaptureStep>(), copiedBeforeSend);
+            Check(copiedBeforeSend.SendCalls == 1 && copiedBeforeSend.RestoreCalls == 0,
+                "A user copy that lands during the final check is not overwritten by the restore");
+            Check(Step(outcome, "clipboard_restore") != null && Step(outcome, "clipboard_restore").Reason == CaptureReason.ClipboardOriginUnknown,
+                "The dropped backup is recorded as an unknown origin");
         }
 
         // A restore that fails is metadata, never a claimed success.
@@ -621,7 +680,7 @@ internal sealed class ScriptedCopyHost : ICopyHost
     public int SequenceChangeAfterPauses = -1;
     public int PauseMs = 1;
     public Func<bool> Modifiers = () => false;
-    public Action OnRead, OnPause, OnOwner, OnForeground;
+    public Action OnRead, OnPause, OnOwner, OnForeground, OnBackup;
     public int BackupCalls, RestoreCalls, EmptyRestoreCalls, SendCalls, ReadCalls, PauseCalls, OwnerReads, ForegroundReads;
 
     public IntPtr ForegroundWindow
@@ -659,6 +718,7 @@ internal sealed class ScriptedCopyHost : ICopyHost
     public ClipboardBackup Backup()
     {
         BackupCalls++;
+        if (OnBackup != null) OnBackup();
         if (BackupThrows != null) throw BackupThrows;
         return BackupResult;
     }
@@ -667,6 +727,25 @@ internal sealed class ScriptedCopyHost : ICopyHost
         RestoreCalls++;
         if (backup != null && backup.IsEmpty) EmptyRestoreCalls++;
         if (RestoreThrows != null) throw RestoreThrows;
+    }
+}
+
+// A scripted clipboard: only the format read itself is faked, so the rule that decides
+// whether a backup is complete runs as the production code it is.
+internal sealed class ScriptedClipboardFormats : IClipboardFormatSource
+{
+    private readonly string[] available;
+    public readonly Dictionary<string, object> Values = new Dictionary<string, object>();
+    public readonly List<string> Unreadable = new List<string>();
+    public readonly List<string> Reads = new List<string>();
+    public ScriptedClipboardFormats(params string[] formats) { available = formats; }
+    public string[] Formats { get { return available; } }
+    public bool TryRead(string format, out object value)
+    {
+        Reads.Add(format);
+        if (Unreadable.Contains(format)) { value = null; return false; }
+        Values.TryGetValue(format, out value);
+        return true;
     }
 }
 

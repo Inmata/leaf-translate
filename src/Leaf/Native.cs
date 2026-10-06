@@ -263,13 +263,23 @@ namespace Leaf
             if (host.ForegroundWindow != target.Window) return Stepped(CaptureStatus.Unavailable, CaptureReason.ForegroundChanged, steps);
 
             // The old clipboard is saved before it is overwritten. A clipboard that could not
-            // be read is unknown, never empty, so a failed save must not turn into a clear.
+            // be read is unknown, never empty, so a failed save must not turn into a clear. It
+            // is read on both sides of the save: a clipboard the user changed while it was
+            // being read is one this capture does not replace, so the stale save is dropped
+            // instead of being put back over the newer content later.
+            uint backedUpAt = host.ClipboardSequence;
             ClipboardBackup previous = null;
             try { previous = host.Backup(); } catch { previous = null; }
-            uint before = host.ClipboardSequence;
+            if (previous != null && !WindowsSelectionProbe.CanKeepBackup(backedUpAt, host.ClipboardSequence)) previous = null;
             if (Stopped(deadline.Token)) return Stopped(steps);
             if (host.ForegroundWindow != target.Window) return Stepped(CaptureStatus.Unavailable, CaptureReason.ForegroundChanged, steps);
-            // The last getter can block on another application, so the token is read once more
+
+            // The baseline of "a new copy" is taken as late as possible: anything the clipboard
+            // held before this instant is not the copy this invocation asked for. The same read
+            // decides whether the saved clipboard still describes the one about to be replaced.
+            uint before = host.ClipboardSequence;
+            if (previous != null && !WindowsSelectionProbe.CanKeepBackup(backedUpAt, before)) previous = null;
+            // The getters above can block on another application, so the token is read once more
             // immediately before the injected copy and never after it.
             if (Stopped(deadline.Token)) return Stopped(steps);
 
@@ -449,7 +459,10 @@ namespace Leaf
                 object value;
                 try { if (!source.TryRead(format, out value)) return null; }
                 catch { return null; }
-                if (value != null) copy.SetData(format, value);
+                // A format the clipboard lists but cannot hand over leaves a partial copy,
+                // which is unknown rather than something safe to put back later.
+                if (value == null) return null;
+                copy.SetData(format, value);
             }
             return copy.GetFormats(false).Length == 0 ? null : ClipboardBackup.Of(copy);
         }
