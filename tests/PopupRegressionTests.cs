@@ -11,6 +11,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Documents;
+using System.Windows.Interop;
 using System.Windows.Threading;
 using Leaf;
 
@@ -55,6 +56,7 @@ internal static class PopupRegressionTests
         await InternalChildChain(Path.Combine(folder, "internal-chain"));
         await RootRetryReanchorsAfterReturn(Path.Combine(folder, "root-retry-reanchor"));
         await HighlightPendingClearsOnDetach(Path.Combine(folder, "highlight-detach"));
+        await HighlightBandsUnderRealLayout();
         await TranslationDisplayDropsMarkers(Path.Combine(folder, "marker-display"));
         SourceOffsetMapsStayTotalAndMonotone();
         await SameSourceInternalSelectionReuse(Path.Combine(folder, "internal-reuse"));
@@ -69,6 +71,7 @@ internal static class PopupRegressionTests
         await ShortcutRecordingEndsWhenHostDeactivates(Path.Combine(folder, "shortcut-deactivated"));
         await ExternalShortcutLeavesSettingsPage(Path.Combine(folder, "external-settings-leave"));
         await FailedSettingsLeaveBlocksCapture(Path.Combine(folder, "settings-leave-blocks"));
+        await InconclusiveCaptureKeepsSettingsPage(Path.Combine(folder, "inconclusive-settings"));
         await ExitKeepsAppOnFailedSettingsLeave(Path.Combine(folder, "exit-settings-leave"));
         return assertions;
     }
@@ -266,7 +269,7 @@ internal static class PopupRegressionTests
             var word = TextTools.Pieces(record.Source).First(p => p.IsWord);
             await shell.SelectWordAsync(word, false);
             Check(Ui.Get<Border>(shell.Popup, "WordPanel").Visibility == Visibility.Visible &&
-                Ui.Get<TextBlock>(shell.Popup, "WordTitle").Text == word.Text,
+                Ui.Get<TextBox>(shell.Popup, "WordTitle").Text == word.Text,
                 "The word card is on screen before recovery");
             Check(shell.WordHighlighted,
                 "The selected word is highlighted before recovery");
@@ -277,7 +280,7 @@ internal static class PopupRegressionTests
             Check(handler.Calls == calls && ReferenceEquals(shell.Current, record),
                 "Recovering the same text makes no API call");
             Check(Ui.Get<Border>(shell.Popup, "WordPanel").Visibility == Visibility.Visible &&
-                Ui.Get<TextBlock>(shell.Popup, "WordTitle").Text == word.Text &&
+                Ui.Get<TextBox>(shell.Popup, "WordTitle").Text == word.Text &&
                 Reading(shell.Popup, "WordMeaning") == "夹具词义",
                 "Recovery keeps the word card instead of rebuilding the record");
             Check(shell.WordHighlighted,
@@ -398,7 +401,7 @@ internal static class PopupRegressionTests
                 Ui.Get<Grid>(shell.Popup, "TranslatePage").Visibility == Visibility.Visible,
                 "Leaving settings returns to the reading page");
             Check(Ui.Get<Border>(shell.Popup, "WordPanel").Visibility == Visibility.Visible &&
-                Ui.Get<TextBlock>(shell.Popup, "WordTitle").Text == word.Text &&
+                Ui.Get<TextBox>(shell.Popup, "WordTitle").Text == word.Text &&
                 Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text == "draft across settings",
                 "The round trip keeps the word card, the conversation and the draft");
             Check(Ui.Get<TextBlock>(shell.Popup, "SourceBadge").Text == "选中文本",
@@ -604,6 +607,37 @@ internal static class PopupRegressionTests
             Check(shell.WordHighlighted, "The same word can be explained again after collapsing");
             shell.OpenRecord(TranslationRecord.Create("Another source for the detach check.", "选中文字", shell.Store.Settings));
             Check(!shell.WordHighlighted, "Filling a new source detaches the previous highlight");
+        }
+    }
+
+    // Real layout inside a hidden host reproduces the ArgumentOutOfRangeException the
+    // headless zero-width box skipped: a highlight over a laid-out single line and over the
+    // last line of a multi-line box must compute without throwing or interrupting the
+    // learner. The host is off-screen and never shown, so only the layer runs here.
+    private static async Task HighlightBandsUnderRealLayout()
+    {
+        var parameters = new HwndSourceParameters("highlight-band-check");
+        parameters.SetPosition(-32000, -32000); parameters.SetSize(340, 260);
+        parameters.WindowStyle = unchecked((int)0x80000000); // WS_POPUP: a window that never shows
+        using (var host = new HwndSource(parameters)) {
+            var canvas = new Canvas();
+            var single = new TextBox { Text = "alpha beta gamma", Width = 300 };
+            var multiline = new TextBox { Width = 300 };
+            multiline.Text = "one\ntwo\nthree";
+            Canvas.SetTop(multiline, 40);
+            canvas.Children.Add(single); canvas.Children.Add(multiline);
+            host.RootVisual = canvas;
+            canvas.UpdateLayout();
+            Check(single.LineCount == 1 && multiline.LineCount == 3,
+                "The hidden host gives the real TextBox lines to highlight");
+            var singleLayer = new SourceHighlightLayer();
+            singleLayer.Bind(single);
+            singleLayer.Show(single.Text.IndexOf("beta"), single.Text.IndexOf("beta") + 4);
+            int last = multiline.Text.IndexOf("three");
+            var multilineLayer = new SourceHighlightLayer();
+            multilineLayer.Bind(multiline);
+            multilineLayer.Show(last, last + 5);
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
         }
     }
 
@@ -847,7 +881,7 @@ internal static class PopupRegressionTests
             Check(ReferenceEquals(shell.Current, record) && handler.Calls == 3,
                 "Returning to the previous session restores it without any API call");
             Check(Ui.Get<Border>(shell.Popup, "WordPanel").Visibility == Visibility.Visible &&
-                Ui.Get<TextBlock>(shell.Popup, "WordTitle").Text == word.Text,
+                Ui.Get<TextBox>(shell.Popup, "WordTitle").Text == word.Text,
                 "The return restores the previous session's word card");
             Check(Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text == "return draft",
                 "The return restores the previous session's follow-up draft");
@@ -1103,9 +1137,9 @@ internal static class PopupRegressionTests
         public InternalSelectionResult Read() { return result; }
     }
 
-    // An external capture shows the reading page, so it leaves an open settings page first: the
-    // pending preference is applied, the capture still uses the old pipeline, and the session
-    // keeps its draft instead of losing it to a page that was never saved.
+    // An external capture runs first; only a text result leaves the open settings page and
+    // enters the reading page, so the pending preference is applied at that leave, and the
+    // session keeps its draft instead of losing it to a page that was never saved.
     private static async Task ExternalShortcutLeavesSettingsPage(string folder)
     {
         var probe = new FakeSelectionProbe();
@@ -1133,12 +1167,52 @@ internal static class PopupRegressionTests
         }
     }
 
-    // A settings page that cannot be saved is not left: the capture never happens, the page keeps
-    // its reason and its pending edit, and the session stays where it was.
+    // An inconclusive capture (empty or unavailable) never touches an open settings page:
+    // the page, its pending edit, the session and its draft all stay exactly as they were,
+    // and the outcome is stated on the source badge instead of a generic error.
+    private static async Task InconclusiveCaptureKeepsSettingsPage(string folder)
+    {
+        var probe = new FakeSelectionProbe();
+        probe.Automation = SelectionCaptureResult.NoText(CaptureStatus.Empty, CaptureReason.EmptySelection);
+        var handler = new FixtureHandler();
+        using (var shell = new AppShell(ConfiguredStore(folder), false, new LlmClient(handler))) {
+            shell.Selection = new SelectionAcquirer(probe);
+            await shell.TranslateAsync("An inconclusive capture sentence.", "选中文字", false);
+            var record = shell.Current;
+            Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text = "draft kept through the empty capture";
+            shell.ShowSettingsPage();
+            var panel = SettingsPanel(shell);
+            Ui.Get<TextBox>(panel, "TargetInput").Text = "英语";
+            int calls = handler.Calls;
+            await shell.InvokeShortcutAsync();
+            Check(shell.IsSettingsPageOpen && ReferenceEquals(shell.Current, record) && handler.Calls == calls,
+                "An empty capture keeps the settings page and the conversation untouched");
+            Check(shell.Store.Settings.TargetLanguage != "英语",
+                "An empty capture never flushes the pending preference");
+            Check(Ui.Get<TextBox>(panel, "TargetInput").Text == "英语" &&
+                Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text == "draft kept through the empty capture",
+                "An empty capture keeps the page edit and the follow-up draft");
+            Check(Ui.Get<Border>(shell.Popup, "ErrorPanel").Visibility == Visibility.Collapsed,
+                "An empty capture shows no generic error over the kept page");
+
+            // Unavailable behaves the same: nothing on the page moves and the badge explains why.
+            probe.Automation = SelectionCaptureResult.NoText(CaptureStatus.Unavailable, CaptureReason.UnsupportedPattern);
+            await shell.InvokeShortcutAsync();
+            Check(shell.IsSettingsPageOpen && ReferenceEquals(shell.Current, record),
+                "An unavailable capture keeps the settings page and the conversation too");
+            Check(Convert.ToString(Ui.Get<TextBlock>(shell.Popup, "SourceBadge").ToolTip).Contains("未取得选区"),
+                "An unavailable capture is described by the source badge");
+            Check(Ui.Get<TextBox>(panel, "TargetInput").Text == "英语",
+                "An unavailable capture keeps the page edit as well");
+        }
+    }
+
+    // A settings page that cannot be saved is not left: the captured text is discarded
+    // instead of shown over the page, which keeps its reason and its pending edit.
     private static async Task FailedSettingsLeaveBlocksCapture(string folder)
     {
         var probe = new FakeSelectionProbe();
-        probe.Automation = SelectionCaptureResult.Success("capture that must not happen");
+        probe.Automation = SelectionCaptureResult.Success("capture that must not be shown");
         var handler = new FixtureHandler();
         using (var shell = new AppShell(ConfiguredStore(folder), false, new LlmClient(handler))) {
             shell.Selection = new SelectionAcquirer(probe);
@@ -1151,9 +1225,9 @@ internal static class PopupRegressionTests
             int calls = handler.Calls;
             await shell.InvokeShortcutAsync();
             Check(shell.IsSettingsPageOpen && ReferenceEquals(shell.Current, record) && handler.Calls == calls,
-                "A settings page that cannot be saved keeps the page and never starts the capture");
-            Check(probe.AutomationCalls == 0 && probe.CopyCalls == 0 && probe.ClipboardCalls == 0,
-                "The blocked capture never reads the desktop");
+                "A settings page that cannot be saved keeps the page and never shows the capture");
+            Check(probe.AutomationCalls == 1 && probe.CopyCalls == 0 && probe.ClipboardCalls == 0,
+                "The capture still reads the selection once before the page refuses to be left");
             Check(Ui.Get<TextBlock>(panel, "SettingsStatus").Text.Contains("目标语言") &&
                 Ui.Get<TextBox>(panel, "TargetInput").Text == "   ",
                 "The kept page shows its reason and still holds the pending edit");
@@ -1337,8 +1411,10 @@ internal static class PopupRegressionTests
         }
     }
 
-    // Leaf itself in front with nothing to restore: the shortcut must still prepare the
-    // manual input the user asked for instead of doing nothing at all.
+    // Leaf itself in front with nothing to restore: the shortcut reveals the empty state
+    // quietly and keeps whatever page and draft the user has. The input is entered through
+    // the explicit edit control, never opened automatically — not even by the direct-input
+    // preference, which only applies when a real text result was obtained.
     private static async Task LeafForegroundWithoutResult(string folder)
     {
         var probe = new FakeSelectionProbe();
@@ -1350,11 +1426,12 @@ internal static class PopupRegressionTests
             Ui.Visible(Ui.Get<TextBox>(shell.Popup, "SourceText"), true);
             Ui.Visible(Ui.Get<Grid>(shell.Popup, "SourceEditor"), false);
             await shell.InvokeShortcutAsync();
-            Check(Ui.Get<Grid>(shell.Popup, "SourceEditor").Visibility == Visibility.Visible &&
-                Ui.Get<TextBox>(shell.Popup, "SourceInput").Text.Length == 0,
-                "A shortcut in front of Leaf with no result prepares the empty manual input");
+            Check(Ui.Get<Grid>(shell.Popup, "SourceEditor").Visibility == Visibility.Collapsed,
+                "A shortcut with no result keeps the empty reading page instead of opening the editor");
+            Check(Ui.Get<TextBlock>(shell.Popup, "SourceBadge").Text == "选中模式",
+                "The no-result empty state is stated on the source badge");
             Check(probe.AutomationCalls == 0 && probe.CopyCalls == 0 && probe.ClipboardCalls == 0,
-                "Preparing manual input in front of Leaf reads no selection at all");
+                "The empty state in front of Leaf reads no selection at all");
 
             // The same shortcut keeps whatever the user has already typed.
             Ui.Visible(Ui.Get<Grid>(shell.Popup, "SourceEditor"), true);
@@ -1364,15 +1441,14 @@ internal static class PopupRegressionTests
                 shell.Current == null,
                 "A shortcut with no result never discards an uncommitted draft");
 
-            // The direct-input preference decides whether that prepared editor takes focus.
+            // Even the direct-input preference does not switch the empty page into its editor.
             var direct = Json.Copy(shell.Store.Settings); direct.FocusInputOnShortcut = true; shell.Store.SaveSettings(direct);
             Ui.Visible(Ui.Get<TextBox>(shell.Popup, "SourceText"), true);
             Ui.Visible(Ui.Get<Grid>(shell.Popup, "SourceEditor"), false);
             Ui.Get<TextBox>(shell.Popup, "SourceInput").Clear();
             await shell.InvokeShortcutAsync();
-            Check(Ui.Get<Grid>(shell.Popup, "SourceEditor").Visibility == Visibility.Visible &&
-                Ui.Get<TextBox>(shell.Popup, "SourceInput").SelectedText.Length == 0,
-                "The direct-input preference still prepares the editor when there is no result");
+            Check(Ui.Get<Grid>(shell.Popup, "SourceEditor").Visibility == Visibility.Collapsed,
+                "The direct-input preference does not open the editor when there is no result");
         }
     }
 
@@ -1391,14 +1467,24 @@ internal static class PopupRegressionTests
             var pending = shell.InvokeShortcutAsync();
             // The user changes the preference while the shortcut is still acquiring.
             var changed = Json.Copy(shell.Store.Settings); changed.FocusInputOnShortcut = true; shell.Store.SaveSettings(changed);
-            probe.AutomationPending.TrySetResult(SelectionCaptureResult.NoText(CaptureStatus.Unavailable, CaptureReason.UnsupportedPattern));
+            probe.AutomationPending.TrySetResult(SelectionCaptureResult.Success("snapshot preference text"));
             await pending;
-            Check(Ui.Get<Grid>(shell.Popup, "SourceEditor").Visibility == Visibility.Visible &&
-                Ui.Get<TextBox>(shell.Popup, "SourceInput").SelectedText.Length == 0,
-                "A capture uses the direct-input preference it snapshotted, not one changed while it ran");
-            Check(ReferenceEquals(shell.Current, record),
-                "Preparing input for an inconclusive capture keeps the conversation");
-            Check(handler.Calls == 1, "An inconclusive capture adds no API call");
+            // The captured text is translated, but the editor is not opened: the invocation
+            // snapshot said quiet, and a preference changed mid-capture waits for the next one.
+            Check(shell.Current.Source == "snapshot preference text" && !ReferenceEquals(shell.Current, record),
+                "A captured text starts its own conversation");
+            Check(Ui.Get<Grid>(shell.Popup, "SourceEditor").Visibility == Visibility.Collapsed,
+                "A text capture uses the direct-input preference it snapshotted, not one changed while it ran");
+            Check(handler.Calls == 2, "A text capture adds exactly one API call");
+
+            // A later invocation reads the saved preference and takes the direct-input path.
+            probe.AutomationPending = new TaskCompletionSource<SelectionCaptureResult>();
+            var second = shell.InvokeShortcutAsync();
+            probe.AutomationPending.TrySetResult(SelectionCaptureResult.Success("direct input text"));
+            await second;
+            Check(shell.Current.Source == "direct input text" &&
+                Ui.Get<Grid>(shell.Popup, "SourceEditor").Visibility == Visibility.Visible,
+                "A text capture with the saved direct-input preference enters the editor");
         }
     }
 

@@ -272,7 +272,13 @@ namespace Leaf
             var context = Json.Copy(record.Context);
             context.Providers = new List<ProviderProfile> { Json.Copy(provider) };
             context.ProviderId = provider.Id;
-            return word.Key + ":" + For(Json.Write(new { record.Source, record.Translation, word.Start, word.Length }), context);
+            // The word-card prompt version is part of the key: a cached card written by an
+            // older teaching style never satisfies a new lookup. The translation key in For
+            // carries no such version and stays unchanged.
+            return word.Key + ":" + For(Json.Write(new {
+                prompt = Prompts.WordPromptVersion,
+                record.Source, record.Translation, word.Start, word.Length
+            }), context);
         }
         public static string For(string text, Settings settings)
         {

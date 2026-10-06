@@ -286,7 +286,8 @@ public static class ApplicationTests
             await shell.InvokeShortcutAsync();
             Check(ReferenceEquals(shell.Current, record), "A confirmed empty selection keeps the existing conversation");
             Check(Ui.Get<Border>(shell.Popup, "ErrorPanel").Visibility == Visibility.Collapsed, "An empty selection shows no generic error");
-            Check(Ui.Get<Grid>(shell.Popup, "SourceEditor").Visibility == Visibility.Visible, "An empty selection prepares manual input");
+            Check(Ui.Get<Grid>(shell.Popup, "SourceEditor").Visibility == Visibility.Collapsed,
+                "An empty selection keeps the reading page instead of opening the editor");
             Check(Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text == "unsent question", "An empty selection keeps the follow-up draft");
             Check(emptyProbe.CopyCalls == 0, "A confirmed empty selection never simulates a copy");
             string emptyLog = CaptureLog(emptyStore);
@@ -309,7 +310,8 @@ public static class ApplicationTests
             await shell.InvokeShortcutAsync();
             Check(ReferenceEquals(shell.Current, record), "An inconclusive capture keeps the existing conversation");
             Check(Ui.Get<Border>(shell.Popup, "ErrorPanel").Visibility == Visibility.Collapsed, "An inconclusive capture shows no generic error");
-            Check(Ui.Get<Grid>(shell.Popup, "SourceEditor").Visibility == Visibility.Visible, "An inconclusive capture prepares manual input");
+            Check(Ui.Get<Grid>(shell.Popup, "SourceEditor").Visibility == Visibility.Collapsed,
+                "An inconclusive capture keeps the reading page instead of opening the editor");
             var badge = Ui.Get<TextBlock>(shell.Popup, "SourceBadge");
             Check(badge.Text.Contains("未取得选区") || Convert.ToString(badge.ToolTip).Contains("未取得选区"),
                 "An inconclusive capture is described by the source badge for the user to inspect");

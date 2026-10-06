@@ -186,18 +186,16 @@ namespace Leaf
                 HandleLeafSelectionShortcut(invocation.FocusInputOnShortcut);
                 return;
             }
-            // An external capture shows its own result on the reading page, so an open settings
-            // page is left before it starts: pending preferences are applied first, and a flush
-            // that fails keeps that page, its draft and the session as they are.
+            // An external capture runs while the original foreground is intact and reveals the
+            // popup immediately. Only its result decides what happens to an open settings
+            // page: a text result is shown on the reading page and leaves the page first, so
+            // pending preferences are applied then; inconclusive outcomes never touch it.
             long revision = sourceRevision;
             var owner = new CancellationTokenSource();
             captureCancellation = owner; captureBusy = true;
             string captureId = Guid.NewGuid().ToString("N");
             SelectionCaptureResult result;
             try {
-                // The capture stays guarded while the leave runs, so a second shortcut cannot
-                // start a second acquisition through that window.
-                if (!await TryLeaveSettingsPageAsync()) return;
                 // Start acquisition with the original foreground intact, then show immediately.
                 var capture = Selection.CaptureAsync(target, invocation.ClipboardMode, invocation.Shortcut, owner.Token);
                 ShowPopup();
@@ -209,26 +207,38 @@ namespace Leaf
             Log.Capture(CaptureTelemetry.For(captureId, target, invocation.ClipboardMode, invocation.Shortcut, result));
             if (sourceRevision != revision || exiting || result.Status == CaptureStatus.Cancelled) return;
             if (result.Status == CaptureStatus.Text) {
+                // Only a real result needs the reading page, so only now is the settings page
+                // left; a failed flush keeps that page and discards this result. The flush can
+                // wait, so the session the capture started from is rechecked before it lands:
+                // a revision change or an exit during that wait means this result is stale.
+                if (!await TryLeaveSettingsPageAsync()) return;
+                if (sourceRevision != revision || exiting) return;
                 var translation = TranslateAsync(result.Text, invocation.ClipboardMode ? "剪贴板" : "选中文字", false);
                 if (invocation.FocusInputOnShortcut) BeginSourceEdit(true);
                 await translation;
                 return;
             }
             if (result.Status == CaptureStatus.Failed) {
+                if (!await TryLeaveSettingsPageAsync()) return;
                 PrepareManualInput(result.Reason, invocation.ClipboardMode, invocation.FocusInputOnShortcut);
                 ShowError(CaptureMessages.For(result.Reason), () => { var retried = InvokeShortcutAsync(); });
                 return;
             }
-            // Empty and Unavailable both prepare input; neither is a confirmed failure.
-            PrepareManualInput(result.Reason, invocation.ClipboardMode, invocation.FocusInputOnShortcut);
+            // Empty and Unavailable are inconclusive, not failures: the popup is revealed
+            // quietly and whatever page, session, draft and editor state is open stays as it
+            // is. The badge states what happened; manual input starts only through the
+            // explicit edit entry, never automatically.
+            MarkInconclusiveCapture(result.Reason, invocation.ClipboardMode);
+            ShowPopup();
         }
         // With no selection of its own page to translate, a shortcut in front of Leaf has no
         // foreign selection either. An editor the user has not committed to stays untouched;
-        // otherwise the current result comes back, and with no result at all the manual input
-        // is prepared so the shortcut still works.
+        // otherwise the current result comes back. With no result at all the empty state
+        // stays as it is: the input is entered through the explicit edit control, never
+        // opened automatically.
         private void HandleLeafSelectionShortcut(bool directInput)
         {
-            if (Current == null) { PrepareManualInput(CaptureReason.None, false, directInput); return; }
+            if (Current == null) { MarkInconclusiveCapture(CaptureReason.None, false); ShowPopup(); return; }
             if (HasPendingDraft()) { ShowPopup(); BeginSourceEdit(directInput); return; }
             RestoreCurrentPresentation(directInput);
         }
@@ -241,10 +251,9 @@ namespace Leaf
             if (input.Text.Length == 0) return false;
             return input.Text != Current.Source;
         }
-        // Keeps whatever the user already has: the conversation, its drafts and any
-        // uncommitted edit. Only the input surface is prepared, and the direct-input
-        // preference passed in is the one this invocation snapshotted.
-        private void PrepareManualInput(CaptureReason reason, bool clipboardMode, bool directInput)
+        // States the capture outcome on the source badge without touching the page: the
+        // session, its drafts and any open editor stay exactly as they are.
+        private void MarkInconclusiveCapture(CaptureReason reason, bool clipboardMode)
         {
             bool inconclusive = reason != CaptureReason.Desktop && reason != CaptureReason.EmptySelection &&
                 reason != CaptureReason.None;
@@ -252,6 +261,12 @@ namespace Leaf
             string mode = clipboardMode ? "剪贴板模式" : "选中模式";
             if (Current == null) badge.Text = inconclusive ? "未取得选区 · " + mode : mode;
             badge.ToolTip = inconclusive ? CaptureMessages.Hint(reason) : null;
+        }
+        // A definite failure still prepares the input surface it names; the specific reason
+        // is reported by the caller.
+        private void PrepareManualInput(CaptureReason reason, bool clipboardMode, bool directInput)
+        {
+            MarkInconclusiveCapture(reason, clipboardMode);
             ShowPopup();
             if (Ui.Get<Grid>(Popup, "SourceEditor").Visibility == Visibility.Visible &&
                 Ui.Get<TextBox>(Popup, "SourceInput").Text.Length > 0) { Busy(); return; }

@@ -80,25 +80,38 @@ namespace Leaf
         // One band per line the piece touches: 左右 3、上下 2,圆角 4,贴合纸面留白。The
         // band ends at the trailing edge of the line's last real glyph, so the final
         // character keeps its own width and a break pair — which has no glyph — never
-        // poisons the geometry.
+        // poisons the geometry. Every line query is gated by the real line count: before
+        // the first layout the line APIs have nothing to read, and asking for the index
+        // past the last line throws instead of returning -1 — the cause of the logged
+        // ArgumentOutOfRangeException on every selection reaching the final line. A pass
+        // that finds no formatted lines or empty rectangles ends itself; it never throws
+        // into the learning request, and it only ever walks the piece's own lines.
         private IEnumerable<Rect> Bands()
         {
             string text = box.Text;
             int from = Math.Max(0, Math.Min(start, text.Length));
             int to = Math.Max(from, Math.Min(end, text.Length));
             if (to <= from || box.ActualWidth <= 0) yield break;
+            int lineCount = box.LineCount;
+            if (lineCount <= 0) yield break; // no formatted lines yet; wait for a later tick
             int line = box.GetLineIndexFromCharacterIndex(from);
-            while (line >= 0) {
+            if (line < 0 || line >= lineCount) yield break;
+            while (line < lineCount) {
                 int lineStart = box.GetCharacterIndexFromLineIndex(line);
-                int next = box.GetCharacterIndexFromLineIndex(line + 1);
+                if (lineStart < 0) yield break; // layout lost its lines mid-way; wait
+                // Only the index of an existing line is queried; the last line is detected
+                // by the line count rather than by an out-of-range request.
+                int next = line + 1 < lineCount ? box.GetCharacterIndexFromLineIndex(line + 1) : -1;
                 int lineEnd = next < 0 ? text.Length : next;
                 int pieceStart = Math.Max(from, lineStart);
                 int pieceEnd = Math.Min(to, lineEnd);
                 if (pieceEnd > pieceStart) {
                     var head = box.GetRectFromCharacterIndex(pieceStart);
+                    if (head.IsEmpty || head.Height <= 0) yield break; // geometry not ready
                     int tailIndex = pieceEnd - 1;
                     while (tailIndex > pieceStart && tailIndex < text.Length && (text[tailIndex] == '\r' || text[tailIndex] == '\n')) tailIndex--;
                     var tail = box.GetRectFromCharacterIndex(tailIndex, true);
+                    if (tail.IsEmpty) yield break;
                     double width = Math.Max(4, tail.Location.X + tail.Width - head.Location.X);
                     yield return new Rect(head.Location.X - 3, head.Location.Y - 2, width + 6, head.Height + 4);
                 }
