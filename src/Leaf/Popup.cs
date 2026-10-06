@@ -1,8 +1,6 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
@@ -222,6 +220,10 @@ namespace Leaf
             WireSelectableReading(Ui.Get<RichTextBox>(Popup, "WordCard"));
             InitializeSettingsPage();
             WireWheelRouting();
+            // The reading column is measured on the first layout that really happens: the
+            // window's own Loaded event, or the first typography refresh that finds the page
+            // already arranged. Whichever comes first wins and the second is a no-op.
+            Popup.Loaded += (s, e) => AlignReadingColumn();
             UpdateTopBarState();
             DisplayRecord();
             UpdatePopupTypography();
@@ -423,26 +425,6 @@ namespace Leaf
         {
             get { return (FontFamily)Application.Current.Resources["PaperFontFamily"]; }
         }
-        // The agreement that ships inside the executable with the embedded faces, read once
-        // and only when the settings page asks for it. The publisher zero-pads the file, so
-        // the padding is trimmed here instead of showing the reader a screen of blanks.
-        internal static class PaperFontLicense
-        {
-            private static string text;
-            public static string Text
-            {
-                get
-                {
-                    if (text != null) return text;
-                    using (var stream = typeof(AppShell).Assembly.GetManifestResourceStream("Leaf.Assets.Fonts.LICENSE.txt")) {
-                        if (stream == null) return text = "";
-                        using (var reader = new StreamReader(stream, new UTF8Encoding(false))) {
-                            return text = reader.ReadToEnd().TrimEnd('\0');
-                        }
-                    }
-                }
-            }
-        }
         // One place builds the whole learning card as a single read-only document: the entry,
         // the meaning, the part of speech and lemma, and every section heading and body, laid
         // out as paragraphs of one flow. A drag that starts on a heading therefore runs
@@ -620,6 +602,109 @@ namespace Leaf
             Ui.Get<Border>(Popup, "SourcePanel").Padding = new Thickness(0, 14 + 10 * compact, 0, 0);
             Ui.Get<ScrollViewer>(Popup, "BodyScroll").Margin = new Thickness(0, 10 + 4 * compact, 0, 0);
             var input = Ui.Get<TextBox>(Popup, "QuestionInput"); input.FontSize = Math.Max(12, 14 * scale); input.Height = 66 * scale;
+            AlignReadingColumn();
+        }
+
+        // ---- The reading column ------------------------------------------------------
+
+        // Every reading paragraph begins on one x: the 原文 label, the original over its
+        // highlight, the editor, the 译文 caption, the translation, the learning card's plain
+        // text, and the visible outline of the follow-up icon. A TextBlock starts its glyphs
+        // at its own left edge, so the label above the original is the column's own reference.
+        // A TextBox and a RichTextBox are document hosts, and where the first glyph of one
+        // really lands inside its frame is a property of the laid-out text - it cannot be read
+        // off a control's border, and no margin may assume it. So it is asked once, from a
+        // layout that has real geometry, through each host's own answer: the box through
+        // GetRectFromCharacterIndex, the flow through the character rectangle at its document's
+        // content start, both converted into the reading page's coordinates. The largest inset
+        // found becomes the shared column, and every control is nudged by the difference
+        // between that column and its own measured origin - so nothing is ever pushed into a
+        // negative margin and no offset is guessed. The check runs once: a scroll, a selection,
+        // a resize or a rebuilt document never repeats it, and the document is never rebuilt
+        // for it.
+        private bool readingColumnMeasured;
+        private static string readingColumnReport = "not measured";
+        // What that one check found, in the reading page's own coordinates. Written for the
+        // smoke run to print; the popup itself never reads it.
+        internal static string ReadingColumnReport { get { return readingColumnReport; } }
+
+        private void AlignReadingColumn()
+        {
+            if (readingColumnMeasured) return;
+            var page = Ui.Get<Grid>(Popup, "TranslatePage");
+            var label = Ui.Get<TextBlock>(Popup, "SourceLabel");
+            var source = Ui.Get<TextBox>(Popup, "SourceText");
+            var translation = Ui.Get<RichTextBox>(Popup, "TranslationText");
+            if (page.ActualWidth <= 0 || label.ActualWidth <= 0 || source.ActualWidth <= 0 || translation.ActualWidth <= 0) {
+                readingColumnReport = "waiting for a laid-out page";
+                return;
+            }
+            double labelOrigin = LeftInReadingPage(label, page);
+            double sourceOrigin, translationOrigin;
+            if (!TryTextOrigin(source, page, out sourceOrigin)) { readingColumnReport = "the original has no character rectangle yet"; return; }
+            if (!TryTextOrigin(translation, page, out translationOrigin)) { readingColumnReport = "the translation has no character rectangle yet"; return; }
+            double sourceInset = sourceOrigin - LeftInReadingPage(source, page);
+            double flowInset = translationOrigin - LeftInReadingPage(translation, page);
+            // The column is the label's own edge plus whatever a document host adds inside
+            // itself; taking the larger inset is what keeps every margin non-negative.
+            double column = labelOrigin + Math.Max(0, Math.Max(sourceInset, flowInset));
+            NudgeLeft(label, column - labelOrigin);
+            // The original and its band layer share one grid and move together; the editor grid
+            // is that grid's sibling in the same stack and shares its left edge, and its box is
+            // the same kind of control, so it takes the same nudge.
+            double sourceShift = column - sourceOrigin;
+            NudgeLeft(Ui.Get<Grid>(Popup, "SourceReading"), sourceShift);
+            NudgeLeft(Ui.Get<Grid>(Popup, "SourceEditor"), sourceShift);
+            // Both flows are RichTextBoxes built from the same style with a zero-padded
+            // document, so the translation's measured inset is the card's inset too.
+            double flowShift = column - translationOrigin;
+            NudgeLeft(translation, flowShift);
+            NudgeLeft(Ui.Get<RichTextBox>(Popup, "WordCard"), flowShift);
+            var caption = Ui.Get<TextBlock>(Popup, "TranslationCaption");
+            NudgeLeft(caption, column - LeftInReadingPage(caption, page));
+            // The follow-up icon is the first thing inside its button, so the button's own left
+            // padding is what stands between its edge and the icon.
+            var ask = Ui.Get<Button>(Popup, "AskButton");
+            NudgeLeft(ask, column - (LeftInReadingPage(ask, page) + ask.Padding.Left));
+            readingColumnMeasured = true;
+            readingColumnReport = "label " + labelOrigin.ToString("0.###") + ", original " + sourceOrigin.ToString("0.###") +
+                " (inset " + sourceInset.ToString("0.###") + "), translation " + translationOrigin.ToString("0.###") +
+                " (inset " + flowInset.ToString("0.###") + "), column " + column.ToString("0.###");
+        }
+        private static void NudgeLeft(FrameworkElement element, double delta)
+        {
+            if (Math.Abs(delta) < 0.01) return;
+            element.Margin = new Thickness(element.Margin.Left + delta, element.Margin.Top, element.Margin.Right, element.Margin.Bottom);
+        }
+        // Where a document host's first glyph starts, in the reading page's coordinates, or
+        // false when the control has no laid-out text to ask. A box answers with the
+        // insertion rectangle of its first index - a zero-width rectangle whose left edge is
+        // exactly where its text begins - so a zero width is the normal answer there, not a
+        // refusal; only a rectangle that was never produced is.
+        private static bool TryTextOrigin(TextBoxBase box, Visual page, out double origin)
+        {
+            origin = 0;
+            Rect rect;
+            var text = box as TextBox;
+            if (text != null) {
+                if (text.Text.Length == 0) return false;
+                rect = text.GetRectFromCharacterIndex(0);
+            }
+            else {
+                var flow = box as RichTextBox;
+                if (flow == null) return false;
+                rect = flow.Document.ContentStart.GetCharacterRect(LogicalDirection.Forward);
+            }
+            if (rect.IsEmpty) return false;
+            try {
+                origin = box.TransformToAncestor(page).Transform(new Point(rect.Left, rect.Top)).X;
+                return true;
+            } catch (InvalidOperationException) { return false; }
+            catch (ArgumentException) { return false; }
+        }
+        private static double LeftInReadingPage(FrameworkElement element, Visual page)
+        {
+            return element.TransformToAncestor(page).Transform(new Point(0, 0)).X;
         }
         private void SetTypography(string name, double font, double line)
         {

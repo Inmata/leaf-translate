@@ -72,12 +72,16 @@
         <Grid x:Name="DragBar" Grid.Row="0" Background="Transparent">
           <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
             <!-- The source badge is the reading page's auxiliary tier, so it stays at the
-                 label size that never shrinks with the window. -->
-            <TextBlock x:Name="SourceBadge" Text="剪贴板" FontSize="14" Foreground="{StaticResource Secondary}" Margin="-4,0,0,0"/>
+                 label size that never shrinks with the window. It carries no negative margin
+                 and no compensating head start: it sits on this bar's own left edge, and the
+                 reading column below is inset from that edge by whatever its document hosts
+                 measure (see AlignReadingColumn), which is what leaves the badge slightly to
+                 the left of the reading text without any text leaving its layout. -->
+            <TextBlock x:Name="SourceBadge" Text="剪贴板" FontSize="14" Foreground="{StaticResource Secondary}"/>
           </StackPanel>
           <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
             <Button x:Name="SettingsButton" Style="{StaticResource PaperTopButton}" ToolTip="设置" AutomationProperties.Name="设置">
-              <Viewbox Width="18" Height="18">
+              <Viewbox Width="22" Height="22">
                 <Canvas Width="24" Height="24">
                   <Path Data="{StaticResource SlidersIcon}" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}"
                         StrokeThickness="1.5" StrokeStartLineCap="Round"
@@ -86,7 +90,7 @@
               </Viewbox>
             </Button>
             <Button x:Name="PinButton" Style="{StaticResource PaperTopButton}" Margin="8,0,0,0" ToolTip="置顶并保持显示" AutomationProperties.Name="置顶或取消置顶">
-              <Viewbox Width="15" Height="15">
+              <Viewbox Width="20" Height="20">
                 <Canvas Width="24" Height="24">
                   <Path Data="{StaticResource PinIcon}" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}"
                         StrokeThickness="1.5" StrokeStartLineCap="Round"
@@ -95,7 +99,7 @@
               </Viewbox>
             </Button>
             <Button x:Name="HideButton" Style="{StaticResource PaperTopButton}" Margin="8,0,0,0" ToolTip="收起" AutomationProperties.Name="收起浮窗">
-              <Viewbox Width="15" Height="15">
+              <Viewbox Width="20" Height="20">
                 <Canvas Width="24" Height="24">
                   <Path Data="{StaticResource HideIcon}" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType={x:Type Button}}}"
                         StrokeThickness="1.5" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
@@ -115,13 +119,15 @@
                translation and the card under it - is the same as it was. -->
           <Border x:Name="SourcePanel" Padding="0,24,0,0">
             <StackPanel>
+              <!-- Every reading control starts on one column, and no control carries a
+                   guessed head start towards it: the label, the original over its highlight,
+                   the editor, the caption and the translation are all measured once against
+                   the laid-out text itself (see AlignReadingColumn), and only that measured
+                   difference moves any of them. The label is the column's own reference,
+                   because a plain text block starts its glyphs at its own left edge. -->
               <Grid Margin="0,0,0,12">
-                <!-- Every reading control starts two dips in: a RichTextBox host insets its
-                     text by a caret-dependent amount that no margin can divide out, so the
-                     outward two dips are the shared safe content column for the label, the
-                     original, the editor and the translation. -->
-                <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="2,0,0,0">
-                  <TextBlock Text="原文" Foreground="{StaticResource Muted}" FontSize="14" VerticalAlignment="Center" TextAlignment="Left"/>
+                <StackPanel x:Name="SourceLabelRow" Orientation="Horizontal" VerticalAlignment="Center">
+                  <TextBlock x:Name="SourceLabel" Text="原文" Foreground="{StaticResource Muted}" FontSize="14" VerticalAlignment="Center" TextAlignment="Left"/>
                   <Button x:Name="BackToPreviousButton" Content="返回上一会话" Style="{StaticResource GhostButton}" FontSize="13" Padding="7,3" Margin="9,0,0,0" Visibility="Collapsed" ToolTip="回到上一次翻译的内容与词卡" AutomationProperties.Name="返回上一会话"/>
                 </StackPanel>
                 <Button x:Name="EditSourceButton" Content="&#xE70F;" Style="{StaticResource IconButton}" HorizontalAlignment="Right" Height="24" Width="24" ToolTip="编辑原文" AutomationProperties.Name="编辑原文" FontSize="18"/>
@@ -129,7 +135,7 @@
               <!-- The highlight is one background layer in the same cell, under the
                    transparent reading box: bands render behind the glyphs and are clipped
                    to this cell, instead of an adorner layer painting over the text. -->
-              <Grid Margin="2,0,0,0">
+              <Grid x:Name="SourceReading">
                 <leaf:SourceHighlightLayer x:Name="SourceHighlight"/>
                 <TextBox x:Name="SourceText" Style="{StaticResource PaperReader}"
                          TextWrapping="Wrap" AcceptsReturn="True" MaxHeight="100" FontSize="18"
@@ -137,7 +143,7 @@
                          TextAlignment="Left"
                          AutomationProperties.Name="原文"/>
               </Grid>
-              <Grid x:Name="SourceEditor" Visibility="Collapsed" Margin="2,0,0,0">
+              <Grid x:Name="SourceEditor" Visibility="Collapsed">
                 <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                 <TextBox x:Name="SourceInput" Grid.Column="0" Style="{StaticResource PopupEditor}"
                          AcceptsReturn="True" TextWrapping="Wrap" MinHeight="38" MaxHeight="110"
@@ -166,7 +172,7 @@
           </Border>
           <ScrollViewer x:Name="BodyScroll" Style="{StaticResource SlimScrollViewer}" Grid.Row="1" VerticalScrollBarVisibility="Auto" Margin="0,14,0,0">
             <StackPanel>
-              <TextBlock x:Name="TranslationCaption" Text="译文" Style="{StaticResource Caption}" FontSize="14" Margin="2,0,0,15" TextAlignment="Left"/>
+              <TextBlock x:Name="TranslationCaption" Text="译文" Style="{StaticResource Caption}" FontSize="14" Margin="0,0,0,15" TextAlignment="Left"/>
               <RichTextBox x:Name="TranslationText" Style="{StaticResource ReadingText}" FontSize="19" Margin="0,0,8,16">
                 <FlowDocument PagePadding="0" FontFamily="{StaticResource PaperFontFamily}" FontSize="19"/>
               </RichTextBox>
@@ -218,9 +224,13 @@
                (the row's bottom margin) than it did. Both margins belong to this row alone, so
                the settings page keeps its own spacing. -->
           <Grid Grid.Row="2" Margin="0,36,0,16">
-            <Button x:Name="AskButton" Style="{StaticResource GhostButton}" HorizontalAlignment="Left" FontSize="16" Foreground="{StaticResource Ink}" Padding="8,7" Margin="-6,0,0,0" ToolTip="追问这段原文或当前词" AutomationProperties.Name="追问">
+            <!-- The button's content starts at its own left padding, so it is inset by exactly
+                 that padding to put its icon's visible left edge - and nothing else - on the
+                 shared reading column; the reading column measurement corrects that figure if
+                 the laid-out text turns out to need a column of its own. -->
+            <Button x:Name="AskButton" Style="{StaticResource GhostButton}" HorizontalAlignment="Left" FontSize="16" Foreground="{StaticResource Ink}" Padding="8,7" Margin="-8,0,0,0" ToolTip="追问这段原文或当前词" AutomationProperties.Name="追问">
               <StackPanel Orientation="Horizontal">
-                <Viewbox Width="21" Height="21" Margin="0,0,10,0" VerticalAlignment="Center">
+                <Viewbox Width="21" Height="21" Margin="0,0,8,0" VerticalAlignment="Center">
                   <!-- A round follow-up bubble with its tail at the lower left, matching the
                        paper's rounded forms; the shared ChatOutline stays square-cornered.
                        The 21-unit canvas keeps the drawing at its authored scale. Account

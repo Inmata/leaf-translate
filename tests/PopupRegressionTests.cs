@@ -413,20 +413,6 @@ internal static class PopupRegressionTests
             // An empty preset list has its own empty state instead of a blank dropdown.
             shell.ShowSettingsPage();
             var panel = (FrameworkElement)Ui.Get<ContentControl>(shell.Popup, "SettingsPageHost").Content;
-            // The bundled typeface is credited on the page, and the agreement that travels
-            // inside the executable is one click away rather than left on disk.
-            var notice = Ui.Get<TextBlock>(panel, "FontNotice");
-            var license = Ui.Get<TextBox>(panel, "FontLicenseText");
-            Check(notice.Text.Contains("HarmonyOS Sans SC") && notice.Text.Contains("Huawei Device Co., Ltd.") &&
-                license.Visibility == Visibility.Collapsed,
-                "The settings page credits the embedded typeface without unfolding the agreement");
-            Press(panel, "FontLicenseToggle");
-            Check(license.Visibility == Visibility.Visible && license.IsReadOnly &&
-                license.Text.Contains("HarmonyOS Sans Fonts License Agreement"),
-                "The settings page opens the agreement bundled with the embedded fonts");
-            Press(panel, "FontLicenseToggle");
-            Check(license.Visibility == Visibility.Collapsed,
-                "The agreement folds back out of the page");
             var hint = Ui.Get<TextBlock>(panel, "PresetPlaceholder");
             Check(hint.Visibility == Visibility.Visible && hint.Text == "暂无偏好预设" &&
                 !Ui.Get<ComboBox>(panel, "PresetCombo").IsEnabled,
@@ -726,8 +712,8 @@ internal static class PopupRegressionTests
     {
         var family = (FontFamily)Application.Current.Resources["PaperFontFamily"];
         foreach (var face in new[] {
-            new { Weight = FontWeights.Normal, Resource = "harmonyos_sans_sc_regular" },
-            new { Weight = FontWeights.Bold, Resource = "harmonyos_sans_sc_bold" } }) {
+            new { Weight = FontWeights.Normal, Resource = "sourcehansanssc-regular" },
+            new { Weight = FontWeights.Bold, Resource = "sourcehansanssc-bold" } }) {
             GlyphTypeface glyph;
             bool resolved = new Typeface(family, FontStyles.Normal, face.Weight, FontStretches.Normal)
                 .TryGetGlyphTypeface(out glyph);
@@ -744,8 +730,8 @@ internal static class PopupRegressionTests
         string license;
         using (var stream = typeof(AppShell).Assembly.GetManifestResourceStream("Leaf.Assets.Fonts.LICENSE.txt"))
             license = stream == null ? "" : new StreamReader(stream, new UTF8Encoding(false)).ReadToEnd();
-        Check(license.Contains("HarmonyOS Sans Fonts License Agreement") &&
-            license.Contains("Copyright 2021 Huawei Device Co., Ltd.") && license.Length > 1000,
+        Check(license.Contains("SIL OPEN FONT LICENSE Version 1.1") &&
+            license.Contains("Copyright 2014-2025 Adobe") && license.Length > 1000,
             "The font agreement travels inside the executable and is readable");
     }
 

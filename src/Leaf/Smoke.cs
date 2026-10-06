@@ -8,6 +8,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Media;
 using System.Windows.Threading;
 
 namespace Leaf
@@ -656,6 +657,14 @@ namespace Leaf
                 Check(translation.FontSize == 22, "Resizing back restores the original typography without cumulative scaling", checks);
 
                 EditorState(shell, checks);
+                // The reading column's one origin check, and the face the page is really set
+                // in, both reported as the values they came out as: the layout and a silent
+                // fall back to an installed typeface are both reviewable from the run.
+                var paper = (FontFamily)Application.Current.Resources["PaperFontFamily"];
+                GlyphTypeface paperGlyph;
+                new Typeface(paper, FontStyles.Normal, FontWeights.Normal, FontStretches.Normal).TryGetGlyphTypeface(out paperGlyph);
+                Console.WriteLine("paper font: " + paper.Source + " -> " + (paperGlyph == null ? "unresolved" : paperGlyph.FontUri.ToString()));
+                Console.WriteLine("reading column: " + AppShell.ReadingColumnReport);
                 RenderStates(shell, transport, folder, checks);
 
                 var settings = new SettingsWindow(shell);

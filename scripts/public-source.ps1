@@ -12,7 +12,7 @@ $script:PrivateFileNamePatterns = @(
     '\.(tmp|temp|new|old|bak|pending|lock)$'
 )
 $script:PrivateExtensions = @('.exe', '.dll', '.pdb', '.pfx', '.key', '.log')
-$script:OpaqueAssetExtensions = @('.png', '.ico', '.jpg', '.jpeg', '.gif', '.webp', '.zip', '.woff', '.woff2', '.ttf')
+$script:OpaqueAssetExtensions = @('.png', '.ico', '.jpg', '.jpeg', '.gif', '.webp', '.zip', '.woff', '.woff2', '.ttf', '.otf')
 
 function Get-PublicSourceRoots {
     return $script:PublicSourceRoots

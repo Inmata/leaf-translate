@@ -33,16 +33,18 @@ foreach ($resource in Get-ChildItem -LiteralPath (Join-Path $projectRoot 'src\Le
 }
 # The bundled typefaces ride in the same container WPF looks a pack font up in: a real
 # "<assembly>.g.resources" ResourceSet holding each face as a Stream under its lower-cased
-# asset path, so "pack://application:,,,/Leaf;component/Assets/Fonts/#HarmonyOS Sans SC"
+# asset path, so "pack://application:,,,/Leaf;component/Assets/Fonts/#Source Han Sans SC"
 # resolves from inside Leaf.exe on a machine that never installed the font. A raw
 # "/resource:" entry would only be reachable by name, never through a pack URI. The
 # container is an intermediate, so it is removed once the compiler has folded it in.
+# The faces are OpenType/CFF (.otf) and plain OpenType (.ttf) alike; both are the same
+# container format WPF parses, so every font file in the folder is packed the same way.
 $fontRoot = Join-Path $projectRoot 'src\Leaf\Assets\Fonts'
 $fontContainer = Join-Path $outputRoot 'Leaf.g.resources'
 $fontWriter = New-Object System.Resources.ResourceWriter($fontContainer)
 $fontStreams = New-Object System.Collections.ArrayList
 try {
-    foreach ($face in Get-ChildItem -LiteralPath $fontRoot -Filter '*.ttf') {
+    foreach ($face in Get-ChildItem -LiteralPath $fontRoot -Include '*.ttf', '*.otf' -Recurse) {
         # The Stream overload is what makes the entry readable as a font stream; the byte[]
         # overload would store it as an array ResourceManager.GetStream cannot open.
         $stream = New-Object System.IO.MemoryStream(,[IO.File]::ReadAllBytes($face.FullName))
@@ -56,7 +58,8 @@ try {
 }
 $arguments += '/resource:' + $fontContainer + ',Leaf.g.resources'
 # The agreement the licence requires to travel with the fonts ships in the same executable,
-# verbatim, so the settings page can show it without a second file on disk.
+# verbatim, as an asset of its own; the executable is where the fonts are distributed, so
+# the terms travel with them and no copy of them is left loose on disk.
 $fontLicense = Join-Path $fontRoot 'LICENSE.txt'
 $arguments += '/resource:' + $fontLicense + ',Leaf.Assets.Fonts.LICENSE.txt'
 foreach ($source in Get-ChildItem -LiteralPath (Join-Path $projectRoot 'src\Leaf') -Filter '*.cs') { $arguments += $source.FullName }
