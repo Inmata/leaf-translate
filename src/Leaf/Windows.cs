@@ -271,6 +271,17 @@ namespace Leaf
             }
             var password = Ui.Get<PasswordBox>(scope, "ApiKeyInput");
             password.GotKeyboardFocus += (s, e) => KeyHint(); password.LostKeyboardFocus += (s, e) => KeyHint();
+            // The embedded typeface's attribution: the notice the licence asks for is on the
+            // page, and the agreement itself is read out of the executable on first request.
+            Ui.Click(scope, "FontLicenseToggle", ToggleFontLicense);
+        }
+        private void ToggleFontLicense()
+        {
+            var text = Ui.Get<TextBox>(scope, "FontLicenseText");
+            if (text.Text.Length == 0) text.Text = AppShell.PaperFontLicense.Text;
+            bool showing = text.Visibility != Visibility.Visible;
+            Ui.Visible(text, showing);
+            Ui.Get<Button>(scope, "FontLicenseToggle").Content = showing ? "收起许可全文" : "查看字体许可全文";
         }
         // The host became visible again (or just appeared): auto-load the model list once.
         public void Activate()

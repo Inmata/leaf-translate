@@ -137,6 +137,18 @@
           <TextBlock Text="历史也有存储空间上限；超出后移除最旧记录。" Foreground="{StaticResource Muted}" FontSize="13" Margin="0,0,0,8"/>
         </StackPanel>
       </Expander>
+      <!-- The embedded typeface's attribution, kept to one short line: the licence asks for a
+           notice that the fonts are used, and the agreement itself is one click away instead of
+           filling the page. The faces are bundled unmodified and are never distributed alone. -->
+      <StackPanel Margin="0,8,0,0">
+        <TextBlock Text="字体" Style="{StaticResource Caption}"/>
+        <TextBlock x:Name="FontNotice" TextWrapping="Wrap" FontSize="13" Foreground="{StaticResource Muted}"
+                   Text="界面使用 HarmonyOS Sans SC（© 2021 Huawei Device Co., Ltd.），随应用嵌入，字库未作修改。"/>
+        <Button x:Name="FontLicenseToggle" Content="查看字体许可全文" Style="{StaticResource GhostButton}" HorizontalAlignment="Left" Margin="-8,6,0,0"/>
+        <TextBox x:Name="FontLicenseText" Visibility="Collapsed" Height="190" Margin="0,8,0,0"
+                 IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap" FontSize="13"
+                 VerticalScrollBarVisibility="Auto" AutomationProperties.Name="字体许可全文"/>
+      </StackPanel>
     </StackPanel>
   </ScrollViewer>
   <Border Grid.Row="1" BorderBrush="{StaticResource Line}" BorderThickness="0,1,0,0" Padding="0,16,0,0" Margin="0,14,0,0">

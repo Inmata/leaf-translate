@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
@@ -46,11 +48,15 @@ namespace Leaf
         private int pendingHighlightStart = -1, pendingHighlightEnd = -1;
         private double bodyScrollBackup;
         private PreviousSessionSnapshot previousSession;
-        // The learning card's own state: the entry being explained and the one placeholder
-        // line shown while no card is ready. The finished card itself is selectedCard; all
-        // three are rendered by the single document builder below.
-        private string wordCardWord;
+        // The learning card's one piece of transient state: the placeholder line shown while
+        // no card is ready. The finished card is selectedCard and the entry it explains is the
+        // selected word itself, so the document builder below reads those two rather than a
+        // third copy that a restored session could leave pointing at another word.
         private string wordCardNotice;
+        // The scale the document currently in the word card's box was laid out for. A window
+        // resize really changes it and rebuilds the card; every other refresh - a scroll, a
+        // selection, a chat message at the same scale - leaves that document alone.
+        private double wordCardScale = double.NaN;
 
         private sealed class PreviousSessionSnapshot
         {
@@ -166,7 +172,7 @@ namespace Leaf
                 wordGeneration.Next();
                 if (wordCancellation != null) wordCancellation.Cancel();
                 wordBusy = false; selectedWord = null; selectedCard = null;
-                wordCardWord = null; wordCardNotice = null;
+                wordCardNotice = null;
                 HighlightSource(); DrawTranslation(""); Ui.Visible(Ui.Get<Border>(Popup, "WordPanel"), false); Topic(); Busy();
             });
             var contextMenu = new ContextMenu();
@@ -397,6 +403,26 @@ namespace Leaf
         {
             get { return (FontFamily)Application.Current.Resources["PaperFontFamily"]; }
         }
+        // The agreement that ships inside the executable with the embedded faces, read once
+        // and only when the settings page asks for it. The publisher zero-pads the file, so
+        // the padding is trimmed here instead of showing the reader a screen of blanks.
+        internal static class PaperFontLicense
+        {
+            private static string text;
+            public static string Text
+            {
+                get
+                {
+                    if (text != null) return text;
+                    using (var stream = typeof(AppShell).Assembly.GetManifestResourceStream("Leaf.Assets.Fonts.LICENSE.txt")) {
+                        if (stream == null) return text = "";
+                        using (var reader = new StreamReader(stream, new UTF8Encoding(false))) {
+                            return text = reader.ReadToEnd().TrimEnd('\0');
+                        }
+                    }
+                }
+            }
+        }
         // One place builds the whole learning card as a single read-only document: the entry,
         // the meaning, the part of speech and lemma, and every section heading and body, laid
         // out as paragraphs of one flow. A drag that starts on a heading therefore runs
@@ -410,8 +436,11 @@ namespace Leaf
                 PagePadding = new Thickness(0), FontFamily = PaperFontFamily,
                 FontSize = Math.Max(13, 16 * scale)
             };
-            if (!string.IsNullOrEmpty(wordCardWord))
-                document.Blocks.Add(CardParagraph(wordCardWord, Math.Max(14, 18 * scale), FontWeights.SemiBold,
+            // The entry is the word every other piece of card state already points at, so a
+            // restored session cannot show one word's meaning under another word's heading.
+            string entry = selectedWord == null ? null : selectedWord.Text;
+            if (!string.IsNullOrEmpty(entry))
+                document.Blocks.Add(CardParagraph(entry, Math.Max(14, 18 * scale), FontWeights.SemiBold,
                     Ui.Brush("Ink"), new Thickness(0, 0, 0, 10 * scale), 0));
             string meaning = selectedCard != null ? selectedCard.meaning : wordCardNotice;
             if (!string.IsNullOrWhiteSpace(meaning))
@@ -436,6 +465,7 @@ namespace Leaf
                 }
             }
             Ui.Get<RichTextBox>(Popup, "WordCard").Document = document;
+            wordCardScale = scale;
         }
         // Plain text into one card paragraph: "\n" inside a Run paints a line break, so
         // paragraphs, surrogate pairs and combining marks survive without markup.
@@ -521,10 +551,12 @@ namespace Leaf
             editor.FontSize = Math.Max(13, 16 * scale);
             SetTypography("ErrorText", 13, 21);
             // The learning card's own ladder - an 18 entry, 16 reading, a 13 auxiliary line
-            // and 15 headings - lives in the one document it is built from, so a scale change
-            // rebuilds that document and patches no control paragraph by paragraph. A hidden
-            // card is left alone; the next card change rebuilds it at the current scale.
-            if (Ui.Get<Border>(Popup, "WordPanel").Visibility == Visibility.Visible) DrawWordCard();
+            // and 15 headings - lives in the one document it is built from, so a real scale
+            // change rebuilds that document and patches no control paragraph by paragraph.
+            // A hidden card is left alone; the next card change rebuilds it at the current
+            // scale. A refresh at the scale the document already has - this method also runs
+            // for every chat message - keeps the document, and with it the reader's selection.
+            if (Ui.Get<Border>(Popup, "WordPanel").Visibility == Visibility.Visible && wordCardScale != scale) DrawWordCard();
             var chat = Ui.Get<StackPanel>(Popup, "ChatMessages").Children;
             for (int i = 0; i < chat.Count; i++) {
                 bool label = i % 2 == 0;
@@ -796,7 +828,7 @@ namespace Leaf
             string cardKey = demo ? word.Key : CacheKeys.ForWord(record, word, provider);
             // The loading state is the same document as the finished card: the entry with one
             // short line under it, so nothing is swapped out when the card arrives.
-            wordCardWord = word.Text; wordCardNotice = "正在查词…";
+            wordCardNotice = "正在查词…";
             Ui.Visible(Ui.Get<Border>(Popup, "WordPanel"), true);
             DrawWordCard();
             Ui.Visible(Ui.Get<Button>(Popup, "ExpandWordButton"), false);
@@ -934,7 +966,6 @@ namespace Leaf
             var word = TextTools.Pieces(Current.Source).First(p => p.Text == "prowess");
             Current.Cards[word.Key] = DemoCard("prowess");
             DisplayRecord(); selectedWord = word; selectedCard = Current.Cards[word.Key];
-            wordCardWord = word.Text;
             Ui.Visible(Ui.Get<Border>(Popup, "WordPanel"), true); DrawCard(selectedCard);
         }
         private static WordCard DemoCard(string word)

@@ -1,0 +1,17 @@
+HarmonyOS Sans SC, taken unmodified from Huawei's official design resource package:
+
+  https://developer.huawei.com/images/download/general/HarmonyOS-Sans.zip
+  (HarmonyOS Sans/HarmonyOS_Sans_SC/)
+
+  product page: https://developer.huawei.com/consumer/cn/design/resource/
+
+Files kept here, byte for byte as published:
+
+  HarmonyOS_Sans_SC_Regular.ttf  8261128 bytes
+  HarmonyOS_Sans_SC_Bold.ttf     8158996 bytes
+  LICENSE.txt                    32768 bytes (zero padded by the publisher)
+
+Both faces are embedded in Leaf.exe and used through the paper typeface declared in
+src/Leaf/Views/Theme.xaml. Nothing here is subsetted, renamed or otherwise modified, and
+the faces are never distributed on their own: the agreement travels inside the executable
+and the settings page shows the notice it requires.

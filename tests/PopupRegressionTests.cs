@@ -12,6 +12,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Documents;
 using System.Windows.Interop;
+using System.Windows.Media;
 using System.Windows.Threading;
 using Leaf;
 
@@ -44,6 +45,7 @@ internal static class PopupRegressionTests
         await StopAndRetryTranslation(Path.Combine(folder, "stop-translation"));
         await RetryUsesLatestProvider(Path.Combine(folder, "retry-provider"));
         await CachedRestoreKeepsWordCard(Path.Combine(folder, "cached-card"));
+        await WordCardRefreshKeepsSelection(Path.Combine(folder, "card-refresh"));
         await FailedFollowupRetriesOriginalQuestion(Path.Combine(folder, "failed-followup"));
         await RecoveryBarrierBlocksFollowupRetry(Path.Combine(folder, "barrier-retry"));
         await FollowupRetryWorksAfterRecovery(Path.Combine(folder, "barrier-cleared"));
@@ -59,6 +61,7 @@ internal static class PopupRegressionTests
         await HighlightBandsUnderRealLayout();
         await TranslationDisplayDropsMarkers(Path.Combine(folder, "marker-display"));
         SourceOffsetMapsStayTotalAndMonotone();
+        EmbeddedPaperFont();
         await SameSourceInternalSelectionReuse(Path.Combine(folder, "internal-reuse"));
         await RootEntriesClearAnchor(Path.Combine(folder, "root-entries"));
         await LateChildCannotTouchRoot(Path.Combine(folder, "late-child"));
@@ -410,6 +413,20 @@ internal static class PopupRegressionTests
             // An empty preset list has its own empty state instead of a blank dropdown.
             shell.ShowSettingsPage();
             var panel = (FrameworkElement)Ui.Get<ContentControl>(shell.Popup, "SettingsPageHost").Content;
+            // The bundled typeface is credited on the page, and the agreement that travels
+            // inside the executable is one click away rather than left on disk.
+            var notice = Ui.Get<TextBlock>(panel, "FontNotice");
+            var license = Ui.Get<TextBox>(panel, "FontLicenseText");
+            Check(notice.Text.Contains("HarmonyOS Sans SC") && notice.Text.Contains("Huawei Device Co., Ltd.") &&
+                license.Visibility == Visibility.Collapsed,
+                "The settings page credits the embedded typeface without unfolding the agreement");
+            Press(panel, "FontLicenseToggle");
+            Check(license.Visibility == Visibility.Visible && license.IsReadOnly &&
+                license.Text.Contains("HarmonyOS Sans Fonts License Agreement"),
+                "The settings page opens the agreement bundled with the embedded fonts");
+            Press(panel, "FontLicenseToggle");
+            Check(license.Visibility == Visibility.Collapsed,
+                "The agreement folds back out of the page");
             var hint = Ui.Get<TextBlock>(panel, "PresetPlaceholder");
             Check(hint.Visibility == Visibility.Visible && hint.Text == "暂无偏好预设" &&
                 !Ui.Get<ComboBox>(panel, "PresetCombo").IsEnabled,
@@ -446,17 +463,25 @@ internal static class PopupRegressionTests
     }
 
     // A flush that cannot apply keeps the page open with its reason, and the same entry can be
-    // retried once the field is fixed.
+    // retried once the field is fixed. That entry is the top bar's real toggle, so the click
+    // that opened the page is also the click that leaves it through this exact flush.
     private static async Task FailedSettingsLeaveKeepsPage(string folder)
     {
         var handler = new FixtureHandler();
         using (var shell = new AppShell(ConfiguredStore(folder), false, new LlmClient(handler))) {
             await shell.TranslateAsync("A failed settings leave sentence.", "选中文字", false);
             var record = shell.Current;
-            shell.ShowSettingsPage();
+            Click(shell.Popup, "SettingsButton");
+            Check(shell.IsSettingsPageOpen &&
+                Ui.Get<Grid>(shell.Popup, "SettingsPage").Visibility == Visibility.Visible,
+                "The top-bar entry opens the settings page over the live session");
             var panel = SettingsPanel(shell);
             Ui.Get<TextBox>(panel, "TargetInput").Text = "   ";
-            Check(!await shell.TryLeaveSettingsPageAsync() && shell.IsSettingsPageOpen &&
+            // The toggle leaves on a second click instead of only ever opening; its flush is
+            // started without awaiting, so the fixture settles it before checking.
+            Click(shell.Popup, "SettingsButton");
+            await Settle();
+            Check(shell.IsSettingsPageOpen &&
                 Ui.Get<Grid>(shell.Popup, "SettingsPage").Visibility == Visibility.Visible,
                 "A failed flush keeps the settings page over the live session");
             Check(Ui.Get<TextBlock>(panel, "SettingsStatus").Text.Contains("目标语言"),
@@ -464,7 +489,9 @@ internal static class PopupRegressionTests
             Check(ReferenceEquals(shell.Current, record),
                 "A failed flush does not touch the session behind the page");
             Ui.Get<TextBox>(panel, "TargetInput").Text = "中文";
-            Check(await shell.TryLeaveSettingsPageAsync() && !shell.IsSettingsPageOpen,
+            Click(shell.Popup, "SettingsButton");
+            await Until(() => !shell.IsSettingsPageOpen);
+            Check(Ui.Get<Grid>(shell.Popup, "TranslatePage").Visibility == Visibility.Visible,
                 "Retrying the leave after fixing the field returns to the reading page");
         }
     }
@@ -692,6 +719,66 @@ internal static class PopupRegressionTests
         }
     }
 
+    // The paper's typeface travels inside Leaf.exe instead of being asked of the machine: both
+    // bundled faces resolve out of the application's own resource container, cover the Latin
+    // and Chinese the reading page shows, and bring the agreement the licence requires.
+    private static void EmbeddedPaperFont()
+    {
+        var family = (FontFamily)Application.Current.Resources["PaperFontFamily"];
+        foreach (var face in new[] {
+            new { Weight = FontWeights.Normal, Resource = "harmonyos_sans_sc_regular" },
+            new { Weight = FontWeights.Bold, Resource = "harmonyos_sans_sc_bold" } }) {
+            GlyphTypeface glyph;
+            bool resolved = new Typeface(family, FontStyles.Normal, face.Weight, FontStretches.Normal)
+                .TryGetGlyphTypeface(out glyph);
+            Check(resolved, "The bundled " + face.Weight + " face resolves without a system install");
+            // A family that had fallen back to an installed face would report a file:// URI here.
+            Console.WriteLine("paper font " + face.Weight + ": " + glyph.FontUri + " simulations=" + glyph.StyleSimulations);
+            Check(glyph.FontUri.IsAbsoluteUri && glyph.FontUri.Scheme == "pack" &&
+                glyph.FontUri.OriginalString.ToLowerInvariant().Contains(face.Resource),
+                "The bundled " + face.Weight + " face loads from the application's own resources");
+            Check(glyph.CharacterToGlyphMap.ContainsKey('A') &&
+                glyph.CharacterToGlyphMap.ContainsKey('中') && glyph.CharacterToGlyphMap.ContainsKey('文'),
+                "The bundled " + face.Weight + " face covers the Latin and Chinese the reading page shows");
+        }
+        string license;
+        using (var stream = typeof(AppShell).Assembly.GetManifestResourceStream("Leaf.Assets.Fonts.LICENSE.txt"))
+            license = stream == null ? "" : new StreamReader(stream, new UTF8Encoding(false)).ReadToEnd();
+        Check(license.Contains("HarmonyOS Sans Fonts License Agreement") &&
+            license.Contains("Copyright 2021 Huawei Device Co., Ltd.") && license.Length > 1000,
+            "The font agreement travels inside the executable and is readable");
+    }
+
+    // The learning card is one document the reader selects in: a refresh that does not change
+    // its typography - a chat message, a repeated layout pass - hands back the same document
+    // with the selection still in it, while a real scale change still rebuilds it.
+    private static async Task WordCardRefreshKeepsSelection(string folder)
+    {
+        var handler = new FixtureHandler();
+        using (var shell = new AppShell(ConfiguredStore(folder), false, new LlmClient(handler))) {
+            await shell.TranslateAsync("A card refresh sentence.", "选中文字", false);
+            var word = TextTools.Pieces(shell.Current.Source).First(p => p.IsWord);
+            await shell.SelectWordAsync(word, false);
+            var card = Ui.Get<RichTextBox>(shell.Popup, "WordCard");
+            var document = card.Document;
+            card.Selection.Select(document.ContentStart, document.ContentEnd);
+            shell.UpdatePopupTypography();
+            Check(ReferenceEquals(card.Document, document) && !card.Selection.IsEmpty,
+                "A layout pass at the same scale keeps the card document and the reader's selection");
+            Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text = "这个短语怎么用？";
+            await shell.SendChatAsync();
+            Check(shell.Current.Chat.Count == 2 && ReferenceEquals(card.Document, document) && !card.Selection.IsEmpty,
+                "A chat refresh at the same scale does not rebuild the card or clear the selection");
+            // A genuinely different window size is still a real typography change.
+            shell.Popup.Width = 360; shell.Popup.Height = 380; shell.UpdatePopupTypography();
+            Check(!ReferenceEquals(card.Document, document) &&
+                card.Document.Blocks.OfType<Paragraph>().All(p => p.FontSize >= 11) &&
+                CardHeadword(shell.Popup) == word.Text,
+                "A smaller window rebuilds the card at the new scale, still under the selected word");
+            shell.Popup.Width = 456; shell.Popup.Height = 620; shell.UpdatePopupTypography();
+        }
+    }
+
     // An internal selection equal to the text already on screen reuses the open session
     // with no request and no history entry, and an uncommitted draft survives the reuse;
     // the root's own text comes back through the return entry, not a new child.
@@ -871,6 +958,13 @@ internal static class PopupRegressionTests
             await shell.TranslateInternalSelectionAsync("Words picked inside Leaf itself.");
             Check(!ReferenceEquals(shell.Current, record) && shell.Current.Source == "Words picked inside Leaf itself.",
                 "An internal selection starts its own conversation");
+            // The child looks up a word of its own, so the card on screen belongs to the child
+            // when the return entry is used: what comes back must be the root's word, not this.
+            var childWord = TextTools.Pieces(shell.Current.Source).First(p => p.IsWord);
+            Check(childWord.Text != word.Text, "The child looks up a different word than the root's card");
+            await shell.SelectWordAsync(childWord, false);
+            Check(CardHeadword(shell.Popup) == childWord.Text,
+                "The child's own lookup shows the child's word on its card");
             Check(Ui.Get<TextBlock>(shell.Popup, "SourceBadge").Text == "选中文本",
                 "The badge labels an internal selection as 选中文本");
             Check(shell.CanReturnToPreviousSession &&
@@ -878,11 +972,12 @@ internal static class PopupRegressionTests
                 "The replaced conversation offers its return entry");
             shell.ReturnToPreviousSession();
             await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
-            Check(ReferenceEquals(shell.Current, record) && handler.Calls == 3,
+            Check(ReferenceEquals(shell.Current, record) && handler.Calls == 4,
                 "Returning to the previous session restores it without any API call");
             Check(Ui.Get<Border>(shell.Popup, "WordPanel").Visibility == Visibility.Visible &&
-                CardHeadword(shell.Popup) == word.Text,
-                "The return restores the previous session's word card");
+                CardHeadword(shell.Popup) == word.Text &&
+                Reading(shell.Popup, "WordCard").Contains("夹具词义"),
+                "The return restores the root's own word card, never the child's last lookup");
             Check(Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text == "return draft",
                 "The return restores the previous session's follow-up draft");
             Check(!shell.CanReturnToPreviousSession &&

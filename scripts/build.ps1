@@ -31,9 +31,38 @@ foreach ($reference in @('WindowsBase.dll','PresentationCore.dll','PresentationF
 foreach ($resource in Get-ChildItem -LiteralPath (Join-Path $projectRoot 'src\Leaf\Views') -Filter '*.xaml') {
     $arguments += '/resource:' + $resource.FullName + ',Leaf.Views.' + $resource.Name
 }
+# The bundled typefaces ride in the same container WPF looks a pack font up in: a real
+# "<assembly>.g.resources" ResourceSet holding each face as a Stream under its lower-cased
+# asset path, so "pack://application:,,,/Leaf;component/Assets/Fonts/#HarmonyOS Sans SC"
+# resolves from inside Leaf.exe on a machine that never installed the font. A raw
+# "/resource:" entry would only be reachable by name, never through a pack URI. The
+# container is an intermediate, so it is removed once the compiler has folded it in.
+$fontRoot = Join-Path $projectRoot 'src\Leaf\Assets\Fonts'
+$fontContainer = Join-Path $outputRoot 'Leaf.g.resources'
+$fontWriter = New-Object System.Resources.ResourceWriter($fontContainer)
+$fontStreams = New-Object System.Collections.ArrayList
+try {
+    foreach ($face in Get-ChildItem -LiteralPath $fontRoot -Filter '*.ttf') {
+        # The Stream overload is what makes the entry readable as a font stream; the byte[]
+        # overload would store it as an array ResourceManager.GetStream cannot open.
+        $stream = New-Object System.IO.MemoryStream(,[IO.File]::ReadAllBytes($face.FullName))
+        [void]$fontStreams.Add($stream)
+        $fontWriter.AddResource('assets/fonts/' + $face.Name.ToLowerInvariant(), $stream)
+    }
+    $fontWriter.Generate()
+} finally {
+    $fontWriter.Close()
+    foreach ($stream in $fontStreams) { $stream.Dispose() }
+}
+$arguments += '/resource:' + $fontContainer + ',Leaf.g.resources'
+# The agreement the licence requires to travel with the fonts ships in the same executable,
+# verbatim, so the settings page can show it without a second file on disk.
+$fontLicense = Join-Path $fontRoot 'LICENSE.txt'
+$arguments += '/resource:' + $fontLicense + ',Leaf.Assets.Fonts.LICENSE.txt'
 foreach ($source in Get-ChildItem -LiteralPath (Join-Path $projectRoot 'src\Leaf') -Filter '*.cs') { $arguments += $source.FullName }
 & $compiler @arguments
 if ($LASTEXITCODE -ne 0) { throw 'Build failed.' }
+Remove-Item -LiteralPath $fontContainer -Force
 @'
 <?xml version="1.0" encoding="utf-8"?>
 <configuration>
