@@ -103,7 +103,7 @@ namespace Leaf
             Ui.Visible(Ui.Get<Grid>(Popup, "SettingsPage"), false);
             Ui.Visible(Ui.Get<Grid>(Popup, "TranslatePage"), true);
             var badge = Ui.Get<TextBlock>(Popup, "SourceBadge");
-            badge.Text = Current == null ? "" : (demo ? "演示内容 · 未调用 API" : "来自" + SourceKindLabel(Current.SourceKind));
+            badge.Text = Current == null ? "" : (demo ? "演示内容 · 未调用 API" : SourceKindLabel(Current.SourceKind));
             settingsController.Detach();
             Ui.Get<ContentControl>(Popup, "SettingsPageHost").Content = null;
             settingsPanel = null; settingsController = null;

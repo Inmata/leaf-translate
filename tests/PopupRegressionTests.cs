@@ -260,7 +260,7 @@ internal static class PopupRegressionTests
             Check(Ui.Get<Border>(shell.Popup, "WordPanel").Visibility == Visibility.Visible &&
                 Ui.Get<TextBlock>(shell.Popup, "WordTitle").Text == word.Text,
                 "The word card is on screen before recovery");
-            Check(WordLink(shell.Popup, word.Text) != null && WordLink(shell.Popup, word.Text).Background != null,
+            Check(shell.WordHighlighted,
                 "The selected word is highlighted before recovery");
             shell.BeginSourceEdit(false);
             Ui.Get<TextBox>(shell.Popup, "SourceInput").Clear();
@@ -272,7 +272,7 @@ internal static class PopupRegressionTests
                 Ui.Get<TextBlock>(shell.Popup, "WordTitle").Text == word.Text &&
                 Reading(shell.Popup, "WordMeaning") == "夹具词义",
                 "Recovery keeps the word card instead of rebuilding the record");
-            Check(WordLink(shell.Popup, word.Text) != null && WordLink(shell.Popup, word.Text).Background != null,
+            Check(shell.WordHighlighted,
                 "Recovery keeps the highlight on the selected word");
             Check(Ui.Get<TextBlock>(shell.Popup, "TopicLabel").Text.Contains(word.Text),
                 "Recovery keeps the follow-up topic on the selected word");
@@ -393,7 +393,7 @@ internal static class PopupRegressionTests
                 Ui.Get<TextBlock>(shell.Popup, "WordTitle").Text == word.Text &&
                 Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text == "draft across settings",
                 "The round trip keeps the word card, the conversation and the draft");
-            Check(Ui.Get<TextBlock>(shell.Popup, "SourceBadge").Text == "来自选中文本",
+            Check(Ui.Get<TextBlock>(shell.Popup, "SourceBadge").Text == "选中文本",
                 "The badge labels an internal selection as 选中文本 after leaving settings");
 
             // An empty preset list has its own empty state instead of a blank dropdown.
@@ -580,7 +580,7 @@ internal static class PopupRegressionTests
             await shell.TranslateInternalSelectionAsync("Words picked inside Leaf itself.");
             Check(!ReferenceEquals(shell.Current, record) && shell.Current.Source == "Words picked inside Leaf itself.",
                 "An internal selection starts its own conversation");
-            Check(Ui.Get<TextBlock>(shell.Popup, "SourceBadge").Text == "来自选中文本",
+            Check(Ui.Get<TextBlock>(shell.Popup, "SourceBadge").Text == "选中文本",
                 "The badge labels an internal selection as 选中文本");
             Check(shell.CanReturnToPreviousSession &&
                 Ui.Get<Button>(shell.Popup, "BackToPreviousButton").Visibility == Visibility.Visible,
@@ -622,7 +622,7 @@ internal static class PopupRegressionTests
             Check(sections.Count > 0 && sections.All(b => b.IsReadOnly && (string)b.Tag == "LeafSelectableText"),
                 "Every learning section is a read-only selectable reading control");
             Check((string)Ui.Get<RichTextBox>(shell.Popup, "TranslationText").Tag == "LeafSelectableText" &&
-                (string)Ui.Get<RichTextBox>(shell.Popup, "SourceText").Tag == "LeafSelectableText",
+                (string)Ui.Get<TextBox>(shell.Popup, "SourceText").Tag == "LeafSelectableText",
                 "The translation and the original are marked for selection too");
         }
     }
@@ -676,7 +676,7 @@ internal static class PopupRegressionTests
                 new ReadingSelection { Label = "a learning control", Expected = "learning section text", Select = () =>
                     SelectRange(Ui.Get<StackPanel>(shell.Popup, "LearningSections").Children.OfType<RichTextBox>().First(), "learning section text") },
                 new ReadingSelection { Label = "the read-only original", Expected = "read-only original text",
-                    Select = () => SelectRange(Ui.Get<RichTextBox>(shell.Popup, "SourceText"), "read-only original text") },
+                    Select = () => SelectOriginalRange(Ui.Get<TextBox>(shell.Popup, "SourceText"), "read-only original text") },
                 new ReadingSelection { Label = "the original editor", Expected = "editor", Select = () => {
                     // The editor is closed on the restored reading page; it has to be open, as it
                     // is while the user is typing in it, for its selection to be the one on screen.
@@ -782,7 +782,7 @@ internal static class PopupRegressionTests
         return Ui.Get<Border>(shell.Popup, "WordPanel").Visibility == Visibility.Visible &&
             Ui.Get<Border>(shell.Popup, "InputPanel").Visibility == Visibility.Visible &&
             Ui.Get<TextBlock>(shell.Popup, "TranslationCaption").Text == "译文" &&
-            Ui.Get<RichTextBox>(shell.Popup, "SourceText").Visibility == Visibility.Visible &&
+            Ui.Get<TextBox>(shell.Popup, "SourceText").Visibility == Visibility.Visible &&
             Ui.Get<Grid>(shell.Popup, "SourceEditor").Visibility == Visibility.Collapsed &&
             Ui.Get<TextBox>(shell.Popup, "SourceInput").Text == record.Source &&
             Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text == "draft behind the settings page";
@@ -970,14 +970,6 @@ internal static class PopupRegressionTests
         return new TextRange(box.Document.ContentStart, box.Document.ContentEnd).Text.Trim();
     }
 
-    private static System.Windows.Documents.Hyperlink WordLink(Window popup, string text)
-    {
-        foreach (var block in Ui.Get<RichTextBox>(popup, "SourceText").Document.Blocks.OfType<Paragraph>())
-            foreach (var inline in block.Inlines.OfType<System.Windows.Documents.Hyperlink>())
-                if (new TextRange(inline.ContentStart, inline.ContentEnd).Text == text) return inline;
-        return null;
-    }
-
     private static async Task Until(Func<bool> condition)
     {
         for (int i = 0; i < 300 && !condition(); i++) await Task.Delay(10);
@@ -1013,9 +1005,9 @@ internal static class PopupRegressionTests
                 "Same-source recovery keeps the record and makes no API call");
             Check(Ui.Get<Grid>(shell.Popup, "SourceEditor").Visibility == Visibility.Collapsed,
                 "Same-source recovery returns to the reading page");
-            Check(Ui.Get<RichTextBox>(shell.Popup, "SourceText").Visibility == Visibility.Visible &&
+            Check(Ui.Get<TextBox>(shell.Popup, "SourceText").Visibility == Visibility.Visible &&
                 Ui.Get<Button>(shell.Popup, "EditSourceButton").Visibility == Visibility.Visible,
-                "Recovered reading page shows the clickable original and its edit entry");
+                "Recovered reading page shows the readable original and its edit entry");
             Check(Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text == "unsent question" && record.Chat.Count == 2,
                 "Recovery keeps the conversation and the follow-up draft");
             Check(Ui.Get<Border>(shell.Popup, "ChatPanel").Visibility == Visibility.Visible &&
@@ -1098,7 +1090,7 @@ internal static class PopupRegressionTests
             shell.Selection = new SelectionAcquirer(probe);
             Check(shell.Current == null, "A fresh shell has no result to recover");
             // A reading page without a result has its editor collapsed.
-            Ui.Visible(Ui.Get<RichTextBox>(shell.Popup, "SourceText"), true);
+            Ui.Visible(Ui.Get<TextBox>(shell.Popup, "SourceText"), true);
             Ui.Visible(Ui.Get<Grid>(shell.Popup, "SourceEditor"), false);
             await shell.InvokeShortcutAsync();
             Check(Ui.Get<Grid>(shell.Popup, "SourceEditor").Visibility == Visibility.Visible &&
@@ -1117,7 +1109,7 @@ internal static class PopupRegressionTests
 
             // The direct-input preference decides whether that prepared editor takes focus.
             var direct = Json.Copy(shell.Store.Settings); direct.FocusInputOnShortcut = true; shell.Store.SaveSettings(direct);
-            Ui.Visible(Ui.Get<RichTextBox>(shell.Popup, "SourceText"), true);
+            Ui.Visible(Ui.Get<TextBox>(shell.Popup, "SourceText"), true);
             Ui.Visible(Ui.Get<Grid>(shell.Popup, "SourceEditor"), false);
             Ui.Get<TextBox>(shell.Popup, "SourceInput").Clear();
             await shell.InvokeShortcutAsync();
@@ -1220,6 +1212,14 @@ internal static class PopupRegressionTests
         box.Document.Blocks.Clear();
         box.Document.Blocks.Add(new Paragraph(new Run(text)));
         box.Selection.Select(box.Document.ContentStart, box.Document.ContentEnd);
+        return box;
+    }
+
+    // The read-only original is a plain TextBox now; a selection in it is the box's own.
+    private static TextBox SelectOriginalRange(TextBox box, string text)
+    {
+        box.Text = text;
+        box.Select(0, text.Length);
         return box;
     }
 

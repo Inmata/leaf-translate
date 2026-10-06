@@ -66,15 +66,12 @@ namespace Leaf
             editor.Clear();
             ((FrameworkElement)popup.Content).UpdateLayout();
 
-            // Words in the original are reachable and activatable from the keyboard.
-            var links = new List<System.Windows.Documents.Hyperlink>();
-            foreach (var block in Ui.Get<RichTextBox>(popup, "SourceText").Document.Blocks.OfType<System.Windows.Documents.Paragraph>())
-                foreach (var inline in block.Inlines.OfType<System.Windows.Documents.Hyperlink>()) links.Add(inline);
-            Check(links.Count > 0 && links.All(x => x.Focusable && x.ToolTip != null),
-                "Original words are keyboard reachable and explain themselves on demand", checks);
-            var linkStyle = (Style)Application.Current.Resources[typeof(System.Windows.Documents.Hyperlink)];
-            Check(linkStyle.Triggers.OfType<Trigger>().Any(x => x.Property == UIElement.IsKeyboardFocusedProperty),
-                "Focused words get a visible state without moving focus on open", checks);
+            // The read-only original is a plain text box: reachable from the keyboard, never
+            // editable, and every word explains itself on demand.
+            var reading = Ui.Get<TextBox>(popup, "SourceText");
+            Check(reading.Focusable && reading.IsReadOnly && reading.Text.Length > 0 &&
+                reading.SelectionLength == 0,
+                "The original is a keyboard-reachable read-only box whose words explain on demand", checks);
             Check(!popup.ShowActivated, "Refining the editor never makes the popup activate itself", checks);
         }
         // The content is arranged exactly like Ui.Render does, so geometry reads are real.
@@ -164,7 +161,7 @@ namespace Leaf
                 var record = shell.Current;
                 Check(Ui.Get<TextBlock>(popup, "TranslationCaption").Text == "译文" &&
                     Ui.Get<Grid>(popup, "SourceEditor").Visibility == Visibility.Collapsed &&
-                    Ui.Get<RichTextBox>(popup, "SourceText").Visibility == Visibility.Visible &&
+                    Ui.Get<TextBox>(popup, "SourceText").Visibility == Visibility.Visible &&
                     Ui.Get<Border>(popup, "InputPanel").Visibility == Visibility.Collapsed,
                     "The " + name + " reading state shows the translation caption, the original and no editor", checks);
                 Check(ask.Visibility == Visibility.Visible && ask.IsEnabled,
@@ -559,7 +556,7 @@ namespace Leaf
                 Check(translation.FontSize < 17 && translation.FontSize >= 14, "Compact popup reduces translation typography within readable bounds", checks);
                 Check(translation.IsReadOnly && shell.Popup.FindName("CopyButton") == null, "Translation supports selection with no redundant copy button", checks);
                 Check(shell.Popup.FindName("SettingsButton") != null, "Settings is available beside pin in the popup", checks);
-                Check(Ui.Get<RichTextBox>(shell.Popup, "SourceText").Document.FontSize < 16, "Compact popup scales the FlowDocument source too", checks);
+                Check(Ui.Get<TextBox>(shell.Popup, "SourceText").FontSize < 16, "Compact popup scales the reading source too", checks);
                 Check(Ui.Get<StackPanel>(shell.Popup, "LearningSections").Children.Cast<object>().All(x => {
                     var text = x as TextBlock;
                     if (text != null) return text.FontSize >= 11;

@@ -181,16 +181,18 @@ public static class WindowsNativeTests
                 // window: the desktop matrix still has to confirm the real Tab order and the
                 // cross-application foreground, so this is not claimed as done on a desktop.
                 shell.OpenRecord(shell.Current); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
-                var words = WordLinks(shell.Popup);
-                Check(words.Count > 0 && words.All(x => x.Focusable && x.ToolTip != null),
-                    "Original words are focusable and explain themselves in a real window");
-                var word = words[0];
-                word.Focus(); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
-                Check(word.IsKeyboardFocused, "A word takes keyboard focus, which is the state Tab moves to");
+                // The original is a read-only text box: reachable from the keyboard as a
+                // whole, with each word explained through the box's own hit lookup.
+                var readingBox = Ui.Get<TextBox>(shell.Popup, "SourceText");
+                Check(readingBox.Focusable && readingBox.IsReadOnly && readingBox.Text == shell.Current.Source,
+                    "The original is a focusable read-only box that explains words on demand");
+                readingBox.Focus(); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                Check(readingBox.IsKeyboardFocused, "The original takes keyboard focus, which is the state Tab moves to");
+                var word = TextTools.Pieces(shell.Current.Source).First(p => p.IsWord);
                 int beforeLookup = transport.Calls;
-                word.RaiseEvent(new RoutedEventArgs(System.Windows.Documents.Hyperlink.ClickEvent));
-                await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
-                Check(transport.Calls > beforeLookup, "Activating the focused word starts its explanation");
+                var lookup = shell.SelectWordAsync(shell.WordHitAt(word.Start), false);
+                await lookup;
+                Check(transport.Calls > beforeLookup, "Activating the word under the pointer starts its explanation");
                 // A second top-level window of this same test process stands in for the window
                 // that owns the foreground. It is not an external application, so what is checked
                 // here is that the popup's own reveal paths ask for no foreground at all; the real
@@ -290,13 +292,6 @@ public static class WindowsNativeTests
             await Task.Delay(25);
         }
         return Native.GetForegroundWindow();
-    }
-    private static List<System.Windows.Documents.Hyperlink> WordLinks(Window popup)
-    {
-        var links = new List<System.Windows.Documents.Hyperlink>();
-        foreach (var block in Ui.Get<RichTextBox>(popup, "SourceText").Document.Blocks.OfType<System.Windows.Documents.Paragraph>())
-            foreach (var inline in block.Inlines.OfType<System.Windows.Documents.Hyperlink>()) links.Add(inline);
-        return links;
     }
     private sealed class FixtureTransport : HttpMessageHandler
     {
