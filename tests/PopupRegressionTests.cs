@@ -45,6 +45,14 @@ internal static class PopupRegressionTests
         await FailedFollowupRetriesOriginalQuestion(Path.Combine(folder, "failed-followup"));
         await RecoveryBarrierBlocksFollowupRetry(Path.Combine(folder, "barrier-retry"));
         await FollowupRetryWorksAfterRecovery(Path.Combine(folder, "barrier-cleared"));
+        await SettingsPageRoundTrip(Path.Combine(folder, "settings-page"));
+        await ConcurrentSettingsLeave(Path.Combine(folder, "settings-leave"));
+        await FailedSettingsLeaveKeepsPage(Path.Combine(folder, "settings-leave-failed"));
+        await ExplicitApplyIsFlushed(Path.Combine(folder, "settings-apply-flush"));
+        await ExplicitApplySurvivesPageLeave(Path.Combine(folder, "settings-apply-leave"));
+        await InternalSelectionReturn(Path.Combine(folder, "internal-return"));
+        await ReturnAfterClearDoesNotResurrect(Path.Combine(folder, "return-cleared"));
+        await LearningContentSelectable(Path.Combine(folder, "selectable"));
         return assertions;
     }
 
@@ -81,7 +89,7 @@ internal static class PopupRegressionTests
             await Until(() => record.Cards.Count > 0);
             Check(record.Cards.Count == 1 && record.Cards.Values.All(c => c.meaning == "新的词义"),
                 "Only the retried word lookup lands in the conversation");
-            Check(Ui.Get<TextBlock>(shell.Popup, "WordMeaning").Text == "新的词义",
+            Check(Reading(shell.Popup, "WordMeaning") == "新的词义",
                 "A retried word lookup settles on its card instead of staying busy");
 
             // A retry stops mattering once another conversation replaces the stopped one.
@@ -253,7 +261,7 @@ internal static class PopupRegressionTests
                 "Recovering the same text makes no API call");
             Check(Ui.Get<Border>(shell.Popup, "WordPanel").Visibility == Visibility.Visible &&
                 Ui.Get<TextBlock>(shell.Popup, "WordTitle").Text == word.Text &&
-                Ui.Get<TextBlock>(shell.Popup, "WordMeaning").Text == "夹具词义",
+                Reading(shell.Popup, "WordMeaning") == "夹具词义",
                 "Recovery keeps the word card instead of rebuilding the record");
             Check(WordLink(shell.Popup, word.Text) != null && WordLink(shell.Popup, word.Text).Background != null,
                 "Recovery keeps the highlight on the selected word");
@@ -348,6 +356,233 @@ internal static class PopupRegressionTests
         }
     }
 
+    // The settings page is a view over the live session: entering, leaving and re-entering
+    // keep the conversation, its word card and the follow-up draft untouched.
+    private static async Task SettingsPageRoundTrip(string folder)
+    {
+        var handler = new FixtureHandler();
+        using (var shell = new AppShell(ConfiguredStore(folder), false, new LlmClient(handler))) {
+            await shell.TranslateAsync("A settings round-trip sentence.", "选中文字", false);
+            var record = shell.Current;
+            var word = TextTools.Pieces(record.Source).First(p => p.IsWord);
+            await shell.SelectWordAsync(word, false);
+            Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text = "draft across settings";
+            shell.ShowSettingsPage();
+            Check(shell.IsSettingsPageOpen &&
+                Ui.Get<Grid>(shell.Popup, "TranslatePage").Visibility == Visibility.Collapsed &&
+                Ui.Get<Grid>(shell.Popup, "SettingsPage").Visibility == Visibility.Visible,
+                "Opening settings shows the settings page over the reading page");
+            Check(Ui.Get<TextBlock>(shell.Popup, "SourceBadge").Text.Length == 0,
+                "The reading badge does not show through the settings page");
+            shell.ShowSettingsPage();
+            Check(shell.IsSettingsPageOpen && ReferenceEquals(shell.Current, record),
+                "Opening settings twice keeps one page over the live session");
+            Check(await shell.TryLeaveSettingsPageAsync() && !shell.IsSettingsPageOpen &&
+                Ui.Get<Grid>(shell.Popup, "TranslatePage").Visibility == Visibility.Visible,
+                "Leaving settings returns to the reading page");
+            Check(Ui.Get<Border>(shell.Popup, "WordPanel").Visibility == Visibility.Visible &&
+                Ui.Get<TextBlock>(shell.Popup, "WordTitle").Text == word.Text &&
+                Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text == "draft across settings",
+                "The round trip keeps the word card, the conversation and the draft");
+            Check(Ui.Get<TextBlock>(shell.Popup, "SourceBadge").Text == "来自选中文本",
+                "The badge labels an internal selection as 选中文本 after leaving settings");
+
+            // An empty preset list has its own empty state instead of a blank dropdown.
+            shell.ShowSettingsPage();
+            var panel = (FrameworkElement)Ui.Get<ContentControl>(shell.Popup, "SettingsPageHost").Content;
+            var hint = Ui.Get<TextBlock>(panel, "PresetPlaceholder");
+            Check(hint.Visibility == Visibility.Visible && hint.Text == "暂无偏好预设" &&
+                !Ui.Get<ComboBox>(panel, "PresetCombo").IsEnabled,
+                "An empty preset list shows its empty hint and disables the dropdown");
+            Check(await shell.TryLeaveSettingsPageAsync() && !shell.IsSettingsPageOpen,
+                "Leaving the freshly built settings page also succeeds");
+        }
+    }
+
+    // Two entry points (the back button and the window close) can ask to leave the same page
+    // while the first flush is still running; the second shares that attempt instead of
+    // flushing the same page twice or detaching whatever page is there when it resumes.
+    private static async Task ConcurrentSettingsLeave(string folder)
+    {
+        var handler = new FixtureHandler();
+        using (var shell = new AppShell(ConfiguredStore(folder), false, new LlmClient(handler))) {
+            await shell.TranslateAsync("A shared settings leave sentence.", "选中文字", false);
+            var record = shell.Current;
+            shell.ShowSettingsPage();
+            var panel = SettingsPanel(shell);
+            Ui.Get<CheckBox>(panel, "ClipboardModeCheck").IsChecked = true;
+            var back = shell.TryLeaveSettingsPageAsync();
+            var close = shell.TryLeaveSettingsPageAsync();
+            Check(ReferenceEquals(back, close),
+                "A second leave entry reuses the attempt already running for this page");
+            Check(await back && await close,
+                "Both leave entries settle once instead of detaching the same page twice");
+            Check(!shell.IsSettingsPageOpen && ReferenceEquals(shell.Current, record) &&
+                Ui.Get<Grid>(shell.Popup, "TranslatePage").Visibility == Visibility.Visible,
+                "The shared leave returns to the live reading page");
+            Check(shell.Store.Settings.ClipboardMode,
+                "The pending preference edit is flushed by the shared leave");
+        }
+    }
+
+    // A flush that cannot apply keeps the page open with its reason, and the same entry can be
+    // retried once the field is fixed.
+    private static async Task FailedSettingsLeaveKeepsPage(string folder)
+    {
+        var handler = new FixtureHandler();
+        using (var shell = new AppShell(ConfiguredStore(folder), false, new LlmClient(handler))) {
+            await shell.TranslateAsync("A failed settings leave sentence.", "选中文字", false);
+            var record = shell.Current;
+            shell.ShowSettingsPage();
+            var panel = SettingsPanel(shell);
+            Ui.Get<TextBox>(panel, "TargetInput").Text = "   ";
+            Check(!await shell.TryLeaveSettingsPageAsync() && shell.IsSettingsPageOpen &&
+                Ui.Get<Grid>(shell.Popup, "SettingsPage").Visibility == Visibility.Visible,
+                "A failed flush keeps the settings page over the live session");
+            Check(Ui.Get<TextBlock>(panel, "SettingsStatus").Text.Contains("目标语言"),
+                "The failed flush keeps its reason visible instead of closing silently");
+            Check(ReferenceEquals(shell.Current, record),
+                "A failed flush does not touch the session behind the page");
+            Ui.Get<TextBox>(panel, "TargetInput").Text = "中文";
+            Check(await shell.TryLeaveSettingsPageAsync() && !shell.IsSettingsPageOpen,
+                "Retrying the leave after fixing the field returns to the reading page");
+        }
+    }
+
+    // Flushing settings must not report success while a clicked service apply is still
+    // committing: the exit path shares this flush and would otherwise leave early.
+    private static async Task ExplicitApplyIsFlushed(string folder)
+    {
+        var store = new LocalStore(folder, new DelayedWrites());
+        var seed = Json.Copy(store.Settings); seed.Provider.Model = "fixture-model"; store.SaveSettings(seed);
+        var credentials = new RecordingCredentials();
+        using (var shell = new AppShell(store, false, new LlmClient(new FixtureHandler()), credentials)) {
+            var settings = new SettingsWindow(shell);
+            var providers = Ui.Get<ComboBox>(settings.Panel, "ProviderCombo");
+            var deepseek = providers.Items.Cast<ProviderProfile>().First(p => p.Id == "deepseek");
+            providers.SelectedItem = deepseek;
+            Ui.Get<ComboBox>(settings.Panel, "ModelInput").Text = "flushed-model";
+            Ui.Get<PasswordBox>(settings.Panel, "ApiKeyInput").Password = "flushed-key";
+            Press(settings.Panel, "SaveSettingsButton");
+            await Task.Delay(60);
+            bool flushed = await settings.FlushPendingAsync();
+            Check(flushed && store.Settings.Provider.Model == "flushed-model",
+                "Flushing settings waits for the clicked apply instead of stopping after its first phase");
+            Check(credentials.Read(deepseek) == "flushed-key",
+                "The key captured by the clicked apply is saved before the flush reports success");
+        }
+    }
+
+    // Leaving the popup settings page while the clicked apply is still committing waits for it,
+    // so the key it captured is not dropped by the page detach.
+    private static async Task ExplicitApplySurvivesPageLeave(string folder)
+    {
+        var store = new LocalStore(folder, new DelayedWrites());
+        var seed = Json.Copy(store.Settings); seed.Provider.Model = "fixture-model"; store.SaveSettings(seed);
+        var credentials = new RecordingCredentials();
+        var shell = new AppShell(store, false, new LlmClient(new FixtureHandler()), credentials);
+        await shell.TranslateAsync("An applied settings sentence.", "选中文字", false);
+        shell.ShowSettingsPage();
+        var panel = SettingsPanel(shell);
+        var providers = Ui.Get<ComboBox>(panel, "ProviderCombo");
+        var deepseek = providers.Items.Cast<ProviderProfile>().First(p => p.Id == "deepseek");
+        providers.SelectedItem = deepseek;
+        Ui.Get<ComboBox>(panel, "ModelInput").Text = "page-model";
+        Ui.Get<PasswordBox>(panel, "ApiKeyInput").Password = "page-key";
+        Press(panel, "SaveSettingsButton");
+        await Task.Delay(60);
+        Check(await shell.TryLeaveSettingsPageAsync() && !shell.IsSettingsPageOpen,
+            "Leaving the page waits for the service apply it started");
+        Check(credentials.Read(deepseek) == "page-key" && store.Settings.Provider.Model == "page-model",
+            "The page leave keeps the key and model that the clicked apply captured");
+        // The disposing shell writes its fallback exit snapshot in the background, and this
+        // store's writes are slowed on purpose; wait for it so nothing outlives the scenario.
+        shell.Dispose();
+        try { await store.FlushAsync(); } catch { }
+    }
+
+    // Clearing history while a sub-session is on screen must not let the previous session come
+    // back: the restored session keeps the epoch it was captured under and its save is skipped.
+    private static async Task ReturnAfterClearDoesNotResurrect(string folder)
+    {
+        var handler = new FixtureHandler();
+        using (var shell = new AppShell(ConfiguredStore(folder), false, new LlmClient(handler))) {
+            await shell.TranslateAsync("A previous session sentence.", "选中文字", false);
+            var record = shell.Current;
+            await shell.TranslateInternalSelectionAsync("A sub-session sentence.");
+            Check(!ReferenceEquals(shell.Current, record), "The sub-session replaced the earlier conversation");
+            await shell.Store.ClearAsync();
+            shell.ReturnToPreviousSession();
+            Check(ReferenceEquals(shell.Current, record) && !shell.CanReturnToPreviousSession,
+                "The earlier conversation still returns from memory without another request");
+            await shell.SaveCurrentAsync();
+            await shell.Store.FlushAsync();
+            Check(shell.Store.History("").Count == 0,
+                "A session captured before the clear cannot be written back under the newer epoch");
+        }
+    }
+
+    // Selecting text inside Leaf starts its own conversation, and the light back entry
+    // returns to the previous one without any request.
+    private static async Task InternalSelectionReturn(string folder)
+    {
+        var handler = new FixtureHandler();
+        using (var shell = new AppShell(ConfiguredStore(folder), false, new LlmClient(handler))) {
+            await shell.TranslateAsync("A return fixture sentence.", "选中文字", false);
+            var record = shell.Current;
+            var word = TextTools.Pieces(record.Source).First(p => p.IsWord);
+            await shell.SelectWordAsync(word, false);
+            Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text = "return draft";
+            await shell.TranslateInternalSelectionAsync("Words picked inside Leaf itself.");
+            Check(!ReferenceEquals(shell.Current, record) && shell.Current.Source == "Words picked inside Leaf itself.",
+                "An internal selection starts its own conversation");
+            Check(Ui.Get<TextBlock>(shell.Popup, "SourceBadge").Text == "来自选中文本",
+                "The badge labels an internal selection as 选中文本");
+            Check(shell.CanReturnToPreviousSession &&
+                Ui.Get<Button>(shell.Popup, "BackToPreviousButton").Visibility == Visibility.Visible,
+                "The replaced conversation offers its return entry");
+            shell.ReturnToPreviousSession();
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            Check(ReferenceEquals(shell.Current, record) && handler.Calls == 3,
+                "Returning to the previous session restores it without any API call");
+            Check(Ui.Get<Border>(shell.Popup, "WordPanel").Visibility == Visibility.Visible &&
+                Ui.Get<TextBlock>(shell.Popup, "WordTitle").Text == word.Text,
+                "The return restores the previous session's word card");
+            Check(Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text == "return draft",
+                "The return restores the previous session's follow-up draft");
+            Check(!shell.CanReturnToPreviousSession &&
+                Ui.Get<Button>(shell.Popup, "BackToPreviousButton").Visibility == Visibility.Collapsed,
+                "The return entry hides once the previous session is back");
+            await shell.TranslateInternalSelectionAsync("   ");
+            Check(Ui.Get<Border>(shell.Popup, "ErrorPanel").Visibility == Visibility.Visible &&
+                ReferenceEquals(shell.Current, record),
+                "A blank internal selection shows its validation error and keeps the session");
+        }
+    }
+
+    // Learning content is read-only selectable text, marked for the selection source.
+    private static async Task LearningContentSelectable(string folder)
+    {
+        var handler = new FixtureHandler();
+        using (var shell = new AppShell(ConfiguredStore(folder), false, new LlmClient(handler))) {
+            await shell.TranslateAsync("A selectable learning sentence.", "选中文字", false);
+            var record = shell.Current;
+            var word = TextTools.Pieces(record.Source).First(p => p.IsWord);
+            await shell.SelectWordAsync(word, false);
+            var meaning = Ui.Get<RichTextBox>(shell.Popup, "WordMeaning");
+            Check(Reading(shell.Popup, "WordMeaning") == "夹具词义",
+                "The word meaning renders in the selectable reading control");
+            Check(meaning.IsReadOnly && (string)meaning.Tag == "LeafSelectableText",
+                "The word meaning is read-only and marked for selection");
+            var sections = Ui.Get<StackPanel>(shell.Popup, "LearningSections").Children.OfType<RichTextBox>().ToList();
+            Check(sections.Count > 0 && sections.All(b => b.IsReadOnly && (string)b.Tag == "LeafSelectableText"),
+                "Every learning section is a read-only selectable reading control");
+            Check((string)Ui.Get<RichTextBox>(shell.Popup, "TranslationText").Tag == "LeafSelectableText" &&
+                (string)Ui.Get<RichTextBox>(shell.Popup, "SourceText").Tag == "LeafSelectableText",
+                "The translation and the original are marked for selection too");
+        }
+    }
+
     // Files are rolled back but an applied external effect could not be, which is exactly the
     // state that requires an explicit reapply before requests may run again.
     private static async Task ManufactureRecovery(LocalStore store)
@@ -359,6 +594,13 @@ internal static class PopupRegressionTests
                 (committed, candidate) => { throw new Exception("fixture external apply failure"); }, null);
         } catch (UserError) { failed = true; }
         Check(failed && store.NeedsExplicitRecovery, "The fixture leaves an explicit recovery barrier");
+    }
+
+    // Learning content and the translation render in read-only RichTextBoxes now.
+    private static string Reading(Window popup, string name)
+    {
+        var box = Ui.Get<RichTextBox>(popup, name);
+        return new TextRange(box.Document.ContentStart, box.Document.ContentEnd).Text.Trim();
     }
 
     private static System.Windows.Documents.Hyperlink WordLink(Window popup, string text)
@@ -575,6 +817,39 @@ internal static class PopupRegressionTests
         var store = new LocalStore(folder); var settings = Json.Copy(store.Settings);
         settings.Provider.Model = "fixture-model"; store.SaveSettings(settings);
         return store;
+    }
+    private static FrameworkElement SettingsPanel(AppShell shell)
+    {
+        return (FrameworkElement)Ui.Get<ContentControl>(shell.Popup, "SettingsPageHost").Content;
+    }
+    private static void Press(FrameworkElement scope, string name)
+    {
+        Ui.Get<Button>(scope, name).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+    }
+    // Writes pause, so a test can observe a settings commit while it is still in flight.
+    private sealed class DelayedWrites : IStoreFiles
+    {
+        private const int DelayMs = 300;
+        private readonly IStoreFiles inner = new PhysicalStoreFiles();
+        public bool Exists(string path) { return inner.Exists(path); }
+        public long Length(string path) { return inner.Length(path); }
+        public string Read(string path) { return inner.Read(path); }
+        public void Write(string path, string payload) { Thread.Sleep(DelayMs); inner.Write(path, payload); }
+        public void Copy(string source, string destination, bool overwrite) { inner.Copy(source, destination, overwrite); }
+        public void Move(string source, string destination) { inner.Move(source, destination); }
+        public void Replace(string source, string destination) { inner.Replace(source, destination); }
+        public void Delete(string path) { inner.Delete(path); }
+    }
+    private sealed class RecordingCredentials : ICredentialProfiles
+    {
+        private readonly Dictionary<string, string> keys = new Dictionary<string, string>();
+        public string Read(ProviderProfile profile)
+        {
+            string key; string id = Credentials.ScopedId(profile);
+            return keys.TryGetValue(id, out key) ? key : "";
+        }
+        public void Save(ProviderProfile profile, string key) { keys[Credentials.ScopedId(profile)] = key; }
+        public void Delete(ProviderProfile profile) { keys.Remove(Credentials.ScopedId(profile)); }
     }
     private static HttpResponseMessage StreamReply(string text)
     {

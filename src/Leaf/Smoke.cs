@@ -239,6 +239,95 @@ namespace Leaf
             popup.Width = 456; popup.Height = 620; shell.UpdatePopupTypography();
             checks.Add("All popup states render at 456x620 and 360x380 across 96/120/144/192 DPI with exact output pixels");
         }
+        // The settings page hosted in the popup shell and the previous-session back entry.
+        // Both are entered through the application's own bridges, so the images and the
+        // restored states come from production paths rather than renderer manipulation.
+        private static async Task NavigationState(AppShell shell, PendingTransport transport, string folder, List<string> checks)
+        {
+            var popup = shell.Popup;
+            popup.Width = 456; popup.Height = 620; shell.UpdatePopupTypography();
+
+            // The reading page of the demo session, then the settings page on top of it.
+            // The settings scenario saved a preset and restored the first-run profile, so the
+            // empty-state check needs a fresh list and the internal-selection request below
+            // needs a real model, exactly like the render states configured one.
+            var noPresets = Json.Copy(shell.Store.Settings);
+            noPresets.Presets.Clear();
+            noPresets.Provider.Model = "fixture-model";
+            shell.Store.SaveSettings(noPresets);
+            shell.PopulateDemo();
+            Layout(popup);
+            Ui.Get<TextBox>(popup, "QuestionInput").Text = "离开前的追问草稿";
+            shell.ShowSettingsPage();
+            Layout(popup);
+            Check(shell.IsSettingsPageOpen &&
+                Ui.Get<Grid>(popup, "TranslatePage").Visibility == Visibility.Collapsed &&
+                Ui.Get<Grid>(popup, "SettingsPage").Visibility == Visibility.Visible &&
+                Ui.Get<TextBlock>(popup, "SourceBadge").Text.Length == 0,
+                "The settings page opens inside the popup shell without rebuilding the reading page", checks);
+            var panel = (FrameworkElement)Ui.Get<ContentControl>(popup, "SettingsPageHost").Content;
+            Check(Ui.Get<TextBlock>(panel, "PresetPlaceholder").Text == "暂无偏好预设" && !Ui.Get<ComboBox>(panel, "PresetCombo").IsEnabled &&
+                !Ui.Get<Button>(panel, "LoadPreset").IsEnabled && !Ui.Get<Button>(panel, "RemovePreset").IsEnabled,
+                "An empty preset list disables its dropdown and actions and says so", checks);
+            Capture(popup, folder, "settings-page", checks);
+            bool left = await shell.TryLeaveSettingsPageAsync();
+            Layout(popup);
+            Check(left && !shell.IsSettingsPageOpen &&
+                Ui.Get<Grid>(popup, "TranslatePage").Visibility == Visibility.Visible &&
+                Ui.Get<Grid>(popup, "SettingsPage").Visibility == Visibility.Collapsed,
+                "Leaving settings restores the same reading page", checks);
+            Check(Ui.Get<Border>(popup, "WordPanel").Visibility == Visibility.Visible &&
+                Ui.Get<TextBlock>(popup, "TopicLabel").Text.Contains("prowess") &&
+                Ui.Get<TextBox>(popup, "QuestionInput").Text == "离开前的追问草稿" &&
+                Ui.Get<TextBlock>(popup, "SourceBadge").Text == "演示内容 · 未调用 API",
+                "Leaving settings keeps the session: card, topic, draft and badge survive", checks);
+
+            // A labeled internal-selection record, scrolled, with a draft: the session that
+            // will be replaced and then restored by the back entry.
+            var restored = TranslationRecord.Create("She kept her evening reading habit.", "选中文字", shell.Store.Settings);
+            restored.Translation = "她保持了晚间阅读的习惯。"; restored.Completed = true;
+            for (int i = 0; i < 6; i++) {
+                restored.Chat.Add(new ChatTurn { Role = "user", Content = "问题 " + i, Topic = "原句" });
+                restored.Chat.Add(new ChatTurn { Role = "assistant", Content = "回答 " + i + "：这一段足够长，可以让正文产生滚动。", Topic = "原句" });
+            }
+            shell.OpenRecord(restored);
+            Layout(popup);
+            Check(Ui.Get<TextBlock>(popup, "SourceBadge").Text == "来自选中文本", "Internal selections are labeled as selected text", checks);
+            var body = Ui.Get<ScrollViewer>(popup, "BodyScroll");
+            body.ScrollToBottom(); Layout(popup);
+            double savedOffset = body.VerticalOffset;
+            Check(savedOffset > 0, "The replaced session's body scrolls before the switch", checks);
+            Ui.Get<TextBox>(popup, "QuestionInput").Text = "上一次会话的追问草稿";
+            int calls = transport.Requests;
+            var ignored = shell.TranslateInternalSelectionAsync("Words selected inside Leaf itself.");
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            Layout(popup);
+            Check(shell.Current != null && shell.Current.Source == "Words selected inside Leaf itself." &&
+                !ReferenceEquals(shell.Current, restored) && transport.Requests == calls + 1,
+                "An internal selection starts a new session with a real request", checks);
+            Check(shell.CanReturnToPreviousSession &&
+                Ui.Get<Button>(popup, "BackToPreviousButton").Visibility == Visibility.Visible,
+                "The replaced session offers its back entry", checks);
+            shell.ReturnToPreviousSession();
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            Layout(popup);
+            Check(ReferenceEquals(shell.Current, restored) && transport.Requests == calls + 1,
+                "Returning to the previous session restores it without another request", checks);
+            Check(Math.Abs(body.VerticalOffset - savedOffset) <= 2 &&
+                Ui.Get<TextBox>(popup, "QuestionInput").Text == "上一次会话的追问草稿",
+                "Returning restores the body scroll and the follow-up draft", checks);
+            Check(!shell.CanReturnToPreviousSession &&
+                Ui.Get<Button>(popup, "BackToPreviousButton").Visibility == Visibility.Collapsed,
+                "The back entry disappears once the previous session is restored", checks);
+
+            // An invalid internal selection reports the problem and leaves the session alone.
+            await shell.TranslateInternalSelectionAsync("   ");
+            Check(Ui.Get<Border>(popup, "ErrorPanel").Visibility == Visibility.Visible && ReferenceEquals(shell.Current, restored),
+                "An invalid internal selection reports the problem without touching the session", checks);
+            Ui.Get<Button>(popup, "RetryButton").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Check(Ui.Get<Border>(popup, "ErrorPanel").Visibility == Visibility.Collapsed,
+                "Clearing the failed internal selection leaves the reading page usable", checks);
+        }
         // A real stop and its retry: the application's own StopForRetry drives the busy panel,
         // the retry entry and the restored state, so the rendered images are not painted by
         // the renderer. The fixture transport answers nothing, so no request ever leaves.
@@ -375,6 +464,14 @@ namespace Leaf
                 shell.PopulateDemo();
                 Check(Ui.Get<Border>(shell.Popup, "InputPanel").Visibility == Visibility.Collapsed, "Input is hidden before Ask", checks);
                 Check(Ui.Get<Border>(shell.Popup, "WordPanel").Visibility == Visibility.Visible, "Word card is visible for the selected occurrence", checks);
+                var meaning = Ui.Get<RichTextBox>(shell.Popup, "WordMeaning");
+                Check(meaning.IsReadOnly && (meaning.Tag as string) == "LeafSelectableText" &&
+                    new System.Windows.Documents.TextRange(meaning.Document.ContentStart, meaning.Document.ContentEnd).Text.Contains("高超的本领"),
+                    "Word meaning is selectable read-only text", checks);
+                var sections = Ui.Get<StackPanel>(shell.Popup, "LearningSections");
+                Check(sections.Children.OfType<RichTextBox>().Any() &&
+                    sections.Children.OfType<RichTextBox>().All(x => x.IsReadOnly && (x.Tag as string) == "LeafSelectableText"),
+                    "Learning section content is selectable read-only text", checks);
                 Check(shell.Popup.FindName("SceneCombo") == null, "Popup contains no scene picker", checks);
                 Check(!shell.Popup.ShowActivated, "Popup does not activate on Show", checks);
                 Check(shell.Popup.ShowInTaskbar && shell.Popup.Icon != null, "Popup has a branded taskbar entry", checks);
@@ -391,7 +488,12 @@ namespace Leaf
                 Check(translation.IsReadOnly && shell.Popup.FindName("CopyButton") == null, "Translation supports selection with no redundant copy button", checks);
                 Check(shell.Popup.FindName("SettingsButton") != null, "Settings is available beside pin in the popup", checks);
                 Check(Ui.Get<RichTextBox>(shell.Popup, "SourceText").Document.FontSize < 16, "Compact popup scales the FlowDocument source too", checks);
-                Check(Ui.Get<StackPanel>(shell.Popup, "LearningSections").Children.OfType<TextBlock>().All(x => x.FontSize >= 11), "Learning text has a readable minimum", checks);
+                Check(Ui.Get<StackPanel>(shell.Popup, "LearningSections").Children.Cast<object>().All(x => {
+                    var text = x as TextBlock;
+                    if (text != null) return text.FontSize >= 11;
+                    var reading = x as RichTextBox;
+                    return reading == null || reading.FontSize >= 11;
+                }), "Learning text has a readable minimum", checks);
                 Ui.Render(shell.Popup, Path.Combine(folder, "popup-small-question.png"));
                 // The compact screenshot is the state the production collapse click leaves
                 // behind, so it keeps the follow-up entry a user can still reach.
@@ -411,37 +513,40 @@ namespace Leaf
                 RenderStates(shell, transport, folder, checks);
 
                 var settings = new SettingsWindow(shell);
-                Check(Ui.Get<ComboBox>(settings.Window, "ProviderCombo").SelectedIndex == -1, "New users choose an endpoint explicitly rather than guessing from a key", checks);
-                Ui.Get<ComboBox>(settings.Window, "ProviderCombo").SelectedIndex = 0;
-                Check(settings.Window.FindName("MonitorCombo") == null, "Popup-position selection is removed from settings", checks);
-                var model = Ui.Get<ComboBox>(settings.Window, "ModelInput");
+                Check(Ui.Get<ComboBox>(settings.Panel, "ProviderCombo").SelectedIndex == -1, "New users choose an endpoint explicitly rather than guessing from a key", checks);
+                Ui.Get<ComboBox>(settings.Panel, "ProviderCombo").SelectedIndex = 0;
+                Check(settings.Panel.FindName("MonitorCombo") == null, "Popup-position selection is removed from settings", checks);
+                var model = Ui.Get<ComboBox>(settings.Panel, "ModelInput");
                 Check(model.IsEditable, "Model selection accepts a manual ID", checks);
-                Check(Ui.Get<TextBox>(settings.Window, "ShortcutInput").IsReadOnly, "Shortcut settings record keys instead of accepting typed names", checks);
-                Check(Ui.Get<CheckBox>(settings.Window, "ClipboardModeCheck").IsChecked == false, "The default clipboard checkbox is off", checks);
+                Check(Ui.Get<TextBox>(settings.Panel, "ShortcutInput").IsReadOnly, "Shortcut settings record keys instead of accepting typed names", checks);
+                Check(Ui.Get<CheckBox>(settings.Panel, "ClipboardModeCheck").IsChecked == false, "The default clipboard checkbox is off", checks);
                 model.Text = "glm-5.3-flash";
-                Check(!Ui.Get<ComboBoxItem>(settings.Window, "DisableThinkingOption").IsEnabled && Ui.Get<StackPanel>(settings.Window, "ReasoningPanel").Visibility == Visibility.Visible,
+                Check(!Ui.Get<ComboBoxItem>(settings.Panel, "DisableThinkingOption").IsEnabled && Ui.Get<StackPanel>(settings.Panel, "ReasoningPanel").Visibility == Visibility.Visible,
                     "GLM-5.3 advanced options explain mandatory reasoning and expose effort", checks);
                 model.Text = "example-model";
-                var scene = Ui.Get<ComboBox>(settings.Window, "SceneCombo");
+                var scene = Ui.Get<ComboBox>(settings.Panel, "SceneCombo");
                 scene.SelectedItem = "游戏";
-                Check(Ui.Get<StackPanel>(settings.Window, "GameTypePanel").Visibility == Visibility.Visible, "Game fields appear only in the game scene", checks);
-                Ui.Get<TextBox>(settings.Window, "SceneDetailInput").Text = "Example game";
+                Check(Ui.Get<StackPanel>(settings.Panel, "GameTypePanel").Visibility == Visibility.Visible, "Game fields appear only in the game scene", checks);
+                Ui.Get<TextBox>(settings.Panel, "SceneDetailInput").Text = "Example game";
                 scene.SelectedItem = "书籍";
-                Check(Ui.Get<StackPanel>(settings.Window, "GameTypePanel").Visibility == Visibility.Collapsed, "Game fields disappear in books", checks);
-                Check(Ui.Get<TextBox>(settings.Window, "SceneDetailInput").Text.Length == 0, "A new scene starts with its own empty detail", checks);
+                Check(Ui.Get<StackPanel>(settings.Panel, "GameTypePanel").Visibility == Visibility.Collapsed, "Game fields disappear in books", checks);
+                Check(Ui.Get<TextBox>(settings.Panel, "SceneDetailInput").Text.Length == 0, "A new scene starts with its own empty detail", checks);
                 scene.SelectedItem = "游戏";
-                Check(Ui.Get<TextBox>(settings.Window, "SceneDetailInput").Text == "Example game", "Changing back restores the scene's remembered name", checks);
+                Check(Ui.Get<TextBox>(settings.Panel, "SceneDetailInput").Text == "Example game", "Changing back restores the scene's remembered name", checks);
                 scene.SelectedItem = "通用";
-                Check(Ui.Get<StackPanel>(settings.Window, "SceneDetailPanel").Visibility == Visibility.Collapsed, "General scene has no irrelevant detail field", checks);
-                Ui.Get<TextBox>(settings.Window, "CustomNameInput").Text = "常见误用";
-                Ui.Get<TextBox>(settings.Window, "CustomInstructionInput").Text = "解释容易混淆的用法。";
-                Ui.Get<Button>(settings.Window, "AddCustom").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-                Check(Ui.Get<WrapPanel>(settings.Window, "LearningChoices").Children.Count == 6, "Custom preference becomes a selectable option", checks);
+                Check(Ui.Get<StackPanel>(settings.Panel, "SceneDetailPanel").Visibility == Visibility.Collapsed, "General scene has no irrelevant detail field", checks);
+                Ui.Get<TextBox>(settings.Panel, "CustomNameInput").Text = "常见误用";
+                Ui.Get<TextBox>(settings.Panel, "CustomInstructionInput").Text = "解释容易混淆的用法。";
+                Ui.Get<Button>(settings.Panel, "AddCustom").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                Check(Ui.Get<WrapPanel>(settings.Panel, "LearningChoices").Children.Count == 6, "Custom preference becomes a selectable option", checks);
                 scene.SelectedItem = "游戏";
-                Ui.Get<TextBox>(settings.Window, "PresetNameInput").Text = "游戏学习";
-                Ui.Get<Button>(settings.Window, "SavePreset").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                Ui.Get<TextBox>(settings.Panel, "PresetNameInput").Text = "游戏学习";
+                Ui.Get<Button>(settings.Panel, "SavePreset").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                Check(Ui.Get<ComboBox>(settings.Panel, "PresetCombo").IsEnabled && Ui.Get<Button>(settings.Panel, "LoadPreset").IsEnabled &&
+                    Ui.Get<Button>(settings.Panel, "RemovePreset").IsEnabled,
+                    "Saving the first preset enables the preset dropdown and its actions", checks);
                 scene.SelectedItem = "通用";
-                Ui.Get<Button>(settings.Window, "LoadPreset").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                Ui.Get<Button>(settings.Panel, "LoadPreset").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
                 Check(Convert.ToString(scene.SelectedItem) == "游戏", "Preference preset restores the scene", checks);
                 Ui.Render(settings.Window, Path.Combine(folder, "settings.png"));
                 settings.Window.Close();
@@ -462,6 +567,7 @@ namespace Leaf
                 Ui.Get<TextBox>(history.Window, "HistorySearch").Clear();
                 Ui.Render(history.Window, Path.Combine(folder, "history.png"));
                 history.Window.Close();
+                await NavigationState(shell, transport, folder, checks);
                 StopState(shell, transport, folder, checks);
                 shell.Forget(null);
                 await shell.WaitForPersistenceAsync();

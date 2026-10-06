@@ -109,52 +109,52 @@ public static class ApplicationTests
         var providerStore = ConfiguredStore(Path.Combine(folder, "provider"));
         using (var shell = new AppShell(providerStore, false)) {
             var settings = new SettingsWindow(shell);
-            Ui.Get<ComboBox>(settings.Window, "ProviderCombo").SelectedIndex = 2;
-            Ui.Get<ComboBox>(settings.Window, "ModelInput").Text = "user-chosen-model";
-            Ui.Get<PasswordBox>(settings.Window, "ApiKeyInput").Password = "fake-key-fixture";
-            Ui.Get<Button>(settings.Window, "SaveSettingsButton").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Ui.Get<ComboBox>(settings.Panel, "ProviderCombo").SelectedIndex = 2;
+            Ui.Get<ComboBox>(settings.Panel, "ModelInput").Text = "user-chosen-model";
+            Ui.Get<PasswordBox>(settings.Panel, "ApiKeyInput").Password = "fake-key-fixture";
+            Ui.Get<Button>(settings.Panel, "SaveSettingsButton").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             await shell.WaitForSettingsAsync();
             var reloaded = new LocalStore(Path.Combine(folder, "provider"));
             Check(reloaded.Settings.ProviderId == "deepseek" && reloaded.Settings.Provider.Model == "user-chosen-model", "Saving a provider selection makes it the active provider after restart");
             bool closed = false; settings.Window.Closed += (s, e) => closed = true;
-            Ui.Get<Button>(settings.Window, "SaveSettingsButton").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Ui.Get<Button>(settings.Panel, "SaveSettingsButton").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             await shell.WaitForSettingsAsync();
-            Check(!closed && Ui.Get<TextBlock>(settings.Window, "SettingsStatus").Text.Contains("已应用"), "Applying a service confirms success without closing settings");
-            var scene = Ui.Get<ComboBox>(settings.Window, "SceneCombo"); var detail = Ui.Get<TextBox>(settings.Window, "SceneDetailInput");
+            Check(!closed && Ui.Get<TextBlock>(settings.Panel, "SettingsStatus").Text.Contains("已应用"), "Applying a service confirms success without closing settings");
+            var scene = Ui.Get<ComboBox>(settings.Panel, "SceneCombo"); var detail = Ui.Get<TextBox>(settings.Panel, "SceneDetailInput");
             scene.SelectedItem = "游戏"; detail.Text = "Baldur's Gate 3";
             scene.SelectedItem = "影视"; detail.Text = "Arrival"; scene.SelectedItem = "游戏";
             Check(detail.Text == "Baldur's Gate 3", "Each scene remembers its own detail while switching");
-            Ui.Get<CheckBox>(settings.Window, "FocusInputCheck").IsChecked = true;
+            Ui.Get<CheckBox>(settings.Panel, "FocusInputCheck").IsChecked = true;
             await Task.Delay(650);
             await shell.WaitForSettingsAsync();
             reloaded = new LocalStore(Path.Combine(folder, "provider"));
             Check(reloaded.Settings.SceneDetail == "Baldur's Gate 3" && reloaded.Settings.SceneDetails["影视"] == "Arrival" && reloaded.Settings.FocusInputOnShortcut,
                 "Scene names and focus preference automatically persist without applying a service");
-            Ui.Get<ComboBox>(settings.Window, "ModelInput").Text = "second-model"; await Task.Delay(650);
+            Ui.Get<ComboBox>(settings.Panel, "ModelInput").Text = "second-model"; await Task.Delay(650);
             await shell.WaitForSettingsAsync();
             Check(shell.Store.Settings.Provider.Model == "second-model", "Switching a configured model applies without closing settings");
             settings.Window.Close();
             await shell.WaitForSettingsAsync();
             settings = new SettingsWindow(shell);
-            Check(((ProviderProfile)Ui.Get<ComboBox>(settings.Window, "ProviderCombo").SelectedItem).Id == "deepseek", "Reopening settings selects the saved provider instead of looking for another provider's key");
+            Check(((ProviderProfile)Ui.Get<ComboBox>(settings.Panel, "ProviderCombo").SelectedItem).Id == "deepseek", "Reopening settings selects the saved provider instead of looking for another provider's key");
             settings.Window.Close();
             await shell.WaitForSettingsAsync();
         }
         using (var catalogHandler = new CatalogHandler())
         using (var shell = new AppShell(ConfiguredStore(Path.Combine(folder, "catalog")), false, new LlmClient(catalogHandler))) {
             var settings = new SettingsWindow(shell);
-            Ui.Get<ComboBox>(settings.Window, "ProviderCombo").SelectedIndex = 2;
-            Ui.Get<PasswordBox>(settings.Window, "ApiKeyInput").Password = "fake-key-fixture";
-            Check(Ui.Get<TextBlock>(settings.Window, "ModelStatus").Text.Contains("准备获取"), "Entering a key immediately provides model-discovery feedback");
+            Ui.Get<ComboBox>(settings.Panel, "ProviderCombo").SelectedIndex = 2;
+            Ui.Get<PasswordBox>(settings.Panel, "ApiKeyInput").Password = "fake-key-fixture";
+            Check(Ui.Get<TextBlock>(settings.Panel, "ModelStatus").Text.Contains("准备获取"), "Entering a key immediately provides model-discovery feedback");
             await Task.Delay(850);
-            var input = Ui.Get<ComboBox>(settings.Window, "ModelInput");
+            var input = Ui.Get<ComboBox>(settings.Panel, "ModelInput");
             Check(catalogHandler.Calls == 1 && input.Items.Count == 2 && input.Text == "", "Key entry automatically fetches models without silently choosing one");
-            Check(Ui.Get<TextBlock>(settings.Window, "ModelStatus").Text.Contains("2 个模型"), "Automatic model discovery reports the result count");
+            Check(Ui.Get<TextBlock>(settings.Panel, "ModelStatus").Text.Contains("2 个模型"), "Automatic model discovery reports the result count");
             input.SelectedIndex = 1;
             Check(input.Text == "deepseek-v4-pro", "Selecting a fetched model supplies the exact model ID");
-            Check(Ui.Get<TextBlock>(settings.Window, "ModelVendorHint").Text.Contains("catalog-owner"), "Model ownership is displayed only from catalog metadata");
+            Check(Ui.Get<TextBlock>(settings.Panel, "ModelVendorHint").Text.Contains("catalog-owner"), "Model ownership is displayed only from catalog metadata");
             input.Text = "custom-model";
-            Ui.Get<Button>(settings.Window, "SaveSettingsButton").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Ui.Get<Button>(settings.Panel, "SaveSettingsButton").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             await shell.WaitForSettingsAsync();
             Check(shell.Store.Settings.Provider.Model == "custom-model", "Manual model IDs remain supported after fetching a catalog");
             settings.Window.Close();
@@ -163,11 +163,11 @@ public static class ApplicationTests
         using (var catalogHandler = new CatalogHandler())
         using (var shell = new AppShell(ConfiguredStore(Path.Combine(folder, "debounce")), false, new LlmClient(catalogHandler))) {
             var settings = new SettingsWindow(shell);
-            var key = Ui.Get<PasswordBox>(settings.Window, "ApiKeyInput");
+            var key = Ui.Get<PasswordBox>(settings.Panel, "ApiKeyInput");
             key.Password = "part"; await Task.Delay(120); key.Password = "complete-fixture";
             await Task.Delay(850);
             Check(catalogHandler.Calls == 1, "Debouncing avoids a request for every character of a typed key");
-            Ui.Get<TextBox>(settings.Window, "EndpointInput").Text = "https://example.invalid/v1";
+            Ui.Get<TextBox>(settings.Panel, "EndpointInput").Text = "https://example.invalid/v1";
             await Task.Delay(700);
             Check(catalogHandler.Calls == 1 && key.Password.Length == 0, "Changing the endpoint clears the edited key and stops automatic discovery");
             key.Password = "temporary-fixture"; settings.Window.Close(); await shell.WaitForSettingsAsync(); await Task.Delay(750);
@@ -176,13 +176,13 @@ public static class ApplicationTests
         using (var catalogHandler = new DelayedCatalogHandler())
         using (var shell = new AppShell(ConfiguredStore(Path.Combine(folder, "stale-catalog")), false, new LlmClient(catalogHandler))) {
             var settings = new SettingsWindow(shell);
-            var key = Ui.Get<PasswordBox>(settings.Window, "ApiKeyInput"); key.Password = "old-fixture";
+            var key = Ui.Get<PasswordBox>(settings.Panel, "ApiKeyInput"); key.Password = "old-fixture";
             await Task.Delay(750);
-            Check(catalogHandler.Calls == 1 && Ui.Get<TextBlock>(settings.Window, "ModelStatus").Text.Contains("正在获取"), "Slow catalog requests display a loading state");
-            Ui.Get<ComboBox>(settings.Window, "ProviderCombo").SelectedIndex = 2;
+            Check(catalogHandler.Calls == 1 && Ui.Get<TextBlock>(settings.Panel, "ModelStatus").Text.Contains("正在获取"), "Slow catalog requests display a loading state");
+            Ui.Get<ComboBox>(settings.Panel, "ProviderCombo").SelectedIndex = 2;
             Check(catalogHandler.Cancellation.IsCancellationRequested, "Switching providers cancels the previous catalog request");
             catalogHandler.Reply(); await Task.Delay(60);
-            Check(Ui.Get<ComboBox>(settings.Window, "ModelInput").Items.Count == 0, "A late provider catalog cannot replace the new provider's choices");
+            Check(Ui.Get<ComboBox>(settings.Panel, "ModelInput").Items.Count == 0, "A late provider catalog cannot replace the new provider's choices");
             key.Password = "new-fixture"; key.Clear(); await Task.Delay(750);
             Check(catalogHandler.Calls == 1, "Clearing an unsaved key never reuses its pending password");
             settings.Window.Close();
@@ -190,17 +190,17 @@ public static class ApplicationTests
         }
         using (var shell = new AppShell(ConfiguredStore(Path.Combine(folder, "advanced")), false)) {
             var settings = new SettingsWindow(shell);
-            Ui.Get<ComboBox>(settings.Window, "ModelInput").Text = "glm-5.3-flash";
-            var thinking = Ui.Get<ComboBox>(settings.Window, "ThinkingModeCombo"); thinking.SelectedIndex = 1;
-            Ui.Get<ComboBox>(settings.Window, "ReasoningCombo").SelectedIndex = 1;
-            Ui.Get<TextBox>(settings.Window, "OutputLimitInput").Text = "4096";
-            Ui.Get<Button>(settings.Window, "SaveSettingsButton").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Ui.Get<ComboBox>(settings.Panel, "ModelInput").Text = "glm-5.3-flash";
+            var thinking = Ui.Get<ComboBox>(settings.Panel, "ThinkingModeCombo"); thinking.SelectedIndex = 1;
+            Ui.Get<ComboBox>(settings.Panel, "ReasoningCombo").SelectedIndex = 1;
+            Ui.Get<TextBox>(settings.Panel, "OutputLimitInput").Text = "4096";
+            Ui.Get<Button>(settings.Panel, "SaveSettingsButton").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             await shell.WaitForSettingsAsync();
             var profile = new LocalStore(Path.Combine(folder, "advanced")).Settings.Provider;
             Check(profile.ThinkingMode == "enabled" && profile.ReasoningEffort == "high" && profile.MaxOutputTokens == 4096,
                 "Advanced model settings survive saving and restarting");
             settings = new SettingsWindow(shell);
-            Check(Ui.Get<ComboBox>(settings.Window, "ThinkingModeCombo").SelectedIndex == 1 && Ui.Get<TextBox>(settings.Window, "OutputLimitInput").Text == "4096",
+            Check(Ui.Get<ComboBox>(settings.Panel, "ThinkingModeCombo").SelectedIndex == 1 && Ui.Get<TextBox>(settings.Panel, "OutputLimitInput").Text == "4096",
                 "Reopening settings restores the selected model's advanced options");
             settings.Window.Close();
             await shell.WaitForSettingsAsync();
@@ -208,10 +208,10 @@ public static class ApplicationTests
         using (var catalogHandler = new CatalogHandler())
         using (var shell = new AppShell(new LocalStore(Path.Combine(folder, "key-first")), false, new LlmClient(catalogHandler))) {
             var settings = new SettingsWindow(shell);
-            var key = Ui.Get<PasswordBox>(settings.Window, "ApiKeyInput"); key.Password = "unassigned-fixture";
+            var key = Ui.Get<PasswordBox>(settings.Panel, "ApiKeyInput"); key.Password = "unassigned-fixture";
             await Task.Delay(750);
             Check(catalogHandler.Calls == 0, "An unassigned API key is never probed against guessed providers");
-            var providers = Ui.Get<ComboBox>(settings.Window, "ProviderCombo");
+            var providers = Ui.Get<ComboBox>(settings.Panel, "ProviderCombo");
             providers.SelectedItem = providers.Items.Cast<ProviderProfile>().First(p => p.Id == "openai");
             await Task.Delay(850);
             Check(catalogHandler.Calls == 1 && catalogHandler.Host == "api.openai.com" && key.Password == "unassigned-fixture",
@@ -222,14 +222,14 @@ public static class ApplicationTests
         using (var catalogHandler = new CatalogHandler())
         using (var shell = new AppShell(new LocalStore(Path.Combine(folder, "custom-first")), false, new LlmClient(catalogHandler))) {
             var settings = new SettingsWindow(shell);
-            Ui.Get<PasswordBox>(settings.Window, "ApiKeyInput").Password = "custom-key-fixture";
-            Ui.Get<TextBox>(settings.Window, "EndpointInput").Text = "https://example.invalid/v1";
+            Ui.Get<PasswordBox>(settings.Panel, "ApiKeyInput").Password = "custom-key-fixture";
+            Ui.Get<TextBox>(settings.Panel, "EndpointInput").Text = "https://example.invalid/v1";
             await Task.Delay(850);
             Check(catalogHandler.Calls == 1 && catalogHandler.Host == "example.invalid" &&
-                ((ProviderProfile)Ui.Get<ComboBox>(settings.Window, "ProviderCombo").SelectedItem).Id == "custom",
+                ((ProviderProfile)Ui.Get<ComboBox>(settings.Panel, "ProviderCombo").SelectedItem).Id == "custom",
                 "Entering a custom endpoint after the key automatically loads its catalog without losing the key");
-            Ui.Get<ComboBox>(settings.Window, "ModelInput").Text = "custom-model";
-            Ui.Get<Button>(settings.Window, "SaveSettingsButton").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Ui.Get<ComboBox>(settings.Panel, "ModelInput").Text = "custom-model";
+            Ui.Get<Button>(settings.Panel, "SaveSettingsButton").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             await shell.WaitForSettingsAsync();
             Check(shell.Store.Settings.Provider.Id == "custom" && shell.Store.Settings.Provider.BaseUrl == "https://example.invalid/v1",
                 "Custom service configuration is retained for the next launch");
@@ -246,23 +246,23 @@ public static class ApplicationTests
         var delayedCredentials = new RecordingCredentials();
         using (var shell = new AppShell(delayedStore, false, new LlmClient(), delayedCredentials)) {
             var settings = new SettingsWindow(shell);
-            var providers = Ui.Get<ComboBox>(settings.Window, "ProviderCombo");
-            var key = Ui.Get<PasswordBox>(settings.Window, "ApiKeyInput");
+            var providers = Ui.Get<ComboBox>(settings.Panel, "ProviderCombo");
+            var key = Ui.Get<PasswordBox>(settings.Panel, "ApiKeyInput");
             providers.SelectedIndex = 2; // deepseek
-            Ui.Get<ComboBox>(settings.Window, "ModelInput").Text = "first-model";
+            Ui.Get<ComboBox>(settings.Panel, "ModelInput").Text = "first-model";
             key.Password = "first-key";
-            Ui.Get<Button>(settings.Window, "SaveSettingsButton").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Ui.Get<Button>(settings.Panel, "SaveSettingsButton").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             await Task.Delay(80); // the captured save is now blocked on the delayed file commit
             providers.SelectedIndex = 3; // openai, edited while the previous save is in flight
             key.Password = "second-provider-key";
-            Ui.Get<ComboBox>(settings.Window, "ModelInput").Text = "later-model";
+            Ui.Get<ComboBox>(settings.Panel, "ModelInput").Text = "later-model";
             await shell.WaitForSettingsAsync();
             Check(shell.Store.Settings.ProviderId == "deepseek" && shell.Store.Settings.Provider.Model == "first-model",
                 "A slow service save commits the profile and model captured when it started");
             var deepseek = providers.Items.Cast<ProviderProfile>().First(p => p.Id == "deepseek");
             Check(delayedCredentials.Read(deepseek) == "first-key",
                 "The captured provider receives the captured key");
-            Check(key.Password == "second-provider-key" && Ui.Get<ComboBox>(settings.Window, "ModelInput").Text == "later-model",
+            Check(key.Password == "second-provider-key" && Ui.Get<ComboBox>(settings.Panel, "ModelInput").Text == "later-model",
                 "An older save completion cannot clear a newer provider key or model draft");
             settings.Window.Close();
             await shell.WaitForSettingsAsync();
