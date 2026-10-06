@@ -98,36 +98,42 @@ Click **Ask (追问)** to reveal the input. Questions concern the selected word 
 
 When no text is captured, the shortcut quietly reopens the popup with its previous page, translation, and draft intact; it does not automatically enter editing. Click the source pencil to get ready for manual input. Successful captures can focus the source when direct input is enabled. `Enter` or the arrow beside the editor submits a new conversation; `Shift+Enter` inserts a new line. Clearing the draft without submitting keeps the current result: invoking the shortcut on the same text restores the conversation without repeating the request. Translation and learning text support continuous selection and `Ctrl+C`. Select a different passage inside Leaf and invoke the shortcut to translate it; the return entry restores the original conversation.
 
-[![Manual source editing and translation](docs/images/manual-input.png)](docs/images/manual-input.png)
-
 ## Screenshots
 
 These views are rendered from the v0.5.0 Clear paper interface. Text, model choices, conversations, saved-key state, and history are demonstration content; no live API was called. The app UI is currently Chinese. Click an image to view it at full size.
 
-Translation and learning: source, translation, and continuously selectable learning text.
-
-[![Translation and learning](docs/images/popup.png)](docs/images/popup.png)
-
-Settings inside the popup: service configuration and return to reading.
-
-[![Settings inside the popup](docs/images/settings.png)](docs/images/settings.png)
-
-Follow-up questions: continue discussing the current word or passage.
-
-[![Follow-up questions](docs/images/follow-up.png)](docs/images/follow-up.png)
-
-Source editing: explicit input and submission.
-
-[![Source editing](docs/images/manual-input.png)](docs/images/manual-input.png)
-
-Compact popup: the smaller reading view.
-
-[![Compact popup](docs/images/compact.png)](docs/images/compact.png)
-
-Local history: search and reopen saved records.
-
-[![Local history](docs/images/history.png)](docs/images/history.png)
-
+<table>
+  <tr>
+    <td width="50%" align="center" valign="top">
+      <a href="docs/images/popup.png"><img src="docs/images/popup.png" width="320" alt="Translation and learning"></a><br>
+      <strong>Translation and learning</strong><br>Source, translation, and selectable learning text
+    </td>
+    <td width="50%" align="center" valign="top">
+      <a href="docs/images/settings.png"><img src="docs/images/settings.png" width="320" alt="Settings inside the popup"></a><br>
+      <strong>Settings inside the popup</strong><br>Configure the service and return to reading
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="top">
+      <a href="docs/images/follow-up.png"><img src="docs/images/follow-up.png" width="320" alt="Follow-up questions"></a><br>
+      <strong>Follow-up questions</strong><br>Explore the current word or passage
+    </td>
+    <td align="center" valign="top">
+      <a href="docs/images/manual-input.png"><img src="docs/images/manual-input.png" width="320" alt="Source editing"></a><br>
+      <strong>Source editing</strong><br>Edit the source or enter your own text
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="top">
+      <a href="docs/images/compact.png"><img src="docs/images/compact.png" width="320" alt="Compact popup"></a><br>
+      <strong>Compact popup</strong><br>Keep reading and learning in a smaller window
+    </td>
+    <td align="center" valign="top">
+      <a href="docs/images/history.png"><img src="docs/images/history.png" width="320" alt="Local history"></a><br>
+      <strong>Local history</strong><br>Search and reopen saved records
+    </td>
+  </tr>
+</table>
 
 ## Make it work for your learning
 

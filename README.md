@@ -100,36 +100,42 @@ OpenAI 和自定义接口默认沿用模型的思考设置，不发送智谱／�
 
 没有取得选区时，快捷键安静唤起浮窗，保留上次页面、译文与草稿，不自动进入输入。有原文时点击右侧编辑图标，准备手动输入；开启直接输入选项后，成功取词会聚焦原文。`Enter` 或输入区右侧的箭头按钮提交，`Shift+Enter` 换行，每次手动提交建立新会话。清空草稿但未提交不会删除当前结果：再次对同一段文字按快捷键会恢复原会话的译文、词卡与追问，不重复请求。译文和学习内容可连续拖选，按 `Ctrl+C` 或右键复制。选中 Leaf 内的文字再按快捷键可继续翻译不同片段，并通过返回入口恢复原会话。
 
-[![编辑原文与手动翻译](docs/images/manual-input.png)](docs/images/manual-input.png)
-
 ## 界面预览
 
 以下截图来自 v0.5.0 的「清晰纸面」界面，文字、模型选项、问答、密钥状态与历史记录均为演示内容，未调用真实 API。点击图片可以查看大图。
 
-翻译与学习：原文、译文和可连续选择的学习内容。
-
-[![翻译与学习](docs/images/popup.png)](docs/images/popup.png)
-
-同浮窗设置页：服务配置及返回阅读入口。
-
-[![同浮窗设置页](docs/images/settings.png)](docs/images/settings.png)
-
-追问：围绕当前词句继续提问。
-
-[![追问](docs/images/follow-up.png)](docs/images/follow-up.png)
-
-编辑原文：显式输入与提交。
-
-[![编辑原文](docs/images/manual-input.png)](docs/images/manual-input.png)
-
-紧凑浮窗：缩小后的阅读界面。
-
-[![紧凑浮窗](docs/images/compact.png)](docs/images/compact.png)
-
-本地历史：搜索与恢复已保存记录。
-
-[![本地历史](docs/images/history.png)](docs/images/history.png)
-
+<table>
+  <tr>
+    <td width="50%" align="center" valign="top">
+      <a href="docs/images/popup.png"><img src="docs/images/popup.png" width="320" alt="翻译与学习"></a><br>
+      <strong>翻译与学习</strong><br>原文、译文与连续可选的学习内容
+    </td>
+    <td width="50%" align="center" valign="top">
+      <a href="docs/images/settings.png"><img src="docs/images/settings.png" width="320" alt="同浮窗设置"></a><br>
+      <strong>同浮窗设置</strong><br>配置服务，随时返回阅读
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="top">
+      <a href="docs/images/follow-up.png"><img src="docs/images/follow-up.png" width="320" alt="追问"></a><br>
+      <strong>继续追问</strong><br>围绕当前词句深入理解
+    </td>
+    <td align="center" valign="top">
+      <a href="docs/images/manual-input.png"><img src="docs/images/manual-input.png" width="320" alt="编辑原文"></a><br>
+      <strong>编辑原文</strong><br>修改原文或直接输入
+    </td>
+  </tr>
+  <tr>
+    <td align="center" valign="top">
+      <a href="docs/images/compact.png"><img src="docs/images/compact.png" width="320" alt="紧凑浮窗"></a><br>
+      <strong>紧凑浮窗</strong><br>缩小窗口，保留阅读与学习
+    </td>
+    <td align="center" valign="top">
+      <a href="docs/images/history.png"><img src="docs/images/history.png" width="320" alt="本地历史"></a><br>
+      <strong>本地历史</strong><br>搜索并恢复已保存的记录
+    </td>
+  </tr>
+</table>
 
 ## 设置自己的学习方式
 
