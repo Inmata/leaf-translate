@@ -57,6 +57,8 @@ public static class ExitScenarioTests
         if (mode == "normal") return Normal(data, folder);
         if (mode == "late") return Late(data, folder);
         if (mode == "fail") return Failing(data, folder);
+        if (mode == "placement") return Placement(data, folder);
+        if (mode == "retry") return RetryBarrier(data, folder);
         throw new ArgumentException("Unknown exit scenario: " + mode);
     }
 
@@ -132,6 +134,45 @@ public static class ExitScenarioTests
         }
     }
 
+    // A fully flushed exit must not start another placement save while it disposes; the
+    // native read is replaced by a seam so no real desktop is involved.
+    private static async Task Placement(string data, string folder)
+    {
+        var store = await ConfiguredStore(data);
+        using (var shell = new AppShell(store, false, new LlmClient(new ExitHandler()), new ExitCredentials())) {
+            int captures = 0;
+            var first = new WindowPlacement { X = 111, Y = 112, Width = 456, Height = 620, Screen = "exit" };
+            var second = new WindowPlacement { X = 222, Y = 223, Width = 456, Height = 620, Screen = "exit" };
+            shell.PlacementReader = () => ++captures == 1 ? first : second;
+            await shell.ExitAsync();
+            await store.FlushAsync();
+            var saved = store.Settings.Placement;
+            File.WriteAllText(Path.Combine(folder, "placement.json"),
+                Json.Write(new { captures = captures, x = saved == null ? -1 : (int)saved.X }));
+        }
+    }
+
+    // Once the exit has started, the retry closure captured before it must not turn into a
+    // new API request; the child process owns the real shutdown.
+    private static async Task RetryBarrier(string data, string folder)
+    {
+        var store = await ConfiguredStore(data);
+        var handler = new ExitRetryHandler();
+        using (var shell = new AppShell(store, false, new LlmClient(handler), new ExitCredentials())) {
+            await shell.TranslateAsync("exit retry source", "剪贴板", false);
+            Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text = "exit retry question";
+            await shell.SendChatAsync();
+            bool retryVisible = Ui.Get<Button>(shell.Popup, "RetryButton").Visibility == Visibility.Visible;
+            int before = handler.Calls;
+            var exit = shell.ExitAsync();
+            Ui.Get<Button>(shell.Popup, "RetryButton").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            await Task.Delay(200);
+            File.WriteAllText(Path.Combine(folder, "retry.json"),
+                Json.Write(new { retry_visible = retryVisible, before = before, after = handler.Calls }));
+            await exit;
+        }
+    }
+
     private sealed class ExitCredentials : ICredentialProfiles
     {
         public string Read(ProviderProfile profile) { return ""; }
@@ -167,6 +208,28 @@ public static class ExitScenarioTests
             await Task.Delay(250);
             string json = Json.Write(new { choices = new[] { new { message = new { content = Json.Write(new { meaning = "迟到结果", sections = new object[0] }) }, finish_reason = "stop" } } });
             return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(json, Encoding.UTF8, "application/json") };
+        }
+    }
+
+    // First call is an immediate streamed translation; the follow-up fails so the original
+    // question keeps a retry entry that the exit must refuse.
+    private sealed class ExitRetryHandler : HttpMessageHandler
+    {
+        private int calls;
+        public int Calls { get { return calls; } }
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellation)
+        {
+            int call = Interlocked.Increment(ref calls);
+            if (call == 1) {
+                string stream = "data: " + Json.Write(new { choices = new[] { new { delta = new { content = "退出重试译文" } } } }) +
+                    "\n\ndata: [DONE]\n\n";
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) {
+                    Content = new StringContent(stream, Encoding.UTF8, "text/event-stream")
+                });
+            }
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.InternalServerError) {
+                Content = new StringContent("{\"error\":{\"message\":\"fixture failure\"}}", Encoding.UTF8, "application/json")
+            });
         }
     }
 

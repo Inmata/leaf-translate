@@ -1285,10 +1285,14 @@ public static class StorageRegressionTests
         string normal = NewDirectory(folder, "exit-normal");
         string late = NewDirectory(folder, "exit-late");
         string failing = NewDirectory(folder, "exit-fail");
+        string placement = NewDirectory(folder, "exit-placement");
+        string retry = NewDirectory(folder, "exit-retry");
         await Task.Run(() => {
             RunExitChild(executable, "normal", normal);
             RunExitChild(executable, "late", late);
             RunExitChild(executable, "fail", failing);
+            RunExitChild(executable, "placement", placement);
+            RunExitChild(executable, "retry", retry);
         });
 
         var normalStore = new LocalStore(Path.Combine(normal, "data"));
@@ -1319,6 +1323,17 @@ public static class StorageRegressionTests
         Check(failHistory.Count == 1 && failHistory[0].Draft == "exit fail draft" &&
             failHistory[0].Translation == "退出夹具译文",
             "The retried exit persists the snapshot after the fault clears");
+
+        // A flushed exit must not read or enqueue placement a second time while disposing.
+        string placementReport = File.ReadAllText(Path.Combine(placement, "placement.json"));
+        Check(placementReport.Contains("\"captures\":1") && placementReport.Contains("\"x\":111"),
+            "A flushed exit persists its placement once instead of starting a late save: " + placementReport);
+
+        // A retry closure that existed before the exit must stay inert once exiting begins.
+        string retryReport = File.ReadAllText(Path.Combine(retry, "retry.json"));
+        Check(retryReport.Contains("\"retry_visible\":true") && retryReport.Contains("\"before\":2") &&
+            retryReport.Contains("\"after\":2"),
+            "An exiting shell refuses a follow-up retry closure instead of starting a new request: " + retryReport);
     }
 
     private static void RunExitChild(string executable, string mode, string directory)

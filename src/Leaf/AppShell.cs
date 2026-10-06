@@ -21,6 +21,9 @@ namespace Leaf
         public Window Popup { get; private set; }
         public bool NativeEnabled { get; private set; }
         public SelectionAcquirer Selection { get; set; }
+        // Test seam: supplies the placement a check wants to persist so the exit path can be
+        // exercised without a real desktop. Null in production, where the native read is used.
+        public Func<WindowPlacement> PlacementReader { get; set; }
         internal Func<ProviderProfile, string> CredentialReader;
         private readonly ICredentialProfiles credentialProfiles;
         private readonly bool migrateLegacyCredentials;
@@ -253,8 +256,13 @@ namespace Leaf
         }
         private WindowPlacement CapturePlacementToSave()
         {
-            if (!NativeEnabled || restoringPlacement || !placementInitialized || Popup.WindowState == WindowState.Minimized) return null;
-            var placement = Native.CapturePlacement(Popup);
+            if (restoringPlacement || Popup.WindowState == WindowState.Minimized) return null;
+            WindowPlacement placement;
+            if (PlacementReader != null) placement = PlacementReader();
+            else {
+                if (!NativeEnabled || !placementInitialized) return null;
+                placement = Native.CapturePlacement(Popup);
+            }
             if (placement == null || placement.Width <= 0 || placement.Height <= 0 || Json.Write(placement) == Json.Write(Store.Settings.Placement)) return null;
             return placement;
         }
@@ -588,7 +596,9 @@ namespace Leaf
             bool alreadyFlushed = flushedForExit;
             flushedForExit = false;
             CancelCapture();
-            RememberPlacement();
+            // A fully flushed exit must not start another save while it disposes; the debounce
+            // timer is stopped here, and the fallback persists one placement only once.
+            if (placementTimer != null) placementTimer.Stop();
             disposed = true;
             if (copyFeedback != null) copyFeedback.Stop();
             Log.Event("app_exit", null);

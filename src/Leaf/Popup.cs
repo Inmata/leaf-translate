@@ -498,7 +498,12 @@ namespace Leaf
         // the input happens to hold later. The saved provider is re-read for each attempt.
         private async Task SendChatForAsync(TranslationRecord record, string topic, WordCard card, string question)
         {
+            // This is the real send entry: both the public SendChatAsync and a stored retry
+            // closure reach it, so the exit, session-identity and recovery guards live here.
+            if (exiting) return;
             if (record == null || chatBusy) return;
+            if (!ReferenceEquals(Current, record)) return;
+            if (BlockedByRecovery()) return;
             var provider = Json.Copy(Store.Settings.Provider);
             long version = generation.Next();
             chatCancellation = new CancellationTokenSource(); var cancellation = chatCancellation;
