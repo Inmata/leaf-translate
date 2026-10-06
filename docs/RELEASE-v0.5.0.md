@@ -11,7 +11,7 @@
 - **同浮窗设置页**：设置与阅读共用窗口；设置按钮再次点击或「返回」恢复原文、译文、学习内容和追问草稿。改善下拉框、空预设、密钥占位及按钮状态。
 - **会话恢复与内部取词**：Leaf 内选中的不同文本直接进入翻译，不模拟复制；可返回根会话。相同原文恢复已有结果，清空未提交草稿后也不重复请求。
 - **安静唤起与准确重试**：空选区或暂时无法取得文字时保留当前状态，不自动进入输入；取消与重试只针对对应操作，迟到响应不覆盖当前会话。
-- **纸面阅读界面**：调整字号、留白、文本对齐、图标和悬停滚轮行为；内嵌思源黑体 Regular / Bold，无需系统安装字体。
+- **纸面阅读界面**：调整字号、留白、文本对齐、图标和悬停滚轮行为，最小浮窗展开追问仍保留可滚动阅读区；内嵌思源黑体 Regular / Bold，无需系统安装字体。
 
 ## 正确性与数据安全
 
@@ -42,7 +42,7 @@ This release brings the improvements since 0.4.1 together: more reliable capture
 - **Settings in the same popup:** toggle settings again or use Return to restore the source, translation, learning content, and follow-up draft. Dropdowns, empty presets, saved-key placeholders, and button states are improved.
 - **Internal capture and session restoration:** selected Leaf text is read directly without simulated copying. Different text opens a child conversation with a return to its root; matching text restores existing results without another request.
 - **Quiet reopening and focused retries:** empty or unavailable selections preserve the current state without automatically entering editing. Cancellation and retry keep operation identity; late responses cannot replace the current conversation.
-- **Clear paper UI:** refined typography, spacing, alignment, icons, and hover scrolling. Source Han Sans SC Regular and Bold are embedded; no font installation is required.
+- **Clear paper UI:** refined typography, spacing, alignment, icons, and hover scrolling. Compact windows retain a scrollable reading area while follow-up input is open. Source Han Sans SC Regular and Bold are embedded; no font installation is required.
 
 Correctness and storage improvements include continuous-script language handling, Unicode-safe truncation, ordered settings commits and recovery, endpoint-bound Windows Credential Manager keys, per-record history recovery, UTF-8 byte limits, background saves, and exit flushing. Deleted history cannot be resurrected by late results. Diagnostic logs contain metadata only. Source publication mirrors additions, changes, and deletions; one version constant drives assembly, manifest, and package versions.
 
