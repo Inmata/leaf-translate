@@ -107,58 +107,134 @@ namespace Leaf
                 }
             return new Point(left, top);
         }
-        // Every affected state is rendered at the sizes and DPIs the popup can actually meet.
-        private static void RenderStates(AppShell shell, string folder, List<string> checks)
+        // Every rendered state is entered through the application's own path - the demo record
+        // the showcase shows, the real follow-up entry, a real request in flight, a real stop
+        // and same-source recovery - so the images are the application's states rather than
+        // visibilities this renderer set for itself.
+        private static void RenderStates(AppShell shell, PendingTransport transport, string folder, List<string> checks)
         {
             var popup = shell.Popup;
+            // A real request needs a chosen model; the settings checks that follow describe a
+            // first run, so the profile is put back exactly as it was afterwards.
+            var firstRun = Json.Copy(shell.Store.Settings);
             var sizes = new[] {
                 new object[] { "default", 456.0, 620.0 }, new object[] { "compact", 360.0, 380.0 }
             };
             foreach (var size in sizes) {
+                string name = (string)size[0];
                 popup.Width = (double)size[1]; popup.Height = (double)size[2]; shell.UpdatePopupTypography();
-                Ui.Visible(Ui.Get<RichTextBox>(popup, "SourceText"), true);
-                Ui.Visible(Ui.Get<Border>(popup, "WordPanel"), true);
-                Ui.Visible(Ui.Get<Border>(popup, "ErrorPanel"), false);
-                Ui.Visible(Ui.Get<Grid>(popup, "BusyPanel"), false);
-                Ui.Visible(Ui.Get<Border>(popup, "InputPanel"), false);
-                Ui.Visible(Ui.Get<Grid>(popup, "SourceEditor"), false);
-                Capture(popup, folder, (string)size[0] + "-reading", checks);
+                var ask = Ui.Get<Button>(popup, "AskButton");
 
-                Ui.Visible(Ui.Get<Border>(popup, "InputPanel"), true);
+                // The reading page of a real record, entered through the demo path the
+                // application itself uses.
+                shell.PopulateDemo();
                 Layout(popup);
+                var record = shell.Current;
+                Check(Ui.Get<TextBlock>(popup, "TranslationCaption").Text == "译文" &&
+                    Ui.Get<Grid>(popup, "SourceEditor").Visibility == Visibility.Collapsed &&
+                    Ui.Get<RichTextBox>(popup, "SourceText").Visibility == Visibility.Visible &&
+                    Ui.Get<Border>(popup, "InputPanel").Visibility == Visibility.Collapsed,
+                    "The " + name + " reading state shows the translation caption, the original and no editor", checks);
+                Check(ask.Visibility == Visibility.Visible && ask.IsEnabled,
+                    "The " + name + " reading state keeps a visible, enabled follow-up entry", checks);
+                Check(Ui.Get<Border>(popup, "ChatPanel").Visibility == (record.Chat.Count > 0 ? Visibility.Visible : Visibility.Collapsed) &&
+                    Ui.Get<Border>(popup, "WordPanel").Visibility == Visibility.Visible,
+                    "The " + name + " reading state shows the selected word card and only the conversation that exists", checks);
+                Capture(popup, folder, name + "-reading", checks);
+
+                // Opening the follow-up is the production click the user makes.
+                ask.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                Layout(popup);
+                Check(Ui.Get<Border>(popup, "InputPanel").Visibility == Visibility.Visible &&
+                    ask.Visibility == Visibility.Collapsed &&
+                    Ui.Get<Button>(popup, "SendButton").Visibility == Visibility.Visible &&
+                    Ui.Get<Button>(popup, "SendButton").IsEnabled,
+                    "The " + name + " follow-up state is opened by its own entry, which steps aside while it is expanded", checks);
+                Check(!shell.Pinned, "Asking never pins the popup", checks);
                 var question = Ui.Get<TextBox>(popup, "QuestionInput");
                 var content = (FrameworkElement)popup.Content;
                 double questionBottom = question.TranslatePoint(new Point(0, question.ActualHeight), content).Y;
                 Check(question.ActualHeight > 0 && questionBottom <= content.ActualHeight,
-                    "The follow-up input fits inside the " + size[0] + " popup (" + questionBottom.ToString("0.#") + " of " + content.ActualHeight.ToString("0.#") + ")", checks);
+                    "The follow-up input fits inside the " + name + " popup (" + questionBottom.ToString("0.#") + " of " + content.ActualHeight.ToString("0.#") + ")", checks);
                 Check(Ui.Get<ScrollViewer>(popup, "BodyScroll").ActualHeight > 0,
                     "The body still scrolls to word cards and the conversation behind an expanded follow-up", checks);
-                Capture(popup, folder, (string)size[0] + "-followup", checks);
-                Ui.Visible(Ui.Get<Border>(popup, "InputPanel"), false);
+                Capture(popup, folder, name + "-followup", checks);
 
-                Ui.Visible(Ui.Get<Grid>(popup, "BusyPanel"), true);
-                Ui.Get<TextBlock>(popup, "BusyLabel").Text = "正在回答…";
-                Capture(popup, folder, (string)size[0] + "-sending", checks);
-                Ui.Visible(Ui.Get<Grid>(popup, "BusyPanel"), false);
+                // Collapsing it is the production click too, and the entry has to return: a
+                // reading page with no way to ask again is not a state the user can reach.
+                Ui.Get<Button>(popup, "CloseQuestionButton").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                Layout(popup);
+                Check(Ui.Get<Border>(popup, "InputPanel").Visibility == Visibility.Collapsed &&
+                    ask.Visibility == Visibility.Visible && ask.IsEnabled,
+                    "The " + name + " popup comes back to a reading page that still offers its follow-up entry", checks);
 
-                shell.ShowError("取词未完成，可重试或手动输入。", null);
-                Capture(popup, folder, (string)size[0] + "-error", checks);
-                Ui.Visible(Ui.Get<Border>(popup, "ErrorPanel"), false);
-
+                // The manual editor is the page the user opens, cleared by the user.
                 shell.BeginSourceEdit(false);
                 var editor = Ui.Get<TextBox>(popup, "SourceInput");
                 editor.Clear();
-                string emptyPath = Capture(popup, folder, (string)size[0] + "-input-empty", checks);
+                Layout(popup);
+                string emptyPath = Capture(popup, folder, name + "-input-empty", checks);
                 // An empty input must not paint the submit arrow; a filled one must.
                 Check(CountInk(emptyPath, 60, 140) == 0, "An empty input paints no submit arrow", checks);
                 editor.Text = "编辑中的原文示例";
-                string filledPath = Capture(popup, folder, (string)size[0] + "-input-filled", checks);
+                Layout(popup);
+                string filledPath = Capture(popup, folder, name + "-input-filled", checks);
                 Check(CountInk(filledPath, 60, 140) > 10, "A filled input paints the vector submit arrow", checks);
                 editor.Clear();
-                // Collapse the editor before rendering the follow-up state again.
-                Ui.Visible(Ui.Get<RichTextBox>(popup, "SourceText"), true);
-                Ui.Visible(Ui.Get<Grid>(popup, "SourceEditor"), false);
+
+                // A real request in flight: the fixture transport never answers, so the busy
+                // state in the image is the application waiting for its own request.
+                var configured = Json.Copy(shell.Store.Settings);
+                configured.Provider.Model = "fixture-model";
+                shell.Store.SaveSettings(configured);
+                int requests = transport.Requests;
+                shell.TranslateAsync("A render-state fixture sentence.", "选中文字", false);
+                Layout(popup);
+                Check(transport.Requests == requests + 1 &&
+                    Ui.Get<Grid>(popup, "BusyPanel").Visibility == Visibility.Visible &&
+                    Ui.Get<TextBlock>(popup, "BusyLabel").Text == "正在翻译…" &&
+                    Ui.Get<Button>(popup, "CancelButton").Visibility == Visibility.Visible,
+                    "The " + name + " sending state is a real translation in flight", checks);
+                Capture(popup, folder, name + "-sending", checks);
+
+                // A real stop through the same entry the user clicks.
+                shell.StopForRetry();
+                Layout(popup);
+                Check(Ui.Get<Grid>(popup, "BusyPanel").Visibility == Visibility.Collapsed &&
+                    Ui.Get<Border>(popup, "ErrorPanel").Visibility == Visibility.Visible &&
+                    Ui.Get<Button>(popup, "RetryButton").Visibility == Visibility.Visible &&
+                    Ui.Get<TextBlock>(popup, "ErrorText").Text.Contains("已停止"),
+                    "The " + name + " error state is a real stop that offers its retry entry", checks);
+                Capture(popup, folder, name + "-error", checks);
+
+                // Same-source recovery: the production path a repeated shortcut takes with a
+                // cleared draft. It has to return to the reading page without an API call.
+                var restored = TranslationRecord.Create("Her steady reading habit pays off.", "选中文字", shell.Store.Settings);
+                restored.Translation = "她稳定的阅读习惯带来了回报。"; restored.Completed = true;
+                restored.Chat.Add(new ChatTurn { Role = "user", Content = "夹具问题", Topic = "原句" });
+                restored.Chat.Add(new ChatTurn { Role = "assistant", Content = "夹具回答", Topic = "原句" });
+                shell.OpenRecord(restored);
+                shell.BeginSourceEdit(false);
+                editor.Clear();
+                int calls = transport.Requests;
+                shell.TranslateAsync(restored.Source, "选中文字", false).GetAwaiter().GetResult();
+                Layout(popup);
+                Check(ReferenceEquals(shell.Current, restored) && transport.Requests == calls,
+                    "Recovering the same text restores the existing record without another API call", checks);
+                Check(Ui.Get<TextBlock>(popup, "TranslationCaption").Text == "译文" &&
+                    Ui.Get<Grid>(popup, "SourceEditor").Visibility == Visibility.Collapsed &&
+                    ask.Visibility == Visibility.Visible && ask.IsEnabled,
+                    "The recovered " + name + " reading page shows the translation caption and its follow-up entry", checks);
+                Check(Ui.Get<Border>(popup, "ChatPanel").Visibility == (restored.Chat.Count > 0 ? Visibility.Visible : Visibility.Collapsed) &&
+                    Ui.Get<Border>(popup, "WordPanel").Visibility == Visibility.Collapsed &&
+                    Ui.Get<Border>(popup, "InputPanel").Visibility == Visibility.Collapsed,
+                    "The recovered " + name + " page shows the conversation it has and no word card that is not selected", checks);
+                Capture(popup, folder, name + "-restored", checks);
             }
+            // Leave the first-run profile and the demo record in place: the settings and history
+            // checks that follow expect them.
+            shell.Store.SaveSettings(firstRun);
+            shell.PopulateDemo();
             popup.Width = 456; popup.Height = 620; shell.UpdatePopupTypography();
             checks.Add("All popup states render at 456x620 and 360x380 across 96/120/144/192 DPI with exact output pixels");
         }
@@ -286,7 +362,13 @@ namespace Leaf
                     Check(Ui.Get<RichTextBox>(shell.Popup, "SourceText").Document.FontSize < 16, "Compact popup scales the FlowDocument source too", checks);
                     Check(Ui.Get<StackPanel>(shell.Popup, "LearningSections").Children.OfType<TextBlock>().All(x => x.FontSize >= 11), "Learning text has a readable minimum", checks);
                     Ui.Render(shell.Popup, Path.Combine(folder, "popup-small-question.png"));
-                    Ui.Visible(Ui.Get<Border>(shell.Popup, "InputPanel"), false);
+                    // The compact screenshot is the state the production collapse click leaves
+                    // behind, so it keeps the follow-up entry a user can still reach.
+                    Ui.Get<Button>(shell.Popup, "CloseQuestionButton").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                    Check(Ui.Get<Border>(shell.Popup, "InputPanel").Visibility == Visibility.Collapsed &&
+                        Ui.Get<Button>(shell.Popup, "AskButton").Visibility == Visibility.Visible &&
+                        Ui.Get<Button>(shell.Popup, "AskButton").IsEnabled,
+                        "Collapsing the follow-up restores the compact popup's follow-up entry", checks);
                     Ui.Render(shell.Popup, Path.Combine(folder, "popup-small.png"));
                     shell.Popup.Width = 700; shell.Popup.Height = 900; shell.UpdatePopupTypography();
                     Check(translation.FontSize == 17, "Large popup never excessively enlarges the text", checks);
@@ -295,7 +377,7 @@ namespace Leaf
                     Check(translation.FontSize == 17, "Resizing back restores the original typography without cumulative scaling", checks);
 
                     EditorState(shell, checks);
-                    RenderStates(shell, folder, checks);
+                    RenderStates(shell, transport, folder, checks);
 
                     var settings = new SettingsWindow(shell);
                     Check(Ui.Get<ComboBox>(settings.Window, "ProviderCombo").SelectedIndex == -1, "New users choose an endpoint explicitly rather than guessing from a key", checks);

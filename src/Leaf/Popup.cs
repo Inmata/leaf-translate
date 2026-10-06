@@ -313,7 +313,14 @@ namespace Leaf
             Ui.Visible(Ui.Get<Border>(Popup, "ErrorPanel"), true);
             Ui.Visible(Ui.Get<Button>(Popup, "RetryButton"), retryAction != null);
         }
-        private void ClearError() { retry = null; Ui.Visible(Ui.Get<Border>(Popup, "ErrorPanel"), false); }
+        private void ClearError()
+        {
+            retry = null;
+            Ui.Visible(Ui.Get<Border>(Popup, "ErrorPanel"), false);
+            // Without an error there is no retry entry either, so a later check can read the
+            // button's own state instead of the visibility of the panel hiding it.
+            Ui.Visible(Ui.Get<Button>(Popup, "RetryButton"), false);
+        }
         private string KeyFor(ProviderProfile provider) { return CredentialReader != null ? CredentialReader(provider) : NativeEnabled ? Credentials.Read(provider.Id) : "test-key"; }
 
         public async Task TranslateAsync(string text, string sourceKind, bool force)
