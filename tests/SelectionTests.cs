@@ -418,6 +418,34 @@ internal static class SelectionTests
                 "A refused copy injection reports its own Win32 error");
         }
 
+        // The last check before the injected copy reads the token again after the foreground
+        // getter, which can block on another application.
+        var lateModifiers = new ScriptedCopyHost();
+        using (var deadline = new CancellationTokenSource()) {
+            lateModifiers.OnForeground = () => { if (lateModifiers.ForegroundReads == 3) deadline.Cancel(); };
+            var outcome = Native.CopyOnSta(target, deadline, new List<CaptureStep>(), lateModifiers);
+            Check(lateModifiers.SendCalls == 0 && Step(outcome, "copy_send") == null && Step(outcome, "copy_wait") != null,
+                "Cancelling during the final foreground check still prevents the injected copy");
+            Check(outcome.Status == CaptureStatus.Cancelled && outcome.Text == "",
+                "A worker cancelled before injecting reports a cancelled capture");
+        }
+
+        // A cancellation that only arrives once the worker is already inside the restore path
+        // stops the write: this is a clipboard write of its own, decided with the state it can
+        // see at that moment rather than with the state it saw before the call.
+        var lateRestore = new ScriptedCopyHost();
+        using (var deadline = new CancellationTokenSource()) {
+            lateRestore.OnOwner = () => { if (lateRestore.OwnerReads == 3) deadline.Cancel(); };
+            var outcome = Native.CopyOnSta(target, deadline, new List<CaptureStep>(), lateRestore);
+            Check(lateRestore.RestoreCalls == 0 && lateRestore.EmptyRestoreCalls == 0,
+                "A cancellation that arrives inside the restore path writes nothing back");
+            Check(Step(outcome, "clipboard_restore") != null && !Step(outcome, "clipboard_restore").ClipboardChanged &&
+                Step(outcome, "clipboard_restore").Reason == CaptureReason.Cancelled,
+                "The restore the worker entered and declined is recorded as a cancelled restore");
+            Check(outcome.Status == CaptureStatus.Cancelled && outcome.Text == "" && lateRestore.ReadCalls == 1,
+                "A capture cancelled while restoring its clipboard reports Cancelled instead of the text it read");
+        }
+
         // A restore that fails is metadata, never a claimed success.
         var restoreFails = new ScriptedCopyHost { RestoreThrows = new System.Runtime.InteropServices.ExternalException("fixture restore failure", unchecked((int)0x800401D0)) };
         using (var deadline = new CancellationTokenSource()) {
@@ -593,10 +621,13 @@ internal sealed class ScriptedCopyHost : ICopyHost
     public int SequenceChangeAfterPauses = -1;
     public int PauseMs = 1;
     public Func<bool> Modifiers = () => false;
-    public Action OnRead, OnPause, OnOwner;
-    public int BackupCalls, RestoreCalls, EmptyRestoreCalls, SendCalls, ReadCalls, PauseCalls, OwnerReads;
+    public Action OnRead, OnPause, OnOwner, OnForeground;
+    public int BackupCalls, RestoreCalls, EmptyRestoreCalls, SendCalls, ReadCalls, PauseCalls, OwnerReads, ForegroundReads;
 
-    public IntPtr ForegroundWindow { get { return Foreground; } }
+    public IntPtr ForegroundWindow
+    {
+        get { ForegroundReads++; if (OnForeground != null) OnForeground(); return Foreground; }
+    }
     public uint ClipboardSequence { get { return Sequence; } }
     public uint ClipboardOwnerProcess
     {

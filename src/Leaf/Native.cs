@@ -259,6 +259,9 @@ namespace Leaf
             uint before = host.ClipboardSequence;
             if (Stopped(deadline.Token)) return Stopped(steps);
             if (host.ForegroundWindow != target.Window) return Stepped(CaptureStatus.Unavailable, CaptureReason.ForegroundChanged, steps);
+            // The last getter can block on another application, so the token is read once more
+            // immediately before the injected copy and never after it.
+            if (Stopped(deadline.Token)) return Stopped(steps);
 
             bool sent = host.SendCopy();
             steps.Add(new CaptureStep {
@@ -308,7 +311,10 @@ namespace Leaf
 
             // A cancelled worker stops here: the clipboard is never written after its deadline.
             if (Stopped(deadline.Token)) return Stopped(steps);
-            if (captured != 0) RestoreClipboard(target, host, previous, captured, steps, watch, ref mark);
+            if (captured != 0) RestoreClipboard(target, host, previous, captured, deadline.Token, steps, watch, ref mark);
+            // A restore that was itself interrupted leaves this invocation cancelled, so the
+            // text it happened to read is not handed on as a completed capture.
+            if (Stopped(deadline.Token)) return Stopped(steps);
 
             if (captured == 0)
                 return Stepped(CaptureStatus.Unavailable, sequenceMoved ? CaptureReason.ClipboardOriginUnknown : CaptureReason.CopyNoUpdate, steps);
@@ -324,7 +330,7 @@ namespace Leaf
         // is recorded with its own metadata: a restore that did not happen is never reported
         // as a successful one.
         private static void RestoreClipboard(CaptureTarget target, ICopyHost host, ClipboardBackup previous,
-            uint captured, List<CaptureStep> steps, Stopwatch watch, ref long mark)
+            uint captured, CancellationToken cancellation, List<CaptureStep> steps, Stopwatch watch, ref long mark)
         {
             if (previous == null) {
                 steps.Add(new CaptureStep { Stage = "clipboard_restore", Reason = CaptureReason.ClipboardOriginUnknown,
@@ -333,10 +339,19 @@ namespace Leaf
             }
             // A write of its own, so it is decided with the state the clipboard has now: text
             // another process put there in the meantime must survive instead of being replaced
-            // by a backup that no longer describes this clipboard.
+            // by a backup that no longer describes this clipboard. The getters can block on
+            // another application, so the whole decision - including the token - is taken after
+            // them and immediately before the write.
             bool foregroundSame = host.ForegroundWindow == target.Window;
             bool originTrusted = WindowsSelectionProbe.CanTrustOrigin(host.ClipboardOwnerProcess, target.ProcessId);
-            if (!WindowsSelectionProbe.CanRestoreCopy(captured, host.ClipboardSequence, foregroundSame, originTrusted)) {
+            uint current = host.ClipboardSequence;
+            bool cancelled = Stopped(cancellation);
+            if (cancelled) {
+                steps.Add(new CaptureStep { Stage = "clipboard_restore", Reason = CaptureReason.Cancelled,
+                    ClipboardChanged = false, ForegroundSame = foregroundSame, ElapsedMs = Next(watch, ref mark) });
+                return;
+            }
+            if (!WindowsSelectionProbe.CanRestoreCopy(captured, current, foregroundSame, originTrusted)) {
                 steps.Add(new CaptureStep { Stage = "clipboard_restore",
                     Reason = !originTrusted ? CaptureReason.ClipboardOriginUnknown
                         : foregroundSame ? CaptureReason.CopyNoUpdate : CaptureReason.ForegroundChanged,
