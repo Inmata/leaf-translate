@@ -339,7 +339,7 @@
     <Setter Property="IsUndoEnabled" Value="False"/>
     <Setter Property="BorderThickness" Value="0"/><Setter Property="Background" Value="Transparent"/>
     <Setter Property="Padding" Value="0"/><Setter Property="IsReadOnly" Value="True"/>
-    <Setter Property="IsDocumentEnabled" Value="True"/><Setter Property="TextAlignment" Value="Left"/>
+    <Setter Property="IsDocumentEnabled" Value="True"/>
     <Setter Property="VerticalScrollBarVisibility" Value="Disabled"/>
     <Setter Property="HorizontalScrollBarVisibility" Value="Disabled"/><Setter Property="MinHeight" Value="0"/>
     <Setter Property="SelectionBrush" Value="#BACCDD"/>

@@ -194,7 +194,7 @@
                   <!-- The entry, the meaning, the part of speech and lemma, and every section
                        heading and body are paragraphs of this one read-only flow: a drag that
                        starts on a heading runs straight on into the content it belongs to. -->
-                  <RichTextBox x:Name="WordCard" Style="{StaticResource ReadingText}" FontSize="16" TextAlignment="Left" AutomationProperties.Name="学习词卡">
+                  <RichTextBox x:Name="WordCard" Style="{StaticResource ReadingText}" FontSize="16" AutomationProperties.Name="学习词卡">
                     <FlowDocument PagePadding="0" FontFamily="{StaticResource PaperFontFamily}" FontSize="16" TextAlignment="Left"/>
                   </RichTextBox>
                   <!-- The collapse entry shares the entry's first line at one step up from the
@@ -219,18 +219,15 @@
                 <Viewbox Width="21" Height="21" Margin="0,0,10,0" VerticalAlignment="Center">
                   <!-- A round follow-up bubble with its tail at the lower left, matching the
                        paper's rounded forms; the shared ChatOutline stays square-cornered.
-                       The bubble is drawn on the same 24-unit square as the top-bar glyphs,
-                       and its own leftmost point sits at 3.5 of that square, so the path is
-                       pulled 3.5 units left inside the canvas: the drawn left edge then lands
-                       on the canvas edge, which is what lines the icon up with the body text
-                       under it. Only the path moves - the entry's own box, margin and the
-                       label beside it keep their place inside the button. -->
-                  <Canvas Width="24" Height="24">
+                       The 21-unit canvas keeps the drawing at its authored scale. Account
+                       for the half-stroke at the left edge and centre the visible outline
+                       vertically, so no stroke extends beyond the canvas. -->
+                  <Canvas Width="21" Height="21">
                     <Path Data="M12,3.5 C16.7,3.5 20.5,7 20.5,11.5 C20.5,16 16.7,19.5 12,19.5 C10.6,19.5 9.3,19.2 8.1,18.6 L3.5,20.5 L5.4,16.2 C4.2,14.9 3.5,13.3 3.5,11.5 C3.5,7 7.3,3.5 12,3.5 Z"
                           Stroke="{StaticResource Secondary}"
                           StrokeThickness="1.5" StrokeStartLineCap="Round"
                           StrokeEndLineCap="Round" StrokeLineJoin="Round">
-                      <Path.RenderTransform><TranslateTransform X="-3.5"/></Path.RenderTransform>
+                      <Path.RenderTransform><TranslateTransform X="-2.75" Y="-1.5"/></Path.RenderTransform>
                     </Path>
                   </Canvas>
                 </Viewbox>
