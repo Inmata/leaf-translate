@@ -38,11 +38,11 @@ Source text is limited to 6000 UTF-16 code units per request. Split long passage
 
 ## Type and copy text
 
-When nothing is captured, the shortcut opens a source editor immediately, ready for manual input without a generic error, and without discarding an existing translation. With existing text, use the pencil beside the source or enable direct input. Press `Enter` or the arrow button at the right of the input to submit a new conversation; `Shift+Enter` inserts a new line. `Esc` exits editing and restores the original display.
+When nothing is captured, the shortcut quietly reopens the popup and preserves its current page, translation, and draft without entering editing. Click the source pencil when ready for manual input. Successful captures focus the source only when direct input is enabled. `Enter` or the arrow button submits a new conversation; `Shift+Enter` inserts a new line. `Esc` exits editing and restores the source display.
 
-On the shortcut: a confirmed empty selection is not an error and only prepares manual input. When the selection could not be read, the source badge says no selection was captured and its tooltip gives the reason. Pressing the shortcut again on the same text returns to the existing translation, word card and follow-up draft without repeating the request or adding an API call, including after clearing the editor without submitting. An edited but unsubmitted draft is kept rather than overwritten.
+On the shortcut: a confirmed empty selection is not an error and preserves the page. When the selection could not be read, the source badge says no selection was captured and its tooltip gives the reason. Invoking the shortcut on the same text restores the translation, word card, and follow-up draft without repeating the request or adding an API call, including after clearing the editor without submitting. An edited but unsubmitted draft is kept.
 
-Select translated text and press `Ctrl+C`, or use its copy context menu. `Ctrl+A` selects all. Clipboard contention produces a visible error without blocking the UI. There is no separate copy button. Ask is at the lower left; its input can be collapsed.
+Translation and learning headings/body support continuous selection and `Ctrl+C` or the copy context menu. `Ctrl+A` selects the document. Select different text inside Leaf and invoke the shortcut to start a child conversation; the return entry restores its root, word card, and draft. Matching the current source does not create another session. The settings button opens a page inside the same popup; click it again or use Return to resume reading without losing content. Ask is at the lower left; its input can be collapsed.
 
 ## Explore words and phrases
 
@@ -70,7 +70,7 @@ Expand **Add a learning preference (添加自己的学习偏好)** to provide a 
 
 ## Window and desktop preferences
 
-The popup preserves focus by default. Enable Direct input on shortcut (快捷键唤起后直接输入) to focus and select the source after capture. The gear beside the pin opens settings. Clicking outside hides an unpinned window; pinning keeps it visible. The hide button remains available when pinned.
+The popup preserves focus by default. Enable Direct input on shortcut (快捷键唤起后直接输入) to focus and select the source after capture. The settings button beside the pin toggles the settings page inside the popup. Clicking outside hides an unpinned window; pinning keeps it visible. The hide button remains available when pinned.
 
 The first popup appears on the right of the primary display. Moving and resizing automatically saves the last position and size for subsequent shortcuts and restarts. Retry keeps a visible popup in place. Drag to a secondary monitor directly; if it is removed or the work area shrinks, Leaf brings the popup into an available area.
 

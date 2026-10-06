@@ -81,11 +81,11 @@ public static class WindowsNativeTests
             using (var transport = new FixtureTransport())
             using (var shell = new AppShell(store, true, new LlmClient(transport))) {
                 var window = new SettingsWindow(shell);
-                Ui.Get<ComboBox>(window.Window, "ProviderCombo").SelectedIndex = 2;
-                Ui.Get<ComboBox>(window.Window, "ModelInput").Text = "fixture-model";
-                Ui.Get<PasswordBox>(window.Window, "ApiKeyInput").Password = sampleKey;
-                Ui.Get<TextBox>(window.Window, "ShortcutInput").Text = "alt + space";
-                Ui.Get<Button>(window.Window, "SaveSettingsButton").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                Ui.Get<ComboBox>(window.Panel, "ProviderCombo").SelectedIndex = 2;
+                Ui.Get<ComboBox>(window.Panel, "ModelInput").Text = "fixture-model";
+                Ui.Get<PasswordBox>(window.Panel, "ApiKeyInput").Password = sampleKey;
+                Ui.Get<TextBox>(window.Panel, "ShortcutInput").Text = "alt + space";
+                Ui.Get<Button>(window.Panel, "SaveSettingsButton").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
                 await shell.WaitForSettingsAsync();
                 string chosenId = settings.Providers[2].Id;
                 Check(store.Settings.ProviderId == chosenId, "The chosen provider is saved with its API key");
@@ -93,28 +93,28 @@ public static class WindowsNativeTests
                 Check(Credentials.Read(chosenProfile) == sampleKey && Credentials.Read(store.Settings.Providers[0]) == "",
                     "Credential Manager retains a Unicode key under the endpoint-bound provider target");
                 Check(!File.ReadAllText(Path.Combine(folder, "settings.json")).Contains(sampleKey), "Native credential saving never writes the key into local settings");
-                Check(Ui.Get<PasswordBox>(window.Window, "ApiKeyInput").Password.Length == 0 &&
-                    Ui.Get<TextBlock>(window.Window, "KeyPlaceholder").Text.Replace(" ", "") == "●●●●●●●●" &&
-                    Ui.Get<TextBlock>(window.Window, "KeyHint").Text.Contains("已保存密钥"), "Applying a key clears the editor, shows only password dots and places its saved status below");
+                Check(Ui.Get<PasswordBox>(window.Panel, "ApiKeyInput").Password.Length == 0 &&
+                    Ui.Get<StackPanel>(window.Panel, "KeyDots").Visibility == Visibility.Visible && Ui.Get<StackPanel>(window.Panel, "KeyDots").Children.Count == 8 &&
+                    Ui.Get<TextBlock>(window.Panel, "KeyHint").Text.Contains("密钥已保存"), "Applying a key clears the editor, shows only password dots and places its saved status below");
                 window.Window.Close();
                 await shell.WaitForSettingsAsync();
                 window = new SettingsWindow(shell);
-                Check(((ProviderProfile)Ui.Get<ComboBox>(window.Window, "ProviderCombo").SelectedItem).Id == chosenId &&
-                    Ui.Get<TextBlock>(window.Window, "KeyHint").Text.Contains("已保存密钥"), "Reopened settings recognize the saved key for the active provider");
-                var keyEditor = Ui.Get<PasswordBox>(window.Window, "ApiKeyInput");
-                var mask = Ui.Get<TextBlock>(window.Window, "KeyPlaceholder");
+                Check(((ProviderProfile)Ui.Get<ComboBox>(window.Panel, "ProviderCombo").SelectedItem).Id == chosenId &&
+                    Ui.Get<TextBlock>(window.Panel, "KeyHint").Text.Contains("密钥已保存"), "Reopened settings recognize the saved key for the active provider");
+                var keyEditor = Ui.Get<PasswordBox>(window.Panel, "ApiKeyInput");
+                var mask = Ui.Get<StackPanel>(window.Panel, "KeyDots");
                 Check(keyEditor.Password.Length == 0 && keyEditor.PasswordChar == '●' && mask.Visibility == Visibility.Visible,
                     "Reopened saved credentials are represented by a visible separate dot mask, never filled back into the password editor");
                 keyEditor.Password = "replacement-fixture";
                 Check(mask.Visibility == Visibility.Collapsed && Credentials.Read(chosenProfile) == sampleKey,
                     "Typing a replacement hides the mask and keeps the saved key until explicitly applied");
                 keyEditor.Clear();
-                Check(mask.Visibility == Visibility.Visible && !mask.Text.Contains("已保存") && mask.Text.Replace(" ", "") == "●●●●●●●●",
+                Check(mask.Visibility == Visibility.Visible && mask.Children.Count == 8 && mask.Children.Cast<System.Windows.Shapes.Ellipse>().All(dot => dot.Fill != null),
                     "Clearing an uncommitted replacement restores a dots-only placeholder");
-                Ui.Get<Button>(window.Window, "SaveSettingsButton").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                Ui.Get<Button>(window.Panel, "SaveSettingsButton").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
                 await shell.WaitForSettingsAsync();
                 Check(Credentials.Read(chosenProfile) == sampleKey, "Saving with a blank password preserves the existing credential");
-                Ui.Get<ComboBox>(window.Window, "ModelInput").Text = "fixture-model-2"; await Task.Delay(650);
+                Ui.Get<ComboBox>(window.Panel, "ModelInput").Text = "fixture-model-2"; await Task.Delay(650);
                 await shell.WaitForSettingsAsync();
                 Check(store.Settings.Provider.Model == "fixture-model-2" && Credentials.Read(store.Settings.Provider) == sampleKey,
                     "Model auto-apply preserves the saved native key");
@@ -122,7 +122,13 @@ public static class WindowsNativeTests
                 await shell.WaitForSettingsAsync();
 
                 window = new SettingsWindow(shell); window.Window.Show(); window.Window.Activate();
-                var recorder = Ui.Get<TextBox>(window.Window, "ShortcutInput");
+                var recorder = Ui.Get<TextBox>(window.Panel, "ShortcutInput");
+                // The recorder is inside the collapsed desktop-preferences section.
+                for (DependencyObject parent = recorder; parent != null; parent = LogicalTreeHelper.GetParent(parent)) {
+                    var expander = parent as Expander;
+                    if (expander != null) expander.IsExpanded = true;
+                }
+                window.Window.UpdateLayout(); recorder.BringIntoView();
                 recorder.Focus(); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
                 var registrationField = typeof(AppShell).GetField("shortcutRegistration", BindingFlags.Instance | BindingFlags.NonPublic);
                 Check(recorder.IsKeyboardFocused && recorder.IsReadOnly && recorder.Text.Contains("请按下") && registrationField.GetValue(shell) == null,
