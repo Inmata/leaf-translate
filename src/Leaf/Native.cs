@@ -90,8 +90,14 @@ namespace Leaf
     public interface ICopyHost
     {
         IntPtr ForegroundWindow { get; }
+        // The window the foreground thread's keyboard focus is on, zero when Windows did not
+        // report one. This is the window a simulated copy really reaches.
+        IntPtr FocusedWindow { get; }
         uint ClipboardSequence { get; }
         uint ClipboardOwnerProcess { get; }
+        // The clipboard owner's window, zero when the clipboard has no owner. A WebView2 copy
+        // is owned by its browser process, so this window is what proves it belongs here.
+        IntPtr ClipboardOwnerWindow { get; }
         int SendError { get; }
         bool ModifiersHeld();
         void Pause(int milliseconds);
@@ -112,6 +118,13 @@ namespace Leaf
         }
         [StructLayout(LayoutKind.Sequential)] private struct MouseInput { public int X, Y; public uint Data, Flags, Time; public IntPtr Extra; }
         [StructLayout(LayoutKind.Sequential)] private struct KeyboardInput { public ushort Key, Scan; public uint Flags, Time; public IntPtr Extra; }
+        // The subset of GUITHREADINFO the copy worker needs: the window this thread's keyboard
+        // focus is on. Read only, and never to look at what is written in it.
+        [StructLayout(LayoutKind.Sequential)] private struct GuiThreadInfo {
+            public int Size; public uint Flags;
+            public IntPtr Active, Focus, Capture, MenuOwner, MoveSize, Caret;
+            public Rect CaretRect;
+        }
         public delegate IntPtr HookProc(int code, IntPtr message, IntPtr data);
         [DllImport("user32.dll", SetLastError = true)] public static extern bool RegisterHotKey(IntPtr window, int id, uint modifiers, uint key);
         [DllImport("user32.dll")] public static extern bool UnregisterHotKey(IntPtr window, int id);
@@ -127,6 +140,7 @@ namespace Leaf
         [DllImport("user32.dll")] public static extern uint GetClipboardSequenceNumber();
         [DllImport("user32.dll")] private static extern IntPtr GetClipboardOwner();
         [DllImport("user32.dll")] private static extern bool IsClipboardFormatAvailable(uint format);
+        [DllImport("user32.dll", SetLastError = true)] private static extern bool GetGUIThreadInfo(uint thread, ref GuiThreadInfo info);
         [DllImport("user32.dll")] private static extern short GetAsyncKeyState(int key);
         [DllImport("user32.dll", SetLastError = true)] private static extern uint SendInput(uint count, Input[] inputs, int size);
         [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(Point point);
@@ -212,11 +226,16 @@ namespace Leaf
         // caller gave up still sees a revoked token and never injects a late copy.
         public static Task<SelectionCaptureResult> CopySelectionAsync(CaptureTarget target, CancellationToken cancellation)
         {
-            return CopySelectionAsync(target, cancellation, new DesktopCopyHost());
+            return CopySelectionAsync(target, cancellation, new DesktopCopyHost(), WindowOwnership.Native);
         }
         // The same worker against a supplied host, so a scripted desktop can exercise the
         // real sequence, ownership, cancellation and restore rules.
         public static Task<SelectionCaptureResult> CopySelectionAsync(CaptureTarget target, CancellationToken cancellation, ICopyHost host)
+        {
+            return CopySelectionAsync(target, cancellation, host, WindowOwnership.Native);
+        }
+        public static Task<SelectionCaptureResult> CopySelectionAsync(CaptureTarget target, CancellationToken cancellation,
+            ICopyHost host, IWindowOwnership ownership)
         {
             if (host == null) throw new ArgumentNullException("host");
             if (Stopped(cancellation))
@@ -228,7 +247,7 @@ namespace Leaf
             var worker = new Thread(() => {
                 var steps = new List<CaptureStep>();
                 SelectionCaptureResult outcome;
-                try { outcome = CopyOnSta(target, deadline, steps, host); }
+                try { outcome = CopyOnSta(target, deadline, steps, host, ownership); }
                 catch (Exception error) { outcome = CopyFailure(error, steps); }
                 finally { Interlocked.Exchange(ref captureRunning, 0); }
                 completion.TrySetResult(outcome);
@@ -250,7 +269,13 @@ namespace Leaf
         // host can exercise them: no real clipboard, keyboard or foreground is involved.
         public static SelectionCaptureResult CopyOnSta(CaptureTarget target, CancellationTokenSource deadline, List<CaptureStep> steps, ICopyHost host)
         {
+            return CopyOnSta(target, deadline, steps, host, WindowOwnership.Native);
+        }
+        public static SelectionCaptureResult CopyOnSta(CaptureTarget target, CancellationTokenSource deadline,
+            List<CaptureStep> steps, ICopyHost host, IWindowOwnership ownership)
+        {
             if (host == null) throw new ArgumentNullException("host");
+            ownership = ownership ?? WindowOwnership.Native;
             var watch = Stopwatch.StartNew();
             long mark = 0;
             // Wait for the shortcut keys to come up, but never release the user's own keys.
@@ -281,9 +306,34 @@ namespace Leaf
             // decides whether the saved clipboard still describes the one about to be replaced.
             uint before = host.ClipboardSequence;
             if (previous != null && !WindowsSelectionProbe.CanKeepBackup(backedUpAt, before)) previous = null;
+
+            // Everything the injected copy depends on is re-checked as late as possible before
+            // the keys are sent: the clipboard backup above can block on another application,
+            // so the user's keys may have come down again and the keyboard focus may have left
+            // the captured window. The keys are never released and nothing is retried - a state
+            // that would send this copy somewhere else stops it instead.
+            bool releasedNow;
+            try { releasedNow = !host.ModifiersHeld(); } catch { releasedNow = false; }
+            IntPtr focusWindow;
+            try { focusWindow = host.FocusedWindow; } catch { focusWindow = IntPtr.Zero; }
+            bool focusChecked = focusWindow != IntPtr.Zero;
+            bool focusOwned = focusChecked && WindowOwnership.Contains(ownership, target == null ? IntPtr.Zero : target.Window, focusWindow);
+            bool foregroundNow;
+            try { foregroundNow = host.ForegroundWindow == target.Window; } catch { foregroundNow = false; }
+            steps.Add(new CaptureStep {
+                Stage = "copy_focus",
+                Reason = !releasedNow ? CaptureReason.ModifiersHeld
+                    : !foregroundNow ? CaptureReason.ForegroundChanged
+                    : focusChecked && !focusOwned ? CaptureReason.FocusNotOwned : CaptureReason.None,
+                ModifiersReleased = releasedNow, ForegroundSame = foregroundNow,
+                FocusChecked = focusChecked, FocusOwned = focusOwned, ElapsedMs = Next(watch, ref mark)
+            });
             // The getters above can block on another application, so the token is read once more
             // immediately before the injected copy and never after it.
             if (Stopped(deadline.Token)) return Stopped(steps);
+            if (!releasedNow) return Stepped(CaptureStatus.Unavailable, CaptureReason.ModifiersHeld, steps);
+            if (!foregroundNow) return Stepped(CaptureStatus.Unavailable, CaptureReason.ForegroundChanged, steps);
+            if (focusChecked && !focusOwned) return Stepped(CaptureStatus.Unavailable, CaptureReason.FocusNotOwned, steps);
 
             bool sent = host.SendCopy();
             steps.Add(new CaptureStep {
@@ -293,11 +343,13 @@ namespace Leaf
             });
             if (!sent) return Stepped(CaptureStatus.Failed, CaptureReason.InputDenied, steps);
 
-            // Only a new sequence owned by the captured process may be read as this copy, and
-            // the same constraints are checked again after the read: a slow clipboard read
-            // must not hand the worker text the user copied in the meantime.
+            // Only a new sequence owned by the captured process - or by a window it verifiably
+            // contains - may be read as this copy, and the same constraints are checked again
+            // after the read: a slow clipboard read must not hand the worker text the user
+            // copied in the meantime.
             uint captured = 0; string text = ""; Exception readError = null;
-            bool sequenceMoved = false, textRaced = false;
+            bool sequenceMoved = false, textRaced = false, ownerWindowVerified = false;
+            uint ownerProcess = 0;
             var copyWatch = Stopwatch.StartNew();
             while (copyWatch.ElapsedMilliseconds < 400) {
                 host.Pause(20);
@@ -306,14 +358,16 @@ namespace Leaf
                 sequenceMoved = true;
                 bool foregroundSame = host.ForegroundWindow == target.Window;
                 if (!WindowsSelectionProbe.CanReadFreshCopy(before, observed, foregroundSame, Stopped(deadline.Token))) break;
-                if (!WindowsSelectionProbe.CanTrustOrigin(host.ClipboardOwnerProcess, target.ProcessId)) continue;
+                bool verified;
+                if (!TrustedOrigin(host, target, ownership, out verified, out ownerProcess)) { ownerWindowVerified = verified; continue; }
+                ownerWindowVerified = verified;
                 captured = observed;
                 try { text = host.ReadClipboardText(); readError = null; }
                 catch (Exception error) { text = ""; readError = error; }
                 // The owner is part of "this is my copy": content that changed hands while it
                 // was being read is not this selection, and it is not restored over either.
                 if (host.ClipboardSequence != captured ||
-                    !WindowsSelectionProbe.CanTrustOrigin(host.ClipboardOwnerProcess, target.ProcessId) ||
+                    !TrustedOrigin(host, target, ownership, out verified, out ownerProcess) ||
                     host.ForegroundWindow != target.Window || Stopped(deadline.Token)) {
                     // The clipboard moved on while reading: what came back is not this copy.
                     text = ""; readError = null; textRaced = true; break;
@@ -329,12 +383,13 @@ namespace Leaf
                     : readFailed ? CaptureReason.ClipboardBusy : CaptureReason.None,
                 HResult = readFailed ? readError.HResult : 0,
                 ClipboardChanged = captured != 0, ForegroundSame = host.ForegroundWindow == target.Window,
+                ClipboardOwnerProcess = ownerProcess, OwnerWindowVerified = ownerWindowVerified,
                 ElapsedMs = Next(watch, ref mark)
             });
 
             // A cancelled worker stops here: the clipboard is never written after its deadline.
             if (Stopped(deadline.Token)) return Stopped(steps);
-            if (captured != 0) RestoreClipboard(target, host, previous, captured, deadline.Token, steps, watch, ref mark);
+            if (captured != 0) RestoreClipboard(target, host, previous, captured, deadline.Token, steps, watch, ref mark, ownership);
             // A restore that was itself interrupted leaves this invocation cancelled, so the
             // text it happened to read is not handed on as a completed capture.
             if (Stopped(deadline.Token)) return Stopped(steps);
@@ -353,7 +408,8 @@ namespace Leaf
         // is recorded with its own metadata: a restore that did not happen is never reported
         // as a successful one.
         private static void RestoreClipboard(CaptureTarget target, ICopyHost host, ClipboardBackup previous,
-            uint captured, CancellationToken cancellation, List<CaptureStep> steps, Stopwatch watch, ref long mark)
+            uint captured, CancellationToken cancellation, List<CaptureStep> steps, Stopwatch watch, ref long mark,
+            IWindowOwnership ownership)
         {
             if (previous == null) {
                 steps.Add(new CaptureStep { Stage = "clipboard_restore", Reason = CaptureReason.ClipboardOriginUnknown,
@@ -366,7 +422,8 @@ namespace Leaf
             // another application, so the whole decision - including the token - is taken after
             // them and immediately before the write.
             bool foregroundSame = host.ForegroundWindow == target.Window;
-            bool originTrusted = WindowsSelectionProbe.CanTrustOrigin(host.ClipboardOwnerProcess, target.ProcessId);
+            bool windowVerified; uint ownerProcess;
+            bool originTrusted = TrustedOrigin(host, target, ownership, out windowVerified, out ownerProcess);
             uint current = host.ClipboardSequence;
             bool cancelled = Stopped(cancellation);
             if (cancelled) {
@@ -388,6 +445,24 @@ namespace Leaf
                 Reason = restored ? CaptureReason.None : CaptureReason.ClipboardBusy,
                 ClipboardChanged = restored, HResult = error, ForegroundSame = foregroundSame,
                 ElapsedMs = Next(watch, ref mark) });
+        }
+
+        // The clipboard owner is either the captured process itself, or a window the captured
+        // window verifiably contains: a WebView2 copy is owned by its browser process even
+        // though the window belongs to the captured one. The window class is what proves that;
+        // no process tree and no process id is trusted on its own. The owner process is handed
+        // back as metadata, and is never read twice for it.
+        private static bool TrustedOrigin(ICopyHost host, CaptureTarget target, IWindowOwnership ownership,
+            out bool windowVerified, out uint ownerProcess)
+        {
+            windowVerified = false;
+            try { ownerProcess = host.ClipboardOwnerProcess; } catch { ownerProcess = 0; }
+            if (WindowsSelectionProbe.CanTrustOrigin(ownerProcess, target == null ? 0u : target.ProcessId)) return true;
+            if (ownerProcess == 0 || target == null) return false;
+            IntPtr window;
+            try { window = host.ClipboardOwnerWindow; } catch { window = IntPtr.Zero; }
+            windowVerified = WindowOwnership.IsVerifiedHostWindow(ownership, target.Window, window);
+            return windowVerified;
         }
 
         // Stage durations are differences of one stopwatch, so the log's total is their sum
@@ -415,6 +490,18 @@ namespace Leaf
             if (owner == IntPtr.Zero) return 0;
             uint process; GetWindowThreadProcessId(owner, out process);
             return process;
+        }
+        // The keyboard focus of the foreground thread: the window a simulated copy reaches.
+        // Zero means Windows did not report one, which is unknown rather than "somewhere else".
+        private static IntPtr ForegroundFocusWindow()
+        {
+            IntPtr foreground = GetForegroundWindow();
+            if (foreground == IntPtr.Zero) return IntPtr.Zero;
+            uint process; uint thread = GetWindowThreadProcessId(foreground, out process);
+            if (thread == 0) return IntPtr.Zero;
+            var info = new GuiThreadInfo { Size = Marshal.SizeOf(typeof(GuiThreadInfo)) };
+            if (!GetGUIThreadInfo(thread, ref info)) return IntPtr.Zero;
+            return info.Focus;
         }
         private static bool Stopped(CancellationToken token)
         {
@@ -501,8 +588,10 @@ namespace Leaf
         {
             private int sendError;
             public IntPtr ForegroundWindow { get { return GetForegroundWindow(); } }
+            public IntPtr FocusedWindow { get { return ForegroundFocusWindow(); } }
             public uint ClipboardSequence { get { return GetClipboardSequenceNumber(); } }
             public uint ClipboardOwnerProcess { get { return OwnerProcess(); } }
+            public IntPtr ClipboardOwnerWindow { get { return GetClipboardOwner(); } }
             public int SendError { get { return sendError; } }
             public bool ModifiersHeld() { return ModifierKeysDown(); }
             public void Pause(int milliseconds) { Thread.Sleep(milliseconds); }

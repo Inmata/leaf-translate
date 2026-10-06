@@ -118,10 +118,13 @@ internal static class SelectionTests
         await StagesRetained(reader, probe);
         await Diagnostics(reader, probe);
         CopyStateMachine();
+        OwnershipRules();
         await CopyWorker();
         ClipboardBackups();
         await BoundedTraversal();
+        await CrossProcessOwnership();
         SelectionAnswers();
+        assertions += InternalSelectionTests.Run();
         return count + assertions;
     }
 
@@ -333,6 +336,104 @@ internal static class SelectionTests
         var answeredText = WindowsSelectionProbe.ReadSelectionAnswer(() => new object[] { "one ", "two" }, range => (string)range);
         Check(answeredText.Text == "one two" && !answeredText.Unreadable,
             "The ranges that answered are joined into the selection text");
+
+        // The provider's own pattern surface: TextPattern is asked for first, and a provider
+        // that only exposes TextPattern2 still answers instead of looking like no pattern.
+        Check((string)WindowsSelectionProbe.ChooseTextPattern(() => "text", () => "text2") == "text",
+            "The selection read asks for TextPattern first");
+        Check((string)WindowsSelectionProbe.ChooseTextPattern(() => null, () => "text2") == "text2",
+            "A provider that exposes only TextPattern2 still answers");
+        Check(WindowsSelectionProbe.ChooseTextPattern(() => null, () => null) == null &&
+            WindowsSelectionProbe.ChooseTextPattern(null, () => "text2") == null,
+            "A control with neither text pattern stays no candidate");
+    }
+
+    // The window identity behind the cross-process exception: native containment plus a
+    // verified WebView host class. Nothing else - no process id, no process tree - qualifies.
+    private static void OwnershipRules()
+    {
+        var ownership = new ScriptedWindowOwnership();
+        ownership.Child(123, 321); ownership.Class(321, "Chrome_WidgetWin_1");
+        Check(WindowOwnership.Contains(ownership, new IntPtr(123), new IntPtr(123)),
+            "The captured window contains itself");
+        Check(WindowOwnership.Contains(ownership, new IntPtr(123), new IntPtr(321)),
+            "A window that hangs natively under the captured one belongs to it");
+        Check(!WindowOwnership.Contains(ownership, new IntPtr(123), new IntPtr(777)) &&
+            !WindowOwnership.Contains(ownership, IntPtr.Zero, new IntPtr(321)) &&
+            !WindowOwnership.Contains(ownership, new IntPtr(123), IntPtr.Zero),
+            "A window the captured one does not contain is not part of it");
+        Check(WindowOwnership.IsVerifiedHostWindow(ownership, new IntPtr(123), new IntPtr(321)),
+            "A verified WebView host window inside the captured window is accepted");
+        Check(!WindowOwnership.IsVerifiedHostWindow(ownership, new IntPtr(123), new IntPtr(123)),
+            "The captured window is not a host boundary of its own");
+        var plainClass = new ScriptedWindowOwnership();
+        plainClass.Child(123, 321); plainClass.Class(321, "HwndWrapper[Other.exe]");
+        Check(!WindowOwnership.IsVerifiedHostWindow(plainClass, new IntPtr(123), new IntPtr(321)),
+            "A contained window of another class is not a verified host identity");
+        var unrelated = new ScriptedWindowOwnership();
+        unrelated.Class(321, "Chrome_WidgetWin_1");
+        Check(!WindowOwnership.IsVerifiedHostWindow(unrelated, new IntPtr(123), new IntPtr(321)),
+            "A WebView class outside the captured window proves nothing");
+    }
+
+    // The reported Codeg failure: the page inside the captured window is hosted by another
+    // process. Only the verified host window may bridge that, and only for its own content.
+    private static async Task CrossProcessOwnership()
+    {
+        var target = new CaptureTarget { Window = new IntPtr(123), ProcessId = 456 };
+        var ownership = new ScriptedWindowOwnership();
+        ownership.Child(123, 321); ownership.Class(321, "Chrome_WidgetWin_1");
+
+        // The focused document is in the host process; its chain reaches the verified WebView
+        // host window that hangs natively under the captured window.
+        var focusedTree = new ScriptedUiTree();
+        focusedTree.WindowRoot = new ScriptedUiNode { ControlTypeIdValue = 50033, Selection = null, WindowHandle = 123 };
+        var host = new ScriptedUiNode { ControlTypeIdValue = 50033, Selection = null, WindowHandle = 321, ProcessIdValue = 999 };
+        var page = host.Add(new ScriptedUiNode { ControlTypeIdValue = WindowsSelectionProbe.DocumentTypeId, Selection = "page selection", ProcessIdValue = 999 });
+        focusedTree.Focus = page;
+        var focusedResult = await new WindowsSelectionProbe(focusedTree, ownership).ReadAutomationAsync(target, CancellationToken.None);
+        Check(focusedResult.Status == CaptureStatus.Text && focusedResult.Text == "page selection",
+            "A WebView page inside the captured window answers across its process boundary (was " + focusedResult.Status + "/" + focusedResult.Reason + ")");
+
+        // The same when the focus never leaves the host window: the walk enters the verified
+        // WebView content and reads the page inside it.
+        var walkTree = new ScriptedUiTree();
+        var walkRoot = walkTree.WindowRoot = new ScriptedUiNode { ControlTypeIdValue = 50033, Selection = null, WindowHandle = 123 };
+        var walkHost = walkRoot.Add(new ScriptedUiNode { ControlTypeIdValue = 50033, Selection = null, WindowHandle = 321, ProcessIdValue = 999 });
+        var walkPage = walkHost.Add(new ScriptedUiNode { ControlTypeIdValue = WindowsSelectionProbe.DocumentTypeId, Selection = "walked page selection", ProcessIdValue = 999 });
+        walkTree.Focus = walkRoot.Add(new ScriptedUiNode { ControlTypeIdValue = 50004, Selection = "" });
+        var walkResult = await new WindowsSelectionProbe(walkTree, ownership).ReadAutomationAsync(target, CancellationToken.None);
+        Check(walkResult.Status == CaptureStatus.Text && walkResult.Text == "walked page selection",
+            "The window walk reads the page hanging under the verified WebView host (was " + walkResult.Status + "/" + walkResult.Reason + ")");
+
+        // Another application's WebView: same class, but not a native child of the captured
+        // window, so its process never answers for this capture.
+        var outsideTree = new ScriptedUiTree();
+        outsideTree.WindowRoot = new ScriptedUiNode { ControlTypeIdValue = 50033, Selection = null, WindowHandle = 123 };
+        var outsideHost = new ScriptedUiNode { ControlTypeIdValue = 50033, Selection = null, WindowHandle = 777, ProcessIdValue = 999 };
+        var outsidePage = outsideHost.Add(new ScriptedUiNode { ControlTypeIdValue = WindowsSelectionProbe.DocumentTypeId, Selection = "another application's selection", ProcessIdValue = 999 });
+        outsideTree.Focus = outsidePage;
+        var outsideOwnership = new ScriptedWindowOwnership();
+        outsideOwnership.Class(777, "Chrome_WidgetWin_1");
+        var outsideResult = await new WindowsSelectionProbe(outsideTree, outsideOwnership).ReadAutomationAsync(target, CancellationToken.None);
+        Check(outsideResult.Status == CaptureStatus.Unavailable && outsideResult.Reason == CaptureReason.OwnershipUnproven &&
+            outsideResult.Text == "" && outsidePage.Reads == 0 && outsideHost.Reads == 0,
+            "A WebView host outside the captured window never supplies its selection (was " + outsideResult.Status + "/" + outsideResult.Reason + ")");
+
+        // Reaching the captured window through another process is not enough by itself: only a
+        // verified host carries its content with it, so those nodes are never read.
+        var mixedTree = new ScriptedUiTree();
+        var mixedRoot = mixedTree.WindowRoot = new ScriptedUiNode { ControlTypeIdValue = 50033, Selection = null, WindowHandle = 123 };
+        var mixedHost = mixedRoot.Add(new ScriptedUiNode { ControlTypeIdValue = 50033, Selection = null, ProcessIdValue = 999 });
+        var mixedPage = mixedHost.Add(new ScriptedUiNode { ControlTypeIdValue = WindowsSelectionProbe.DocumentTypeId, Selection = "unverified foreign selection", ProcessIdValue = 999 });
+        mixedTree.Focus = mixedPage;
+        var mixedResult = await new WindowsSelectionProbe(mixedTree, new ScriptedWindowOwnership()).ReadAutomationAsync(target, CancellationToken.None);
+        Check(mixedResult.Status != CaptureStatus.Text && mixedResult.Text == "" && mixedPage.Reads == 0 && mixedHost.Reads == 0,
+            "A chain that only passes through another process is not this window's content (was " + mixedResult.Status + "/" + mixedResult.Reason + ")");
+
+        // A process change inside the captured window is not a foreground change.
+        Check(outsideResult.Reason != CaptureReason.ForegroundChanged && focusedResult.Reason == CaptureReason.None,
+            "A same-window process boundary is never reported as a foreground change");
     }
 
     private static CaptureStep Step(SelectionCaptureResult result, string stage)
@@ -666,6 +767,86 @@ internal static class SelectionTests
             Check(total >= 50, "A worker that waits for a late copy still reports that wait");
         }
 
+        // The keyboard focus the simulated copy would reach is checked as late as possible, and
+        // a focus outside the captured window stops the copy instead of sending it elsewhere.
+        var elsewhere = new ScriptedCopyHost { Focus = new IntPtr(777), PauseMs = 0 };
+        using (var deadline = new CancellationTokenSource()) {
+            var steps = new List<CaptureStep>();
+            var outcome = Native.CopyOnSta(target, deadline, steps, elsewhere, new ScriptedWindowOwnership());
+            Check(outcome.Status == CaptureStatus.Unavailable && outcome.Reason == CaptureReason.FocusNotOwned &&
+                elsewhere.SendCalls == 0 && outcome.Text == "",
+                "A keyboard focus outside the captured window stops the injected copy");
+            Check(Step(outcome, "copy_focus") != null && Step(outcome, "copy_focus").FocusChecked &&
+                !Step(outcome, "copy_focus").FocusOwned && Step(outcome, "copy_focus").Reason == CaptureReason.FocusNotOwned,
+                "The refused copy reports the focus check it made instead of a sent copy");
+        }
+
+        // The same focus inside the captured window - its own child window - still sends the
+        // one copy, and the metadata says the check passed.
+        var insideOwnership = new ScriptedWindowOwnership(); insideOwnership.Child(123, 321);
+        var inside = new ScriptedCopyHost { Focus = new IntPtr(321), PauseMs = 0 };
+        using (var deadline = new CancellationTokenSource()) {
+            var steps = new List<CaptureStep>();
+            var outcome = Native.CopyOnSta(target, deadline, steps, inside, insideOwnership);
+            Check(outcome.Status == CaptureStatus.Text && inside.SendCalls == 1 &&
+                Step(outcome, "copy_focus").FocusChecked && Step(outcome, "copy_focus").FocusOwned,
+                "A keyboard focus inside the captured window still sends the one injected copy");
+        }
+
+        // A focus Windows did not report is unknown, not "somewhere else": it never blocks the
+        // copy, and the metadata says the check could not be made.
+        var unknownFocus = new ScriptedCopyHost { PauseMs = 0 };
+        using (var deadline = new CancellationTokenSource()) {
+            var steps = new List<CaptureStep>();
+            var outcome = Native.CopyOnSta(target, deadline, steps, unknownFocus, new ScriptedWindowOwnership());
+            Check(outcome.Status == CaptureStatus.Text && unknownFocus.SendCalls == 1 &&
+                Step(outcome, "copy_focus") != null && !Step(outcome, "copy_focus").FocusChecked &&
+                !Step(outcome, "copy_focus").FocusOwned && Step(outcome, "copy_focus").Reason == CaptureReason.None,
+                "An unreported keyboard focus is recorded as unchecked rather than as another window");
+        }
+
+        // The keys can come down again while the old clipboard is being saved; the copy is then
+        // not sent, and the user's own keys are never released for it.
+        var pressedAgain = new ScriptedCopyHost { PauseMs = 0 };
+        pressedAgain.OnBackup = () => { pressedAgain.Modifiers = () => true; };
+        using (var deadline = new CancellationTokenSource()) {
+            var steps = new List<CaptureStep>();
+            var outcome = Native.CopyOnSta(target, deadline, steps, pressedAgain, new ScriptedWindowOwnership());
+            Check(outcome.Status == CaptureStatus.Unavailable && outcome.Reason == CaptureReason.ModifiersHeld &&
+                pressedAgain.SendCalls == 0 && Step(outcome, "copy_focus") != null && !Step(outcome, "copy_focus").ModifiersReleased,
+                "Keys pressed again after the backup stop the copy instead of releasing the user's keys");
+        }
+
+        // A WebView2 copy is owned by its browser process even though the window belongs to the
+        // captured one. The owning window is what proves the origin; an owner process alone is
+        // never trusted.
+        var webOwnership = new ScriptedWindowOwnership();
+        webOwnership.Child(123, 321); webOwnership.Class(321, "Chrome_WidgetWin_1");
+        var webOwner = new ScriptedCopyHost { Owner = 999, OwnerWindow = new IntPtr(321), PauseMs = 0 };
+        using (var deadline = new CancellationTokenSource()) {
+            var steps = new List<CaptureStep>();
+            var outcome = Native.CopyOnSta(target, deadline, steps, webOwner, webOwnership);
+            Check(outcome.Status == CaptureStatus.Text && outcome.Text == "copy fixture" &&
+                Step(outcome, "clipboard_read") != null && Step(outcome, "clipboard_read").OwnerWindowVerified,
+                "A copy owned by the WebView window inside the captured window is this selection");
+        }
+        var unverifiedOwner = new ScriptedCopyHost { Owner = 999, OwnerWindow = IntPtr.Zero, PauseMs = 0 };
+        using (var deadline = new CancellationTokenSource()) {
+            var steps = new List<CaptureStep>();
+            var outcome = Native.CopyOnSta(target, deadline, steps, unverifiedOwner, webOwnership);
+            Check(outcome.Status == CaptureStatus.Unavailable && outcome.Text == "" && unverifiedOwner.ReadCalls == 0 &&
+                Step(outcome, "clipboard_read").Reason == CaptureReason.ClipboardOriginUnknown &&
+                Step(outcome, "clipboard_read").ClipboardOwnerProcess == 999 &&
+                !Step(outcome, "clipboard_read").OwnerWindowVerified,
+                "Another process's copy is never this capture's text, whatever its window looks like");
+        }
+        var plainWindowOwner = new ScriptedCopyHost { Owner = 999, OwnerWindow = new IntPtr(321), PauseMs = 0 };
+        using (var deadline = new CancellationTokenSource()) {
+            var outcome = Native.CopyOnSta(target, deadline, new List<CaptureStep>(), plainWindowOwner, new ScriptedWindowOwnership());
+            Check(outcome.Status == CaptureStatus.Unavailable && outcome.Text == "" && plainWindowOwner.ReadCalls == 0,
+                "A contained window without a verified host class does not vouch for another process");
+        }
+
         // The compatibility wrapper keeps the acquirer's order and its input limit instead of
         // copying blindly. Its fixture window is never the real foreground one, so the worker
         // refuses to inject anything even on the unfixed path.
@@ -731,6 +912,35 @@ internal static class SelectionTests
             string failedEntries = string.Concat(Directory.GetFiles(folder).Select(File.ReadAllText));
             Check(failedEntries.Contains("capture_failed") && failedEntries.Contains("InputDenied"),
                 "Only a definite system failure is logged as capture_failed");
+
+            // The copy path's new metadata is recorded without any window title, control name
+            // or clipboard content: only the facts a later check can compare.
+            var metadata = new DiagnosticLog(folder);
+            var detailed = SelectionCaptureResult.Success(""); detailed.Steps.Add(new CaptureStep {
+                Stage = "copy_focus", Reason = CaptureReason.FocusNotOwned, FocusChecked = true, FocusOwned = false,
+                ModifiersReleased = true, ForegroundSame = true, ElapsedMs = 5
+            });
+            detailed.Steps.Add(new CaptureStep {
+                Stage = "clipboard_read", Reason = CaptureReason.None, ClipboardChanged = true,
+                ClipboardOwnerProcess = 4242, OwnerWindowVerified = true, ElapsedMs = 20
+            });
+            metadata.Capture(CaptureTelemetry.For("fixture-metadata", probe.Snapshot(), false, "Ctrl+Alt+T", detailed));
+            string metadataEntries = string.Concat(Directory.GetFiles(folder).Select(File.ReadAllText));
+            Check(metadataEntries.Contains("\"stage\":\"copy_focus\"") && metadataEntries.Contains("\"focus_owned\":false") &&
+                metadataEntries.Contains("\"clipboard_owner_process\":4242") && metadataEntries.Contains("\"owner_window_verified\":true"),
+                "The copy stage reports the focus and owner checks as typed metadata");
+
+            // The in-window page read logs its own typed row with a whitelisted source name;
+            // the text it read and any control name outside that list never reach the log.
+            var pageRead = new DiagnosticLog(folder);
+            pageRead.InternalSelection(InternalSelectionStatus.Text, InternalSelectionReason.None, "TranslationText", 12);
+            pageRead.InternalSelection(InternalSelectionStatus.Unavailable, InternalSelectionReason.SensitiveControl, "ApiKeyInput", 0);
+            string pageEntries = string.Concat(Directory.GetFiles(folder).Select(File.ReadAllText));
+            Check(pageEntries.Contains("\"event\":\"internal_selection\"") && pageEntries.Contains("\"source\":\"TranslationText\"") &&
+                pageEntries.Contains("\"status\":\"Unavailable\"") && pageEntries.Contains("text_length"),
+                "The in-window read records typed metadata with a whitelisted source name");
+            Check(!pageEntries.Contains("ApiKeyInput") && pageEntries.Contains("\"source\":\"other\""),
+                "A control name outside the whitelist cannot become free text in the log");
             return Task.FromResult(0);
         } finally {
             if (Directory.Exists(folder) && Path.GetFullPath(folder).StartsWith(Path.GetFullPath(Path.GetTempPath()), StringComparison.OrdinalIgnoreCase))
@@ -826,8 +1036,10 @@ internal sealed class ScriptedUiNode : IUiNode
 internal sealed class ScriptedCopyHost : ICopyHost
 {
     public IntPtr Foreground = new IntPtr(123);
+    public IntPtr Focus = IntPtr.Zero;        // zero means Windows reported no focus window.
     public uint Sequence = 10;
     public uint Owner = 456;
+    public IntPtr OwnerWindow = IntPtr.Zero;  // zero means the clipboard has no owner window.
     public string Text = "copy fixture";
     public ClipboardBackup BackupResult = ClipboardBackup.Of("old clipboard");
     public Exception ReadThrows, BackupThrows, RestoreThrows;
@@ -844,11 +1056,13 @@ internal sealed class ScriptedCopyHost : ICopyHost
     {
         get { ForegroundReads++; if (OnForeground != null) OnForeground(); return Foreground; }
     }
+    public IntPtr FocusedWindow { get { return Focus; } }
     public uint ClipboardSequence { get { return Sequence; } }
     public uint ClipboardOwnerProcess
     {
         get { OwnerReads++; if (OnOwner != null) OnOwner(); return Owner; }
     }
+    public IntPtr ClipboardOwnerWindow { get { return OwnerWindow; } }
     public int SendError { get { return LastSendError; } }
     public bool ModifiersHeld() { return Modifiers(); }
     public void Pause(int milliseconds)
@@ -885,6 +1099,18 @@ internal sealed class ScriptedCopyHost : ICopyHost
         if (backup != null && backup.IsEmpty) EmptyRestoreCalls++;
         if (RestoreThrows != null) throw RestoreThrows;
     }
+}
+
+// The native window facts behind the cross-process ownership rule, scripted: a window is a
+// child only when this fixture says so, and carries only the class the fixture gives it.
+internal sealed class ScriptedWindowOwnership : IWindowOwnership
+{
+    public readonly HashSet<string> Children = new HashSet<string>();
+    public readonly Dictionary<long, string> Classes = new Dictionary<long, string>();
+    public void Child(long parent, long child) { Children.Add(parent + ">" + child); }
+    public void Class(long window, string name) { Classes[window] = name; }
+    public bool IsChildOf(IntPtr parent, IntPtr child) { return Children.Contains(parent.ToInt64() + ">" + child.ToInt64()); }
+    public string ClassName(IntPtr window) { string name; return Classes.TryGetValue(window.ToInt64(), out name) ? name : ""; }
 }
 
 // A scripted clipboard: only the format read itself is faked, so the rule that decides

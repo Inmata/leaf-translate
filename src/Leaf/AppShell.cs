@@ -21,6 +21,15 @@ namespace Leaf
         public Window Popup { get; private set; }
         public bool NativeEnabled { get; private set; }
         public SelectionAcquirer Selection { get; set; }
+        // Test seam: the in-window page read. Production reads the popup's own translate page;
+        // a scripted reader lets the in-front branch be checked without a shown window.
+        public IInternalSelectionReader InternalSelection { get; set; }
+        // Bridge to the unified page's new-session entry, which the settings/UI partial supplies
+        // once it exists; the integration step replaces this bridge with a direct call to that
+        // partial's TranslateInternalSelectionAsync. While it is null a non-empty page selection
+        // falls back to this build's existing in-front behavior instead of starting a session
+        // the window cannot show yet.
+        internal Func<string, Task> InternalSelectionTranslate { get; set; }
         // Test seam: supplies the placement a check wants to persist so the exit path can be
         // exercised without a real desktop. Null in production, where the native read is used.
         public Func<WindowPlacement> PlacementReader { get; set; }
@@ -63,6 +72,7 @@ namespace Leaf
             Log = client.Log ?? new DiagnosticLog(System.IO.Path.Combine(store.Folder, "logs")); Client.Log = Log;
             Selection = new SelectionAcquirer(new WindowsSelectionProbe());
             Popup = Ui.Load("Popup"); InitializePopup();
+            InternalSelection = new InternalSelectionReader(Popup);
         }
         public void Start(bool background, bool demonstration)
         {
@@ -160,7 +170,20 @@ namespace Leaf
             if (captureBusy || shortcutRecording || exiting) return;
             var target = Selection.Snapshot();
             var invocation = Json.Copy(Store.Settings);
-            if (!invocation.ClipboardMode && target.IsLeaf) { HandleLeafSelectionShortcut(invocation.FocusInputOnShortcut); return; }
+            if (!invocation.ClipboardMode && target.IsLeaf) {
+                // Leaf itself is in front, so the page the user is looking at is read before
+                // anything is revealed or focused: a selection made inside the popup is its own
+                // new session, while no page selection at all keeps the existing behavior.
+                var page = InternalSelection != null ? InternalSelection.Read() : InternalSelectionResult.NoPage;
+                Log.InternalSelection(page.Status, page.Reason, page.Source, page.TextLength);
+                var startSession = InternalSelectionTranslate;
+                if (page.Status == InternalSelectionStatus.Text && startSession != null) {
+                    await startSession(page.Text);
+                    return;
+                }
+                HandleLeafSelectionShortcut(invocation.FocusInputOnShortcut);
+                return;
+            }
             long revision = sourceRevision;
             var owner = new CancellationTokenSource();
             captureCancellation = owner; captureBusy = true;
@@ -191,9 +214,10 @@ namespace Leaf
             // Empty and Unavailable both prepare input; neither is a confirmed failure.
             PrepareManualInput(result.Reason, invocation.ClipboardMode, invocation.FocusInputOnShortcut);
         }
-        // Leaf itself is in front, so there is no foreign selection to read. An editor the
-        // user has not committed to stays untouched; otherwise the current result comes back,
-        // and with no result at all the manual input is prepared so the shortcut still works.
+        // With no selection of its own page to translate, a shortcut in front of Leaf has no
+        // foreign selection either. An editor the user has not committed to stays untouched;
+        // otherwise the current result comes back, and with no result at all the manual input
+        // is prepared so the shortcut still works.
         private void HandleLeafSelectionShortcut(bool directInput)
         {
             if (Current == null) { PrepareManualInput(CaptureReason.None, false, directInput); return; }

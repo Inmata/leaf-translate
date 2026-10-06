@@ -16,7 +16,12 @@ namespace Leaf
         None, Desktop, EmptySelection, UnsupportedPattern, AutomationTimeout,
         AutomationBusy, AutomationBudget, AutomationUnreadable, ForegroundChanged, ModifiersHeld, CopyNoUpdate,
         ClipboardOriginUnknown,
-        ClipboardBusy, CaptureBusy, InputDenied, SystemFailure, Cancelled
+        ClipboardBusy, CaptureBusy, InputDenied, SystemFailure, Cancelled,
+        // The focused element belongs to another process and could not be shown to be part of
+        // the captured window. The foreground never changed, so this is not one.
+        OwnershipUnproven,
+        // The keyboard focus the simulated copy would reach is not inside the captured window.
+        FocusNotOwned
     }
 
     // The window this invocation was started for, taken before the popup is shown.
@@ -39,6 +44,14 @@ namespace Leaf
         public bool ForegroundSame { get; set; }
         public bool ClipboardChanged { get; set; }
         public bool ModifiersReleased { get; set; }
+        // The window a simulated copy would reach: was it checked, and was it inside the
+        // captured window? Metadata only - no title, name or value is ever read.
+        public bool FocusChecked { get; set; }
+        public bool FocusOwned { get; set; }
+        // The clipboard owner's process, and whether its window was verified as part of the
+        // captured one. Metadata only: nothing is read from the owning process.
+        public uint ClipboardOwnerProcess { get; set; }
+        public bool OwnerWindowVerified { get; set; }
         public int NativeError { get; set; }
         public int HResult { get; set; }
         public long ElapsedMs { get; set; }
@@ -135,6 +148,8 @@ namespace Leaf
                 case CaptureReason.AutomationTimeout: detail = "读取选中文字超时。"; break;
                 case CaptureReason.ClipboardOriginUnknown: detail = "无法确认剪贴板来源，未使用其中内容。"; break;
                 case CaptureReason.InputDenied: detail = "当前程序不允许读取选区。"; break;
+                case CaptureReason.OwnershipUnproven: detail = "焦点不在取词窗口内，没有读取其他窗口的内容。"; break;
+                case CaptureReason.FocusNotOwned: detail = "键盘焦点已经不在取词窗口中。"; break;
                 default: detail = "可直接输入要翻译的文字。"; break;
             }
             return "未取得选区：" + detail;

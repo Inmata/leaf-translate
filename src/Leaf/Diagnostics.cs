@@ -12,7 +12,11 @@ namespace Leaf
     {
         // Fixed stage names are the only strings a capture row may carry.
         private static readonly string[] CaptureStages = {
-            "snapshot", "uia", "copy_wait", "copy_send", "clipboard_read", "clipboard_restore", "result"
+            "snapshot", "uia", "copy_wait", "copy_focus", "copy_send", "clipboard_read", "clipboard_restore", "result"
+        };
+        // The only source names the internal selection row may carry.
+        private static readonly string[] InternalSelectionSources = {
+            "SourceInput", "SourceText", "TranslationText", "LeafSelectableText"
         };
         private readonly object sync = new object();
         private readonly int limit;
@@ -72,6 +76,9 @@ namespace Leaf
                 row["candidate_count"] = step.CandidateCount; row["control_type_id"] = step.ControlTypeId;
                 row["pattern_supported"] = step.PatternSupported; row["foreground_same"] = step.ForegroundSame;
                 row["clipboard_changed"] = step.ClipboardChanged; row["modifiers_released"] = step.ModifiersReleased;
+                row["focus_checked"] = step.FocusChecked; row["focus_owned"] = step.FocusOwned;
+                row["clipboard_owner_process"] = (long)step.ClipboardOwnerProcess;
+                row["owner_window_verified"] = step.OwnerWindowVerified;
                 row["native_error"] = step.NativeError; row["hresult"] = step.HResult;
                 row["elapsed_ms"] = step.ElapsedMs;
                 Write(row);
@@ -85,6 +92,25 @@ namespace Leaf
             result["text_length"] = telemetry.TextLength; result["step_count"] = steps.Count;
             result["elapsed_ms"] = elapsed;
             Write(result);
+        }
+        // The in-window selection path records typed metadata only: its status, its typed
+        // reason, a whitelisted source name and the length of what was read. The text itself,
+        // the control's own name and anything written in a window never reach the log.
+        public void InternalSelection(InternalSelectionStatus status, InternalSelectionReason reason, string source, int textLength)
+        {
+            var row = Base("internal_selection");
+            row["status"] = status.ToString();
+            row["reason"] = reason.ToString();
+            row["source"] = InternalSource(source);
+            row["text_length"] = textLength < 0 ? 0 : textLength;
+            Write(row);
+        }
+        private static string InternalSource(string source)
+        {
+            if (string.IsNullOrEmpty(source)) return "";
+            foreach (string known in InternalSelectionSources)
+                if (string.Equals(known, source, StringComparison.Ordinal)) return known;
+            return "other";
         }
         private static Dictionary<string, object> Base(string name)
         {

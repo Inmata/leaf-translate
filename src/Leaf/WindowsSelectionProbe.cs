@@ -64,15 +64,21 @@ namespace Leaf
         // Slightly below the coordinator's budget so a bounded scan can report its own end.
         public const int AutomationBudgetMs = 240;
         private const int AncestorDepth = 24;
+        // How far the bounded ancestor chain may cross into other processes before it has to
+        // have reached the captured window or a verified WebView host window inside it.
+        public const int MaxForeignAncestors = 8;
         public static readonly int DocumentTypeId = ControlType.Document.Id;
         private static int automationRunning;
         private readonly IUiTree tree;
+        private readonly IWindowOwnership ownership;
 
-        public WindowsSelectionProbe() : this(new AutomationUiTree()) { }
-        public WindowsSelectionProbe(IUiTree uiTree)
+        public WindowsSelectionProbe() : this(new AutomationUiTree(), WindowOwnership.Native) { }
+        public WindowsSelectionProbe(IUiTree uiTree) : this(uiTree, WindowOwnership.Native) { }
+        public WindowsSelectionProbe(IUiTree uiTree, IWindowOwnership windowOwnership)
         {
             if (uiTree == null) throw new ArgumentNullException("uiTree");
             tree = uiTree;
+            ownership = windowOwnership ?? WindowOwnership.Native;
         }
 
         public CaptureTarget Snapshot()
@@ -130,7 +136,7 @@ namespace Leaf
             var worker = new Thread(() => {
                 var steps = new List<CaptureStep>();
                 SelectionCaptureResult outcome;
-                try { outcome = Query(target, cancellation, steps, owner.tree); }
+                try { outcome = Query(target, cancellation, steps, owner.tree, owner.ownership); }
                 catch (Exception error) {
                     steps.Add(new CaptureStep { Stage = "uia", Reason = CaptureReason.SystemFailure,
                         HResult = error.HResult, ForegroundSame = ForegroundIs(target) });
@@ -166,6 +172,18 @@ namespace Leaf
             return UiSelectionAnswer.Of(text.ToString());
         }
 
+        // The selection read asks for TextPattern first; a provider that exposes only
+        // TextPattern2 still answers, because TextPattern2 is the same selection surface with
+        // extra caret calls on top of it. The caller keeps whatever the provider answered or
+        // threw, so an unavailable pattern stays an unknown answer instead of an empty one.
+        public static object ChooseTextPattern(Func<object> textPattern, Func<object> textPattern2)
+        {
+            if (textPattern == null) return null;
+            object chosen = textPattern();
+            if (chosen != null || textPattern2 == null) return chosen;
+            return textPattern2();
+        }
+
         // The running state of one bounded scan, so the read policy records what it saw
         // without a growing parameter list.
         private sealed class Scan
@@ -175,12 +193,21 @@ namespace Leaf
             public int EmptyType, ReadError;
         }
 
+        // One node of the window walk plus whether it was shown to hang inside a verified
+        // WebView host, which carries its whole subtree with it.
+        private struct WalkNode
+        {
+            public IUiNode Node;
+            public bool InsideVerifiedHost;
+        }
+
         // Bounded to the captured window: the focused element and its ancestors first, then a
         // limited walk of the same window for a reading document. Control Name and Value are
         // never read. Every tree call can block on another application, so cancellation and
         // the time budget are checked between them, and the queue may never grow past the
         // node budget. A scan that could not finish never concludes "nothing is selected".
-        private static SelectionCaptureResult Query(CaptureTarget target, CancellationToken cancellation, List<CaptureStep> steps, IUiTree tree)
+        private static SelectionCaptureResult Query(CaptureTarget target, CancellationToken cancellation,
+            List<CaptureStep> steps, IUiTree tree, IWindowOwnership ownership)
         {
             var watch = Stopwatch.StartNew();
             var scan = new Scan();
@@ -188,35 +215,56 @@ namespace Leaf
             try { focused = tree.Focused; } catch { }
             if (focused == null)
                 return Finish(CaptureStatus.Unavailable, CaptureReason.UnsupportedPattern, steps, watch, scan, 0, false, tree, target);
-            if (target.ProcessId != 0 && focused.ProcessId != (int)target.ProcessId)
-                return Finish(CaptureStatus.Unavailable, CaptureReason.ForegroundChanged, steps, watch, scan, focused.ControlTypeId, false, tree, target);
 
             bool budgetSpent = false;
             int focusType = focused.ControlTypeId;
+            bool focusedSameProcess = SameProcess(focused, target);
 
-            // The focused element can belong to another window of the same process, so its chain
-            // is walked up to the captured window before anything on it is read: a chain that
-            // never reaches that window belongs somewhere else and may not answer for this one.
-            // The walk is bounded like every other tree call.
+            // The focused element can belong to another window of the same process, or - inside
+            // a WebView2 - to another process that is natively part of the captured window. Its
+            // chain is walked up to the captured window, or to a verified WebView host window
+            // under it, before anything on it is read: a chain that reaches neither belongs
+            // somewhere else and may not answer for this window. The walk is bounded like every
+            // other tree call.
             var chain = new List<IUiNode>();
             bool associated = false;
+            int foreign = 0;
             IUiNode node = focused;
             for (int depth = 0; node != null && depth < AncestorDepth; depth++) {
                 if (Stopped(cancellation)) return Cancelled(steps);
                 if (watch.ElapsedMilliseconds > AutomationBudgetMs) { budgetSpent = true; break; }
-                // Ancestors stay inside the captured process; the walk never leaves it.
-                if (target.ProcessId != 0 && node.ProcessId != (int)target.ProcessId) break;
+                bool sameProcess = SameProcess(node, target);
+                if (!sameProcess) {
+                    // Crossing into another process is allowed only while the chain can still be
+                    // shown to hang under the captured window; the hop limit keeps that finite.
+                    foreign++;
+                    if (foreign > MaxForeignAncestors) break;
+                }
                 scan.Visited++;
                 chain.Add(node);
                 if (IsCapturedWindow(node, target)) { associated = true; break; }
+                // A verified WebView host window inside the captured window is the boundary
+                // another process may answer across: the window identity decides, not the pid.
+                if (!sameProcess && WindowOwnership.IsVerifiedHostWindow(ownership, target.Window, WindowHandlePtr(node))) {
+                    associated = true; break;
+                }
                 node = Parent(node);
             }
+            // A focus that could not be shown to belong to the captured window is not a
+            // foreground change, and this window's own tree must not answer for it either.
+            if (!associated && !focusedSameProcess)
+                return Finish(CaptureStatus.Unavailable, CaptureReason.OwnershipUnproven, steps, watch, scan, focusType, false, tree, target);
+
             if (associated) {
-                foreach (IUiNode candidate in chain) {
+                // Which chain nodes may answer: the captured window's own process, and the
+                // content that hangs under a verified WebView host inside the captured window.
+                bool[] mayAnswer = ChainOwnership(chain, target, ownership);
+                for (int i = 0; i < chain.Count; i++) {
                     if (Stopped(cancellation)) return Cancelled(steps);
                     if (watch.ElapsedMilliseconds > AutomationBudgetMs) { budgetSpent = true; break; }
-                    string selected = ReadCandidate(candidate, scan);
-                    if (!string.IsNullOrWhiteSpace(selected)) return Success(selected, steps, watch, scan, candidate.ControlTypeId, tree, target);
+                    if (!mayAnswer[i]) continue;
+                    string selected = ReadCandidate(chain[i], scan);
+                    if (!string.IsNullOrWhiteSpace(selected)) return Success(selected, steps, watch, scan, chain[i].ControlTypeId, tree, target);
                     if (scan.Candidates >= MaxCandidates) { budgetSpent = true; break; }
                 }
             }
@@ -226,23 +274,28 @@ namespace Leaf
             try { root = tree.Root(target.Window); } catch { }
             if (root == null) complete = false;
             if (root != null && complete && scan.Visited < MaxNodes) {
-                var pending = new Queue<IUiNode>();
-                pending.Enqueue(root);
+                var pending = new Queue<WalkNode>();
+                pending.Enqueue(new WalkNode { Node = root, InsideVerifiedHost = false });
                 while (pending.Count > 0 && scan.Visited < MaxNodes && scan.Candidates < MaxCandidates) {
                     if (Stopped(cancellation)) return Cancelled(steps);
                     if (watch.ElapsedMilliseconds > AutomationBudgetMs) { budgetSpent = true; break; }
-                    IUiNode current = pending.Dequeue(); scan.Visited++;
-                    if (target.ProcessId != 0 && current.ProcessId != (int)target.ProcessId) continue;
-                    string selected = ReadCandidate(current, scan);
-                    if (!string.IsNullOrWhiteSpace(selected)) return Success(selected, steps, watch, scan, current.ControlTypeId, tree, target);
+                    WalkNode current = pending.Dequeue(); scan.Visited++;
+                    // Only the captured window's own process, and the content hanging under a
+                    // verified WebView host inside it, may answer for this window.
+                    if (!SameProcess(current.Node, target) && !current.InsideVerifiedHost) continue;
+                    string selected = ReadCandidate(current.Node, scan);
+                    if (!string.IsNullOrWhiteSpace(selected)) return Success(selected, steps, watch, scan, current.Node.ControlTypeId, tree, target);
                     // Siblings are enumerated under the same limits: a TreeWalker call can block
                     // on a foreign application, so each one is preceded by its own checks.
-                    IUiNode child = FirstChild(current);
+                    IUiNode child = FirstChild(current.Node);
                     while (child != null) {
                         if (Stopped(cancellation)) return Cancelled(steps);
                         if (watch.ElapsedMilliseconds > AutomationBudgetMs) { budgetSpent = true; break; }
                         if (scan.Visited + pending.Count >= MaxNodes) { budgetSpent = true; break; }
-                        pending.Enqueue(child);
+                        pending.Enqueue(new WalkNode {
+                            Node = child,
+                            InsideVerifiedHost = current.InsideVerifiedHost || IsVerifiedHost(child, target, ownership)
+                        });
                         child = NextSibling(child);
                     }
                     // A child call that blocked long enough to spend the budget leaves the rest
@@ -267,6 +320,35 @@ namespace Leaf
                 complete ? (scan.Unreadable && !scan.PatternSupported ? CaptureReason.AutomationUnreadable : CaptureReason.UnsupportedPattern)
                     : CaptureReason.AutomationBudget, steps, watch, scan,
                 scan.TrustedEmpty && scan.EmptyType != 0 ? scan.EmptyType : focusType, scan.PatternSupported, tree, target);
+        }
+
+        // The chain is ordered from the focused element upwards. Only the captured window's own
+        // process, a verified WebView host window, and whatever hangs under such a host may
+        // answer: a foreign node between them is not this window's content.
+        private static bool[] ChainOwnership(List<IUiNode> chain, CaptureTarget target, IWindowOwnership ownership)
+        {
+            var mayAnswer = new bool[chain.Count];
+            bool insideHost = false;
+            for (int i = chain.Count - 1; i >= 0; i--) {
+                bool host = IsVerifiedHost(chain[i], target, ownership);
+                insideHost = insideHost || host;
+                mayAnswer[i] = SameProcess(chain[i], target) || host || insideHost;
+            }
+            return mayAnswer;
+        }
+
+        private static bool SameProcess(IUiNode node, CaptureTarget target)
+        {
+            if (node == null) return false;
+            if (target == null || target.ProcessId == 0) return true;
+            try { return node.ProcessId == (int)target.ProcessId; } catch { return false; }
+        }
+        // A node of another process that carries a verified WebView host window inside the
+        // captured one. Its own pid proves nothing either way.
+        private static bool IsVerifiedHost(IUiNode node, CaptureTarget target, IWindowOwnership ownership)
+        {
+            if (node == null || target == null || SameProcess(node, target)) return false;
+            return WindowOwnership.IsVerifiedHostWindow(ownership, target.Window, WindowHandlePtr(node));
         }
 
         // Reads one candidate. A node whose control type cannot be read is not a candidate; a
@@ -304,6 +386,10 @@ namespace Leaf
         private static long WindowHandle(IUiNode node)
         {
             try { return node.NativeWindowHandle; } catch { return 0; }
+        }
+        private static IntPtr WindowHandlePtr(IUiNode node)
+        {
+            return new IntPtr(WindowHandle(node));
         }
         private static IUiNode Parent(IUiNode node)
         {
@@ -397,12 +483,33 @@ namespace Leaf
         public UiSelectionAnswer ReadSelection()
         {
             object pattern;
-            try { if (!element.TryGetCurrentPattern(TextPattern.Pattern, out pattern)) return UiSelectionAnswer.NoPattern; }
-            catch (Exception error) { return UiSelectionAnswer.Unknown(error.HResult); }
-            var text = (TextPattern)pattern;
+            try {
+                pattern = WindowsSelectionProbe.ChooseTextPattern(
+                    () => { object found; return element.TryGetCurrentPattern(TextPattern.Pattern, out found) ? found : null; },
+                    // TextPattern2 is the same selection surface with extra caret calls, and this
+                    // client library has no managed wrapper for it: it is asked for by its own
+                    // pattern id, and only an answer the selection read can actually use counts.
+                    // A client that does not know the id leaves the capability unknown.
+                    () => {
+                        var extension = ExtensionTextPattern;
+                        if (extension == null) return null;
+                        try { object found; return element.TryGetCurrentPattern(extension, out found) ? found : null; }
+                        catch { return null; }
+                    });
+            } catch (Exception error) { return UiSelectionAnswer.Unknown(error.HResult); }
+            if (pattern == null) return UiSelectionAnswer.NoPattern;
+            var text = pattern as TextPattern;
+            if (text == null) return UiSelectionAnswer.NoPattern;
             return WindowsSelectionProbe.ReadSelectionAnswer(
                 () => text.GetSelection(),
                 range => ((TextPatternRange)range).GetText(6001));
+        }
+        // TextPattern2 is not part of this framework's client library, so its pattern id is
+        // resolved once and stays unknown when it cannot be.
+        private static readonly AutomationPattern ExtensionTextPattern = LookupExtensionTextPattern();
+        private static AutomationPattern LookupExtensionTextPattern()
+        {
+            try { return AutomationPattern.LookupById(10024); } catch { return null; }
         }
         private static IUiNode Wrap(AutomationElement element)
         {
