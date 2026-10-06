@@ -512,16 +512,8 @@ namespace Leaf
             pendingHighlightStart = -1; pendingHighlightEnd = -1;
             if (highlightLayer != null) highlightLayer.Clear();
         }
-        // Test seams: the highlight paints in a background layer, so the checks read the
-        // piece range and the painted bands instead of walking a visual tree themselves.
+        // The highlight intent survives until explicitly cleared.
         public bool WordHighlighted { get { return pendingHighlightEnd > pendingHighlightStart; } }
-        // The painted bands in the reading box's coordinate space; empty before the first
-        // real layout (and in headless checks). The smoke screenshots and the native
-        // checks read this.
-        public IReadOnlyList<System.Windows.Rect> HighlightGeometryForTest()
-        {
-            return highlightLayer != null ? highlightLayer.BandsForTest() : new System.Windows.Rect[0];
-        }
         // One path for explaining text from the keyboard and the context menu: a
         // non-whitespace selection explains the selected range; Enter additionally falls
         // back to the word under the caret. The box's display offsets map straight back
@@ -1053,7 +1045,6 @@ namespace Leaf
             bands.Clear();
             InvalidateVisual();
         }
-        public IReadOnlyList<Rect> BandsForTest() { return bands.ToArray(); }
         private void OnScrollChanged(object sender, ScrollChangedEventArgs e)
         {
             if (e.VerticalChange == 0 && e.HorizontalChange == 0) return;
