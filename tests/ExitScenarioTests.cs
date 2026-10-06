@@ -59,7 +59,32 @@ public static class ExitScenarioTests
         if (mode == "fail") return Failing(data, folder);
         if (mode == "placement") return Placement(data, folder);
         if (mode == "retry") return RetryBarrier(data, folder);
+        if (mode == "settings") return SettingsPage(data, folder);
         throw new ArgumentException("Unknown exit scenario: " + mode);
+    }
+
+    // The popup's own settings page is part of the exit: a pending edit made there is flushed and
+    // the page is left before anything is disposed. The parent asserts the reloaded files.
+    private static async Task SettingsPage(string data, string folder)
+    {
+        var store = await ConfiguredStore(data);
+        using (var shell = new AppShell(store, false, new LlmClient(new ExitHandler()), new ExitCredentials())) {
+            await shell.TranslateAsync("exit settings source", "剪贴板", false);
+            Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text = "exit settings draft";
+            shell.ShowSettingsPage();
+            var panel = (FrameworkElement)Ui.Get<ContentControl>(shell.Popup, "SettingsPageHost").Content;
+            Ui.Get<TextBox>(panel, "TargetInput").Text = "英语";
+            bool open = shell.IsSettingsPageOpen;
+            await shell.ExitAsync();
+            var history = store.History("");
+            File.WriteAllText(Path.Combine(folder, "exit-settings.json"), Json.Write(new {
+                opened = open,
+                left = !shell.IsSettingsPageOpen,
+                target_saved = store.Settings.TargetLanguage == "英语",
+                history = history.Count,
+                draft_saved = history.Count == 1 && history[0].Draft == "exit settings draft"
+            }));
+        }
     }
 
     private static Task<LocalStore> ConfiguredStore(string data)

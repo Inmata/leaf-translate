@@ -53,6 +53,12 @@ internal static class PopupRegressionTests
         await InternalSelectionReturn(Path.Combine(folder, "internal-return"));
         await ReturnAfterClearDoesNotResurrect(Path.Combine(folder, "return-cleared"));
         await LearningContentSelectable(Path.Combine(folder, "selectable"));
+        await SettingsEntryUsesPopupPage(Path.Combine(folder, "settings-entry"));
+        await InternalSelectionShortcutRouting(Path.Combine(folder, "internal-shortcut"));
+        await InternalSelectionInSettingsIsNotRead(Path.Combine(folder, "settings-focus"));
+        await ExternalShortcutLeavesSettingsPage(Path.Combine(folder, "external-settings-leave"));
+        await FailedSettingsLeaveBlocksCapture(Path.Combine(folder, "settings-leave-blocks"));
+        await ExitKeepsAppOnFailedSettingsLeave(Path.Combine(folder, "exit-settings-leave"));
         return assertions;
     }
 
@@ -583,6 +589,235 @@ internal static class PopupRegressionTests
         }
     }
 
+    // The tray, first-run and error entries all reach the settings page the shell already hosts:
+    // one window, one page over the live session, and no focus taken from what the user read.
+    private static async Task SettingsEntryUsesPopupPage(string folder)
+    {
+        var handler = new FixtureHandler();
+        using (var shell = new AppShell(ConfiguredStore(folder), false, new LlmClient(handler))) {
+            await shell.TranslateAsync("A settings entry sentence.", "选中文字", false);
+            var record = shell.Current;
+            Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text = "draft across the settings entry";
+            int windows = Application.Current.Windows.Count;
+            shell.OpenSettings();
+            Check(shell.IsSettingsPageOpen && Ui.Get<ContentControl>(shell.Popup, "SettingsPageHost").Content != null,
+                "The settings entry opens the popup's own settings page");
+            Check(Application.Current.Windows.Count == windows,
+                "The settings entry opens no second window");
+            Check(!shell.Popup.ShowActivated && !shell.Pinned && ReferenceEquals(shell.Current, record) &&
+                Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text == "draft across the settings entry",
+                "Opening settings stays passive and keeps the session and its draft");
+            Check(await shell.TryLeaveSettingsPageAsync() && !shell.IsSettingsPageOpen &&
+                Ui.Get<Grid>(shell.Popup, "TranslatePage").Visibility == Visibility.Visible,
+                "The page the entry opened can be left back to the reading page");
+        }
+    }
+
+    // A selection the user makes inside Leaf is read from the page itself: the real reader rules
+    // decide which control answers, and the shortcut never asks the desktop, simulates a copy or
+    // touches the clipboard. Every reading control the user can select in is covered, and each
+    // one starts its own conversation while the previous session stays reachable.
+    private static async Task InternalSelectionShortcutRouting(string folder)
+    {
+        var probe = new FakeSelectionProbe();
+        probe.Target.IsLeaf = true;
+        var handler = new FixtureHandler();
+        using (var shell = new AppShell(ConfiguredStore(folder), false, new LlmClient(handler))) {
+            shell.Selection = new SelectionAcquirer(probe);
+            await shell.TranslateAsync("A shortcut routing sentence.", "选中文字", false);
+            var record = shell.Current;
+            var word = TextTools.Pieces(record.Source).First(p => p.IsWord);
+            await shell.SelectWordAsync(word, false);
+            Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text = "draft kept across internal selections";
+
+            // Each case is the state the page really is in when that control can be selected:
+            // the word card is open first, the read-only original and the editor follow the
+            // restore of the session before them, and the translation stays on screen in all
+            // of them.
+            var cases = new List<ReadingSelection> {
+                new ReadingSelection { Label = "a learning control", Expected = "learning section text", Select = () =>
+                    SelectRange(Ui.Get<StackPanel>(shell.Popup, "LearningSections").Children.OfType<RichTextBox>().First(), "learning section text") },
+                new ReadingSelection { Label = "the read-only original", Expected = "read-only original text",
+                    Select = () => SelectRange(Ui.Get<RichTextBox>(shell.Popup, "SourceText"), "read-only original text") },
+                new ReadingSelection { Label = "the original editor", Expected = "editor", Select = () => {
+                    // The editor is closed on the restored reading page; it has to be open, as it
+                    // is while the user is typing in it, for its selection to be the one on screen.
+                    shell.BeginSourceEdit(false);
+                    var box = Ui.Get<TextBox>(shell.Popup, "SourceInput");
+                    box.Text = "editor selection text"; box.Select(0, 6); return box;
+                } },
+                new ReadingSelection { Label = "the translation", Expected = "translated selection",
+                    Select = () => SelectRange(Ui.Get<RichTextBox>(shell.Popup, "TranslationText"), "translated selection") }
+            };
+            foreach (var item in cases) {
+                var control = item.Select();
+                shell.InternalSelection = new FocusedPageReader((FrameworkElement)shell.Popup.Content, () => control);
+                var read = shell.InternalSelection.Read();
+                Check(read.Status == InternalSelectionStatus.Text && read.Text == item.Expected && read.Source.Length > 0,
+                    "The reader takes the selection made in " + item.Label + " (was " + read.Status + "/" + read.Reason +
+                    " source \"" + read.Source + "\" text \"" + read.Text + "\")");
+                int calls = handler.Calls;
+                await shell.InvokeShortcutAsync();
+                Check(shell.Current.Source == item.Expected && !ReferenceEquals(shell.Current, record) && handler.Calls == calls + 1,
+                    "A selection in " + item.Label + " starts its own conversation with exactly one request (source \"" +
+                    shell.Current.Source + "\", calls " + handler.Calls + " of " + (calls + 1) + ")");
+                Check(shell.Current.SourceKind == "选中文字",
+                    "A selection in " + item.Label + " is labeled as selected text");
+                Check(probe.AutomationCalls == 0 && probe.CopyCalls == 0 && probe.ClipboardCalls == 0,
+                    "A selection in " + item.Label + " never reads the desktop, simulates a copy or touches the clipboard");
+                Check(shell.CanReturnToPreviousSession &&
+                    Ui.Get<Button>(shell.Popup, "BackToPreviousButton").Visibility == Visibility.Visible,
+                    "A selection in " + item.Label + " keeps the previous session reachable");
+                shell.ReturnToPreviousSession();
+                await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                Check(ReferenceEquals(shell.Current, record) && handler.Calls == calls + 1 &&
+                    Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text == "draft kept across internal selections",
+                    "Returning after a selection in " + item.Label + " restores the session, its draft and makes no request");
+            }
+        }
+    }
+
+    // The settings page is not a selection source: a real selected settings field stays a
+    // settings value, the page and the session behind it survive, and nothing is read outside.
+    private static async Task InternalSelectionInSettingsIsNotRead(string folder)
+    {
+        var probe = new FakeSelectionProbe();
+        probe.Target.IsLeaf = true;
+        var handler = new FixtureHandler();
+        using (var shell = new AppShell(ConfiguredStore(folder), false, new LlmClient(handler))) {
+            shell.Selection = new SelectionAcquirer(probe);
+            await shell.TranslateAsync("A settings focus sentence.", "选中文字", false);
+            var record = shell.Current;
+            Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text = "draft behind the settings page";
+            shell.ShowSettingsPage();
+            var panel = SettingsPanel(shell);
+            var target = Ui.Get<TextBox>(panel, "TargetInput");
+            target.Text = "a settings value"; target.SelectAll();
+            var reader = new FocusedPageReader((FrameworkElement)shell.Popup.Content, () => target);
+            shell.InternalSelection = reader;
+            var read = reader.Read();
+            Check(read.Status == InternalSelectionStatus.Unavailable && read.Reason == InternalSelectionReason.SensitiveControl &&
+                read.Text.Length == 0,
+                "The reader refuses a selected settings field even though it is a selectable control on screen");
+            int calls = handler.Calls;
+            await shell.InvokeShortcutAsync();
+            Check(shell.IsSettingsPageOpen && ReferenceEquals(shell.Current, record) && handler.Calls == calls,
+                "A shortcut with the focus in settings never starts a session from a settings value");
+            Check(probe.AutomationCalls == 0 && probe.CopyCalls == 0 && probe.ClipboardCalls == 0,
+                "The settings page is never scanned as an external selection either");
+            Check(target.Text == "a settings value" &&
+                Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text == "draft behind the settings page",
+                "The settings field and the draft behind the page are untouched");
+            Check(await shell.TryLeaveSettingsPageAsync() && !shell.IsSettingsPageOpen &&
+                shell.Store.Settings.TargetLanguage == "a settings value",
+                "Leaving the page afterwards applies the edit it was holding");
+        }
+    }
+
+    // An external capture shows the reading page, so it leaves an open settings page first: the
+    // pending preference is applied, the capture still uses the old pipeline, and the session
+    // keeps its draft instead of losing it to a page that was never saved.
+    private static async Task ExternalShortcutLeavesSettingsPage(string folder)
+    {
+        var probe = new FakeSelectionProbe();
+        probe.Automation = SelectionCaptureResult.Success("external capture text");
+        var handler = new FixtureHandler();
+        using (var shell = new AppShell(ConfiguredStore(folder), false, new LlmClient(handler))) {
+            shell.Selection = new SelectionAcquirer(probe);
+            await shell.TranslateAsync("An external capture sentence.", "选中文字", false);
+            var record = shell.Current;
+            Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text = "draft kept through the external capture";
+            shell.ShowSettingsPage();
+            var panel = SettingsPanel(shell);
+            Ui.Get<TextBox>(panel, "TargetInput").Text = "英语";
+            Check(shell.Store.Settings.TargetLanguage != "英语", "The settings edit is still pending before the shortcut");
+            await shell.InvokeShortcutAsync();
+            Check(!shell.IsSettingsPageOpen && Ui.Get<Grid>(shell.Popup, "TranslatePage").Visibility == Visibility.Visible,
+                "An external shortcut leaves the settings page and shows the reading page");
+            Check(shell.Store.Settings.TargetLanguage == "英语",
+                "Leaving the page for a capture applies the pending preference first");
+            Check(probe.AutomationCalls == 1 && probe.ClipboardCalls == 0 && handler.Calls == 2,
+                "The external capture still goes through the selection pipeline once");
+            Check(shell.Current.Source == "external capture text" && !ReferenceEquals(shell.Current, record) &&
+                record.Draft == "draft kept through the external capture",
+                "The external capture starts its own conversation while the previous draft survives");
+        }
+    }
+
+    // A settings page that cannot be saved is not left: the capture never happens, the page keeps
+    // its reason and its pending edit, and the session stays where it was.
+    private static async Task FailedSettingsLeaveBlocksCapture(string folder)
+    {
+        var probe = new FakeSelectionProbe();
+        probe.Automation = SelectionCaptureResult.Success("capture that must not happen");
+        var handler = new FixtureHandler();
+        using (var shell = new AppShell(ConfiguredStore(folder), false, new LlmClient(handler))) {
+            shell.Selection = new SelectionAcquirer(probe);
+            await shell.TranslateAsync("A blocked capture sentence.", "选中文字", false);
+            var record = shell.Current;
+            Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text = "draft kept through the blocked capture";
+            shell.ShowSettingsPage();
+            var panel = SettingsPanel(shell);
+            Ui.Get<TextBox>(panel, "TargetInput").Text = "   ";
+            int calls = handler.Calls;
+            await shell.InvokeShortcutAsync();
+            Check(shell.IsSettingsPageOpen && ReferenceEquals(shell.Current, record) && handler.Calls == calls,
+                "A settings page that cannot be saved keeps the page and never starts the capture");
+            Check(probe.AutomationCalls == 0 && probe.CopyCalls == 0 && probe.ClipboardCalls == 0,
+                "The blocked capture never reads the desktop");
+            Check(Ui.Get<TextBlock>(panel, "SettingsStatus").Text.Contains("目标语言") &&
+                Ui.Get<TextBox>(panel, "TargetInput").Text == "   ",
+                "The kept page shows its reason and still holds the pending edit");
+            // The other entries that switch away from the page are gated the same way: with a
+            // fresh edit that cannot be applied, neither the history window nor another record
+            // opens, and the page keeps its reason. Each entry needs its own pending edit: a
+            // leave with nothing pending has nothing to fail on.
+            int windows = Application.Current.Windows.Count;
+            var other = TranslationRecord.Create("A record that must not open", "选中文字", shell.Store.Settings);
+            Ui.Get<TextBox>(panel, "TargetInput").Text = "    ";
+            shell.OpenHistory();
+            await Settle();
+            Check(shell.IsSettingsPageOpen && Application.Current.Windows.Count == windows && ReferenceEquals(shell.Current, record),
+                "A settings page that cannot be saved blocks the history entry too");
+            Ui.Get<TextBox>(panel, "TargetInput").Text = "     ";
+            shell.OpenRecord(other);
+            await Settle();
+            Check(shell.IsSettingsPageOpen && !ReferenceEquals(shell.Current, other),
+                "A settings page that cannot be saved blocks opening a record behind it");
+            Ui.Get<TextBox>(panel, "TargetInput").Text = "中文";
+            Check(await shell.TryLeaveSettingsPageAsync() && !shell.IsSettingsPageOpen && ReferenceEquals(shell.Current, record),
+                "Fixing the field lets the same page be left afterwards");
+        }
+    }
+
+    // The exit waits for the popup's settings page: a page that cannot be saved keeps the app
+    // alive with the page and the session, and the retried exit leaves once the field is fixed.
+    private static async Task ExitKeepsAppOnFailedSettingsLeave(string folder)
+    {
+        var handler = new FixtureHandler();
+        using (var shell = new AppShell(ConfiguredStore(folder), false, new LlmClient(handler))) {
+            await shell.TranslateAsync("An exit leave sentence.", "选中文字", false);
+            var record = shell.Current;
+            string target = shell.Store.Settings.TargetLanguage;
+            Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text = "draft kept through the failed exit";
+            shell.ShowSettingsPage();
+            var panel = SettingsPanel(shell);
+            Ui.Get<TextBox>(panel, "TargetInput").Text = "   ";
+            await shell.ExitAsync();
+            Check(!shell.IsExiting && shell.IsSettingsPageOpen && ReferenceEquals(shell.Current, record) &&
+                shell.Store.Settings.TargetLanguage == target,
+                "An exit whose settings page cannot be saved stays alive with the page and the session");
+            Check(Ui.Get<TextBlock>(panel, "SettingsStatus").Text.Contains("目标语言") &&
+                Ui.Get<Button>(shell.Popup, "RetryButton").Visibility == Visibility.Visible,
+                "The failed exit leaves its reason visible and offers a real retry");
+            Check(Ui.Get<TextBox>(panel, "TargetInput").Text == "   " && record.Draft == "draft kept through the failed exit",
+                "The failed exit loses neither the pending edit nor the draft");
+            Ui.Get<TextBox>(panel, "TargetInput").Text = "中文";
+            Check(await shell.TryLeaveSettingsPageAsync() && !shell.IsSettingsPageOpen,
+                "The page can be left once the field is fixed after the failed exit");
+        }
+    }
+
     // Files are rolled back but an applied external effect could not be, which is exactly the
     // state that requires an explicit reapply before requests may run again.
     private static async Task ManufactureRecovery(LocalStore store)
@@ -615,6 +850,15 @@ internal static class PopupRegressionTests
     {
         for (int i = 0; i < 300 && !condition(); i++) await Task.Delay(10);
         if (!condition()) throw new Exception("Timed out waiting for the fixture to settle.");
+    }
+
+    // Lets a path that was started without awaiting it finish, so a check about what it must not
+    // do is decided after it had the chance to do it.
+    private static async Task Settle()
+    {
+        await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+        await Task.Delay(60);
+        await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
     }
 
     // Clearing the editor is a draft action, not a request to forget the result.
@@ -810,6 +1054,41 @@ internal static class PopupRegressionTests
                 input.Text == record.Source && input.SelectedText == record.Source,
                 "The direct-input preference refills the whole original and selects it for replacement");
         }
+    }
+
+    // The production read rules with an explicit focus and the popup's own content as the page
+    // root, so the shortcut's routing can be checked against real popup controls. Those two are
+    // the parts a headless check cannot produce: the host window is never shown, and its window
+    // needs a real keyboard focus. Which control may answer is still decided by the same reader:
+    // the control chain, the visible page, the sensitive names, the allowed sources and the
+    // control's own selection.
+    private sealed class FocusedPageReader : IInternalSelectionReader
+    {
+        private readonly InternalSelectionReader reader;
+        private readonly Func<object> focus;
+        public FocusedPageReader(FrameworkElement page, Func<object> focus)
+        {
+            reader = new InternalSelectionReader(page); this.focus = focus;
+        }
+        public InternalSelectionResult Read() { return reader.ReadFrom(focus()); }
+    }
+
+    // One real reading control, the selection a user would make in it, and the text the shortcut
+    // must therefore translate.
+    private sealed class ReadingSelection
+    {
+        public string Label;
+        public string Expected;
+        public Func<FrameworkElement> Select;
+    }
+
+    // Selects the whole content of a real reading control, as dragging over it would.
+    private static RichTextBox SelectRange(RichTextBox box, string text)
+    {
+        box.Document.Blocks.Clear();
+        box.Document.Blocks.Add(new Paragraph(new Run(text)));
+        box.Selection.Select(box.Document.ContentStart, box.Document.ContentEnd);
+        return box;
     }
 
     private static LocalStore ConfiguredStore(string folder)

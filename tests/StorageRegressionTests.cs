@@ -1287,12 +1287,14 @@ public static class StorageRegressionTests
         string failing = NewDirectory(folder, "exit-fail");
         string placement = NewDirectory(folder, "exit-placement");
         string retry = NewDirectory(folder, "exit-retry");
+        string settings = NewDirectory(folder, "exit-settings");
         await Task.Run(() => {
             RunExitChild(executable, "normal", normal);
             RunExitChild(executable, "late", late);
             RunExitChild(executable, "fail", failing);
             RunExitChild(executable, "placement", placement);
             RunExitChild(executable, "retry", retry);
+            RunExitChild(executable, "settings", settings);
         });
 
         var normalStore = new LocalStore(Path.Combine(normal, "data"));
@@ -1334,6 +1336,20 @@ public static class StorageRegressionTests
         Check(retryReport.Contains("\"retry_visible\":true") && retryReport.Contains("\"before\":2") &&
             retryReport.Contains("\"after\":2"),
             "An exiting shell refuses a follow-up retry closure instead of starting a new request: " + retryReport);
+
+        // The exit has to wait for the popup's own settings page: its pending edit is applied,
+        // the page is left, and the session behind it is saved as usual.
+        string settingsReport = File.ReadAllText(Path.Combine(settings, "exit-settings.json"));
+        Check(settingsReport.Contains("\"opened\":true") && settingsReport.Contains("\"left\":true") &&
+            settingsReport.Contains("\"target_saved\":true"),
+            "An exit flushes and leaves the popup's settings page before shutdown: " + settingsReport);
+        var settingsStore = new LocalStore(Path.Combine(settings, "data"));
+        Check(settingsStore.Settings.TargetLanguage == "英语",
+            "The preference edited on the settings page is saved by that exit");
+        var settingsHistory = settingsStore.History("");
+        Check(settingsReport.Contains("\"draft_saved\":true") && settingsHistory.Count == 1 &&
+            settingsHistory[0].Translation == "退出夹具译文",
+            "The session behind the settings page is still saved by the same exit: " + settingsReport);
     }
 
     private static void RunExitChild(string executable, string mode, string directory)
