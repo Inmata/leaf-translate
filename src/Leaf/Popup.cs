@@ -200,6 +200,7 @@ namespace Leaf
         }
         public async Task SubmitSourceAsync()
         {
+            if (exiting) return;
             CancelCapture();
             sourceRevision++;
             string text = Ui.Get<TextBox>(Popup, "SourceInput").Text;
@@ -321,10 +322,22 @@ namespace Leaf
             // button's own state instead of the visibility of the panel hiding it.
             Ui.Visible(Ui.Get<Button>(Popup, "RetryButton"), false);
         }
-        private string KeyFor(ProviderProfile provider) { return CredentialReader != null ? CredentialReader(provider) : NativeEnabled ? Credentials.Read(provider.Id) : "test-key"; }
-
+        private string KeyFor(ProviderProfile provider)
+        {
+            if (CredentialReader != null) return CredentialReader(provider);
+            if (!NativeEnabled || credentialProfiles == null) return "test-key";
+            return credentialProfiles.Read(provider);
+        }
+        private bool BlockedByRecovery()
+        {
+            if (!Store.NeedsExplicitRecovery) return false;
+            ShowError("上次保存没有完成，请重新应用配置后重试。", OpenSettings);
+            ShowPopup();
+            return true;
+        }
         public async Task TranslateAsync(string text, string sourceKind, bool force)
         {
+            if (exiting) return;
             try { text = TextTools.ValidateInput(text); }
             catch (UserError error) { ShowError(error.Message, null); ShowPopup(); return; }
             if (demo) { demo = false; Current = null; }
@@ -337,8 +350,10 @@ namespace Leaf
                 var cached = Store.Find(key);
                 if (cached != null) { OpenRecord(cached); return; }
             }
+            if (BlockedByRecovery()) return;
             CancelRequests();
             Current = TranslationRecord.Create(text, sourceKind, Store.Settings);
+            currentHistoryEpoch = Store.HistoryEpoch;
             var record = Current; long version = generation.Next();
             mainCancellation = new CancellationTokenSource(); var cancellation = mainCancellation;
             // A new conversation replaces every older retry entry.
@@ -364,7 +379,7 @@ namespace Leaf
                 record.Completed = true; translating = false;
                 DrawTranslation(""); Busy();
                 Ui.Visible(Ui.Get<Button>(Popup, "ExpandWordButton"), TextTools.IsWordInput(record.Source));
-                SaveCurrent();
+                await SaveCurrentAsync();
             } catch (OperationCanceledException) { }
             catch (Exception error) {
                 Log.Event("translation_failed", error);
@@ -383,6 +398,7 @@ namespace Leaf
 
         public async Task SelectWordAsync(TextPiece word, bool force)
         {
+            if (exiting) return;
             if (Current == null || !Current.Completed || word.Length > 300) return;
             if (word.Start < 0 || word.Start + word.Length > Current.Source.Length || Current.Source.Substring(word.Start, word.Length) != word.Text) return;
             if (selectedWord != null && selectedWord.Key == word.Key && wordBusy && !force) return;
@@ -404,6 +420,7 @@ namespace Leaf
             if (demo) {
                 selectedCard = DemoCard(word.Text); record.Cards[word.Key] = selectedCard; DrawCard(selectedCard); return;
             }
+            if (BlockedByRecovery()) return;
             wordCancellation = new CancellationTokenSource(); var cancellation = wordCancellation;
             var operation = new RetryOperation {
                 Kind = RequestKind.Word, RecordId = record.Id,
@@ -417,7 +434,7 @@ namespace Leaf
                 selectedCard = WordCard.Parse(payload, word.Text, record.Translation);
                 if (record.Cards.Count >= 16) record.Cards.Remove(record.Cards.Keys.First());
                 record.Cards[cardKey] = selectedCard;
-                wordBusy = false; DrawCard(selectedCard); SaveCurrent(); Busy();
+                wordBusy = false; DrawCard(selectedCard); await SaveCurrentAsync(); Busy();
             } catch (OperationCanceledException) { }
             catch (Exception error) {
                 Log.Event("word_card_failed", error);
@@ -467,11 +484,13 @@ namespace Leaf
         }
         public async Task SendChatAsync()
         {
+            if (exiting) return;
             if (Current == null || !Current.Completed || chatBusy) return;
             var input = Ui.Get<TextBox>(Popup, "QuestionInput");
             string question = input.Text.Trim();
             if (question.Length == 0) return;
             if (demo) { ShowError("这是演示内容。配置 API 后可进行真实追问。", OpenSettings); return; }
+            if (BlockedByRecovery()) return;
             string topic = selectedWord == null ? "原句" : selectedWord.Text;
             await SendChatForAsync(Current, topic, selectedCard, question);
         }
@@ -479,7 +498,12 @@ namespace Leaf
         // the input happens to hold later. The saved provider is re-read for each attempt.
         private async Task SendChatForAsync(TranslationRecord record, string topic, WordCard card, string question)
         {
+            // This is the real send entry: both the public SendChatAsync and a stored retry
+            // closure reach it, so the exit, session-identity and recovery guards live here.
+            if (exiting) return;
             if (record == null || chatBusy) return;
+            if (!ReferenceEquals(Current, record)) return;
+            if (BlockedByRecovery()) return;
             var provider = Json.Copy(Store.Settings.Provider);
             long version = generation.Next();
             chatCancellation = new CancellationTokenSource(); var cancellation = chatCancellation;
@@ -505,7 +529,7 @@ namespace Leaf
                 var input = Ui.Get<TextBox>(Popup, "QuestionInput");
                 if (input.Text.Trim() == question) input.Clear();
                 record.Draft = input.Text;
-                response.Text = result; chatBusy = false; DrawChat(); SaveCurrent(); Busy();
+                response.Text = result; chatBusy = false; DrawChat(); await SaveCurrentAsync(); Busy();
                 Ui.Get<ScrollViewer>(Popup, "BodyScroll").ScrollToBottom();
             } catch (OperationCanceledException) { }
             catch (Exception error) {
@@ -527,6 +551,7 @@ namespace Leaf
         {
             demo = true;
             Current = TranslationRecord.Create("His combat prowess gives him an edge.", "剪贴板", Store.Settings);
+            currentHistoryEpoch = Store.HistoryEpoch;
             Current.Translation = "他出色的战斗本领让他占据优势。"; Current.Completed = true;
             var word = TextTools.Pieces(Current.Source).First(p => p.Text == "prowess");
             Current.Cards[word.Key] = DemoCard("prowess");

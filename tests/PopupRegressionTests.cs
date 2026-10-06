@@ -43,6 +43,8 @@ internal static class PopupRegressionTests
         await RetryUsesLatestProvider(Path.Combine(folder, "retry-provider"));
         await CachedRestoreKeepsWordCard(Path.Combine(folder, "cached-card"));
         await FailedFollowupRetriesOriginalQuestion(Path.Combine(folder, "failed-followup"));
+        await RecoveryBarrierBlocksFollowupRetry(Path.Combine(folder, "barrier-retry"));
+        await FollowupRetryWorksAfterRecovery(Path.Combine(folder, "barrier-cleared"));
         return assertions;
     }
 
@@ -288,6 +290,75 @@ internal static class PopupRegressionTests
             await Until(() => record.Chat.Count == 2);
             Check(record.Chat[1].Content == "重试的回答", "The retried follow-up lands in the conversation");
         }
+    }
+
+    // A retry closure captured before the barrier is irrelevant once an external rollback
+    // still needs an explicit reapply; it must not start a new request.
+    private static async Task RecoveryBarrierBlocksFollowupRetry(string folder)
+    {
+        var handler = new ControlledHandler();
+        using (var shell = new AppShell(ConfiguredStore(folder), false, new LlmClient(handler))) {
+            var translation = shell.TranslateAsync("A recovery barrier sentence.", "选中文字", false);
+            handler.ReplyStream(0, "夹具译文");
+            await translation;
+            Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text = "original barrier question";
+            var chat = shell.SendChatAsync();
+            handler.ReplyError(1, HttpStatusCode.InternalServerError);
+            await chat;
+            Check(Ui.Get<Button>(shell.Popup, "RetryButton").Visibility == Visibility.Visible,
+                "A failed follow-up leaves its original-question retry before the barrier");
+            await ManufactureRecovery(shell.Store);
+            int before = handler.Requests.Count;
+            Click(shell.Popup, "RetryButton");
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            await Task.Delay(60);
+            Check(handler.Requests.Count == before,
+                "A follow-up retry cannot bypass the recovery barrier");
+        }
+    }
+
+    // Clearing the barrier with a normal explicit reapply must not disable the retry entry
+    // forever: the original question is still sent once the barrier is gone.
+    private static async Task FollowupRetryWorksAfterRecovery(string folder)
+    {
+        var handler = new ControlledHandler();
+        using (var shell = new AppShell(ConfiguredStore(folder), false, new LlmClient(handler))) {
+            var translation = shell.TranslateAsync("A recovery clears sentence.", "选中文字", false);
+            handler.ReplyStream(0, "夹具译文");
+            await translation;
+            var record = shell.Current;
+            Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text = "original cleared question";
+            var chat = shell.SendChatAsync();
+            handler.ReplyError(1, HttpStatusCode.InternalServerError);
+            await chat;
+            await ManufactureRecovery(shell.Store);
+            var resume = Json.Copy(shell.Store.Settings); resume.TargetLanguage = "中文";
+            await shell.ApplySettingsAsync(SettingsUpdate.Preferences(resume),
+                new Dictionary<string, string>(), new HashSet<string>(), true);
+            Check(!shell.Store.NeedsExplicitRecovery, "An explicit reapply clears the fixture recovery barrier");
+            int before = handler.Requests.Count;
+            Click(shell.Popup, "RetryButton");
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            await Task.Delay(60);
+            Check(handler.Requests.Count == before + 1 && handler.Requests[before].Body.Contains("original cleared question"),
+                "After recovery the original-question retry still sends the original question");
+            handler.ReplyStream(before, "恢复后的回答");
+            await Until(() => record.Chat.Count == 2);
+            Check(record.Chat[1].Content == "恢复后的回答", "The retried follow-up lands after recovery");
+        }
+    }
+
+    // Files are rolled back but an applied external effect could not be, which is exactly the
+    // state that requires an explicit reapply before requests may run again.
+    private static async Task ManufactureRecovery(LocalStore store)
+    {
+        bool failed = false;
+        try {
+            var next = Json.Copy(store.Settings); next.TargetLanguage = "日本語";
+            await store.CommitSettingsAsync(SettingsUpdate.Preferences(next),
+                (committed, candidate) => { throw new Exception("fixture external apply failure"); }, null);
+        } catch (UserError) { failed = true; }
+        Check(failed && store.NeedsExplicitRecovery, "The fixture leaves an explicit recovery barrier");
     }
 
     private static System.Windows.Documents.Hyperlink WordLink(Window popup, string text)
