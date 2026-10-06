@@ -123,6 +123,8 @@ internal static class SelectionTests
         ClipboardBackups();
         await BoundedTraversal();
         await CrossProcessOwnership();
+        await NativeFocusWitness();
+        DirectClipboardPolicy();
         SelectionAnswers();
         assertions += InternalSelectionTests.Run();
         return count + assertions;
@@ -374,6 +376,166 @@ internal static class SelectionTests
         unrelated.Class(321, "Chrome_WidgetWin_1");
         Check(!WindowOwnership.IsVerifiedHostWindow(unrelated, new IntPtr(123), new IntPtr(321)),
             "A WebView class outside the captured window proves nothing");
+    }
+
+    // The reported Codeg case: the UIA ancestor chain of the focused page cannot be proven to
+    // belong to the captured window, but the native keyboard focus sits on the verified
+    // WebView host inside it. That witness - read live per invocation, never a cached process
+    // id or class - allows one bounded selection query confined to the host's subtree, and
+    // nothing outside it is read.
+    private sealed class WitnessTree
+    {
+        public ScriptedUiTree Tree = new ScriptedUiTree();
+        public ScriptedUiNode Root, ShellDocument, Host, Page;
+        public IntPtr NativeFocus { set { Tree.NativeFocus = value; } }
+    }
+
+    private static WitnessTree NewWitnessTree()
+    {
+        var fixture = new WitnessTree();
+        var tree = fixture.Tree;
+        fixture.Root = tree.WindowRoot = new ScriptedUiNode { ControlTypeIdValue = 50033, Selection = null, WindowHandle = 123 };
+        fixture.ShellDocument = fixture.Root.Add(new ScriptedUiNode {
+            ControlTypeIdValue = WindowsSelectionProbe.DocumentTypeId, Selection = "shell selection", WindowHandle = 123 });
+        fixture.Host = fixture.Root.Add(new ScriptedUiNode { ControlTypeIdValue = 50033, Selection = null, WindowHandle = 321, ProcessIdValue = 999 });
+        fixture.Page = fixture.Host.Add(new ScriptedUiNode {
+            ControlTypeIdValue = WindowsSelectionProbe.DocumentTypeId, Selection = "page selection", ProcessIdValue = 999 });
+        // The control-view chain never reaches the host: the page's own ancestor chain is
+        // unproven, so only the native witness can vouch for the host's subtree.
+        fixture.Page.ParentNode = null;
+        tree.Focus = fixture.Page;
+        return fixture;
+    }
+
+    private static async Task NativeFocusWitness()
+    {
+        var target = new CaptureTarget { Window = new IntPtr(123), ProcessId = 456 };
+        var ownership = new ScriptedWindowOwnership();
+        ownership.Child(123, 321); ownership.Class(321, "Chrome_WidgetWin_1");
+        ownership.Child(123, 322); ownership.Class(322, "HwndWrapper[Shell.exe]");
+        ownership.Child(123, 355); ownership.Parent(355, 321);
+        ownership.Child(123, 777); ownership.Class(777, "Chrome_WidgetWin_1");
+        ownership.Child(777, 778); ownership.Parent(778, 777); ownership.Class(778, "Chrome_WidgetWin_1");
+
+        // The control-view chain never reaches the host: the page's own ancestor chain is
+        // unproven, so only the native witness can vouch for the host's subtree.
+        var witnessed = NewWitnessTree();
+        witnessed.NativeFocus = new IntPtr(321);
+        var witnessedResult = await new WindowsSelectionProbe(witnessed.Tree, ownership).ReadAutomationAsync(target, CancellationToken.None);
+        Check(witnessedResult.Status == CaptureStatus.Text && witnessedResult.Text == "page selection",
+            "A native focus inside the verified WebView host subtree answers for the captured window (was "
+                + witnessedResult.Status + "/" + witnessedResult.Reason + ")");
+        Check(witnessed.Page.Reads == 1 && witnessed.ShellDocument.Reads == 0,
+            "The witness-bounded query reads the host's page and nothing outside the subtree");
+
+        // A witness one native level deeper than the host still resolves to the same subtree.
+        var deeper = NewWitnessTree();
+        deeper.NativeFocus = new IntPtr(355);
+        var deeperResult = await new WindowsSelectionProbe(deeper.Tree, ownership).ReadAutomationAsync(target, CancellationToken.None);
+        Check(deeperResult.Status == CaptureStatus.Text && deeperResult.Text == "page selection",
+            "A native focus below the verified host resolves to the same bounded subtree (was "
+                + deeperResult.Status + "/" + deeperResult.Reason + ")");
+
+        // No native witness, or one that does not hang inside the captured window: the
+        // ownership stays unproven and nothing is read - not even the window's own shell.
+        foreach (var caseFocus in new[] { IntPtr.Zero, new IntPtr(777), new IntPtr(322) }) {
+            var unproven = NewWitnessTree();
+            unproven.NativeFocus = caseFocus;
+            var unprovenResult = await new WindowsSelectionProbe(unproven.Tree, ownership).ReadAutomationAsync(target, CancellationToken.None);
+            Check(unprovenResult.Status == CaptureStatus.Unavailable && unprovenResult.Reason == CaptureReason.OwnershipUnproven &&
+                unproven.Page.Reads == 0 && unproven.Host.Reads == 0 && unproven.ShellDocument.Reads == 0,
+                "Without a proven native witness the capture stays OwnershipUnproven and reads nothing (focus "
+                    + caseFocus + ", was " + unprovenResult.Status + "/" + unprovenResult.Reason + ")");
+        }
+
+        // A foreign window's own WebView class proves nothing even when its child is focused.
+        var foreignWitness = NewWitnessTree();
+        foreignWitness.NativeFocus = new IntPtr(778);
+        var foreignResult = await new WindowsSelectionProbe(foreignWitness.Tree, ownership).ReadAutomationAsync(target, CancellationToken.None);
+        Check(foreignResult.Reason == CaptureReason.OwnershipUnproven && foreignResult.Status == CaptureStatus.Unavailable &&
+            foreignWitness.Page.Reads == 0,
+            "A WebView chain outside the captured window is never a witness");
+
+        // The vouched subtree may not be exposed by this tree at all: unproven, and the rest
+        // of the window is not read as a fallback.
+        var missing = new WitnessTree();
+        missing.Root = missing.Tree.WindowRoot = new ScriptedUiNode { ControlTypeIdValue = 50033, Selection = null, WindowHandle = 123 };
+        missing.Page = missing.Root.Add(new ScriptedUiNode {
+            ControlTypeIdValue = WindowsSelectionProbe.DocumentTypeId, Selection = "unvouched selection", ProcessIdValue = 999 });
+        missing.Page.ParentNode = null;
+        missing.Tree.Focus = missing.Page;
+        missing.NativeFocus = new IntPtr(321);
+        var missingResult = await new WindowsSelectionProbe(missing.Tree, ownership).ReadAutomationAsync(target, CancellationToken.None);
+        Check(missingResult.Status == CaptureStatus.Unavailable && missingResult.Reason == CaptureReason.OwnershipUnproven &&
+            missing.Page.Reads == 0,
+            "A witness without an exposed host subtree stays unproven instead of falling back (was "
+                + missingResult.Status + "/" + missingResult.Reason + ")");
+
+        // Locating the subtree is bounded like every other walk: running out of nodes is an
+        // inconclusive capture, never a read of whatever came first.
+        var huge = NewWitnessTree();
+        huge.Root.AddMany(5000);
+        huge.NativeFocus = new IntPtr(321);
+        var hugeResult = await new WindowsSelectionProbe(huge.Tree, ownership).ReadAutomationAsync(target, CancellationToken.None);
+        Check(hugeResult.Status == CaptureStatus.Unavailable && hugeResult.Reason == CaptureReason.AutomationBudget &&
+            huge.Page.Reads == 0,
+            "A witness search too large for the node budget is inconclusive instead of a partial read (was "
+                + hugeResult.Status + "/" + hugeResult.Reason + ")");
+
+        // A truncated walk inside the vouched subtree is equally inconclusive: the one empty
+        // document it reached first cannot conclude the whole subtree is unselected. The
+        // filler nodes hang under the page, so the sibling chain survives the unproven chain
+        // fixure and the walk genuinely runs out of node budget.
+        var truncated = NewWitnessTree();
+        truncated.Page.Selection = "";
+        truncated.Page.AddMany(5000);
+        truncated.NativeFocus = new IntPtr(321);
+        var truncatedResult = await new WindowsSelectionProbe(truncated.Tree, ownership).ReadAutomationAsync(target, CancellationToken.None);
+        Check(truncatedResult.Status == CaptureStatus.Unavailable && truncatedResult.Reason == CaptureReason.AutomationBudget,
+            "A subtree walk that runs out of budget is inconclusive instead of a confirmed empty (was "
+                + truncatedResult.Status + "/" + truncatedResult.Reason + ")");
+    }
+
+    // The direct clipboard read and the copy path share no reasons: an empty clipboard is
+    // ClipboardEmpty (a fact about the clipboard), CopyNoUpdate belongs to a simulated copy
+    // alone, and a direct read never logs a clipboard change it never compared.
+    private static void DirectClipboardPolicy()
+    {
+        var empty = Native.DirectClipboardResult("   \r\n");
+        Check(empty.Status == CaptureStatus.Unavailable && empty.Reason == CaptureReason.ClipboardEmpty &&
+            !empty.Steps[0].Checked.HasFlag(CaptureFields.Clipboard) && !empty.Steps[0].Checked.HasFlag(CaptureFields.Foreground),
+            "A direct clipboard read without text is ClipboardEmpty and claims no unchecked metadata");
+        var read = Native.DirectClipboardResult("clipboard content");
+        Check(read.Status == CaptureStatus.Text && read.Reason == CaptureReason.None &&
+            !read.Steps[0].Checked.HasFlag(CaptureFields.Clipboard),
+            "A direct clipboard read with text is Text without claiming a clipboard change");
+
+        string folder = Path.Combine(Path.GetTempPath(), "leaf-clip-" + Guid.NewGuid().ToString("N"));
+        try {
+            var log = new DiagnosticLog(folder);
+            log.Capture(CaptureTelemetry.For("direct-empty", null, true, "Ctrl+Alt+T", empty));
+            var copySteps = new List<CaptureStep> {
+                new CaptureStep { Stage = "copy_send", Reason = CaptureReason.None, Checked = CaptureFields.Foreground, ForegroundSame = true },
+                new CaptureStep { Stage = "clipboard_read", Reason = CaptureReason.CopyNoUpdate,
+                    Checked = CaptureFields.Foreground | CaptureFields.Clipboard | CaptureFields.Owner,
+                    ClipboardChanged = false, ForegroundSame = true }
+            };
+            log.Capture(CaptureTelemetry.For("copy-noupdate", new CaptureTarget { Window = new IntPtr(123), ProcessId = 456 }, false, "Ctrl+Alt+T",
+                SelectionCaptureResult.Create(CaptureStatus.Unavailable, CaptureReason.CopyNoUpdate, "", copySteps)));
+            var rows = Directory.GetFiles(folder).SelectMany(File.ReadAllLines).ToList();
+            string directRow = rows.First(r => r.Contains("direct-empty") && r.Contains("clipboard_read"));
+            Check(directRow.Contains("ClipboardEmpty") && !directRow.Contains("clipboard_changed") && !directRow.Contains("foreground_same"),
+                "The direct empty read logs ClipboardEmpty without a clipboard_changed or foreground field");
+            string sendRow = rows.First(r => r.Contains("copy-noupdate") && r.Contains("copy_send"));
+            Check(sendRow.Contains("copy_send") && !sendRow.Contains("modifiers_released") && !sendRow.Contains("focus_checked"),
+                "The copy_send stage omits the fields it never checked, such as modifiers");
+            string copyRow = rows.First(r => r.Contains("copy-noupdate") && r.Contains("clipboard_read"));
+            Check(copyRow.Contains("CopyNoUpdate") && copyRow.Contains("clipboard_changed"),
+                "A simulated copy with no update is CopyNoUpdate with its checked metadata");
+        } finally {
+            if (Directory.Exists(folder) && Path.GetFullPath(folder).StartsWith(Path.GetFullPath(Path.GetTempPath()), StringComparison.OrdinalIgnoreCase))
+                Directory.Delete(folder, true);
+        }
     }
 
     // The reported Codeg failure: the page inside the captured window is hosted by another
@@ -887,8 +1049,8 @@ internal static class SelectionTests
             probe.Current = true;
             var captured = SelectionCaptureResult.Success("private-selection-fixture");
             captured.Steps.Add(new CaptureStep {
-                Stage = "uia", Reason = CaptureReason.None, CandidateCount = 3,
-                ControlTypeId = 50030, PatternSupported = true, ForegroundSame = true, ElapsedMs = 12
+                Stage = "uia", Reason = CaptureReason.None, Checked = CaptureFields.Foreground | CaptureFields.Read,
+                CandidateCount = 3, ControlTypeId = 50030, PatternSupported = true, ForegroundSame = true, ElapsedMs = 12
             });
             captured.Steps.Add(new CaptureStep { Stage = "private-selection-fixture", Reason = CaptureReason.None });
             log.Capture(CaptureTelemetry.For("fixture-capture", probe.Snapshot(), false, "Ctrl+Alt+T", captured));
@@ -917,12 +1079,12 @@ internal static class SelectionTests
             // or clipboard content: only the facts a later check can compare.
             var metadata = new DiagnosticLog(folder);
             var detailed = SelectionCaptureResult.Success(""); detailed.Steps.Add(new CaptureStep {
-                Stage = "copy_focus", Reason = CaptureReason.FocusNotOwned, FocusChecked = true, FocusOwned = false,
-                ModifiersReleased = true, ForegroundSame = true, ElapsedMs = 5
+                Stage = "copy_focus", Reason = CaptureReason.FocusNotOwned, Checked = CaptureFields.Foreground | CaptureFields.Modifiers | CaptureFields.Focus,
+                FocusChecked = true, FocusOwned = false, ModifiersReleased = true, ForegroundSame = true, ElapsedMs = 5
             });
             detailed.Steps.Add(new CaptureStep {
-                Stage = "clipboard_read", Reason = CaptureReason.None, ClipboardChanged = true,
-                ClipboardOwnerProcess = 4242, OwnerWindowVerified = true, ElapsedMs = 20
+                Stage = "clipboard_read", Reason = CaptureReason.None, Checked = CaptureFields.Foreground | CaptureFields.Clipboard | CaptureFields.Owner,
+                ClipboardChanged = true, ClipboardOwnerProcess = 4242, OwnerWindowVerified = true, ElapsedMs = 20
             });
             metadata.Capture(CaptureTelemetry.For("fixture-metadata", probe.Snapshot(), false, "Ctrl+Alt+T", detailed));
             string metadataEntries = string.Concat(Directory.GetFiles(folder).Select(File.ReadAllText));
@@ -954,8 +1116,10 @@ internal static class SelectionTests
 internal sealed class ScriptedUiTree : IUiTree
 {
     public ScriptedUiNode Focus, WindowRoot;
+    public IntPtr NativeFocus;
     public bool Foreground = true;
     public IUiNode Focused { get { return Focus; } }
+    public IntPtr NativeFocusWindow { get { return NativeFocus; } }
     public IUiNode Root(IntPtr window) { return WindowRoot; }
     public bool IsForeground(CaptureTarget target) { return Foreground; }
     public Action<ScriptedUiNode> OnRead
@@ -1001,6 +1165,11 @@ internal sealed class ScriptedUiNode : IUiNode
     {
         child.ParentNode = this; child.index = Children.Count; Children.Add(child);
         return child;
+    }
+    // A wide flat list of unreadable siblings, for budget tests.
+    public void AddMany(int count)
+    {
+        for (int i = 0; i < count; i++) Add(new ScriptedUiNode { Selection = null });
     }
     public int ProcessId { get { return ProcessIdValue; } }
     public int ControlTypeId { get { return ControlTypeIdValue; } }
@@ -1107,10 +1276,17 @@ internal sealed class ScriptedWindowOwnership : IWindowOwnership
 {
     public readonly HashSet<string> Children = new HashSet<string>();
     public readonly Dictionary<long, string> Classes = new Dictionary<long, string>();
+    public readonly Dictionary<long, long> Parents = new Dictionary<long, long>();
     public void Child(long parent, long child) { Children.Add(parent + ">" + child); }
     public void Class(long window, string name) { Classes[window] = name; }
+    public void Parent(long child, long parent) { Parents[child] = parent; }
     public bool IsChildOf(IntPtr parent, IntPtr child) { return Children.Contains(parent.ToInt64() + ">" + child.ToInt64()); }
     public string ClassName(IntPtr window) { string name; return Classes.TryGetValue(window.ToInt64(), out name) ? name : ""; }
+    public IntPtr ParentOf(IntPtr window)
+    {
+        long parent;
+        return Parents.TryGetValue(window.ToInt64(), out parent) ? new IntPtr(parent) : IntPtr.Zero;
+    }
 }
 
 // A scripted clipboard: only the format read itself is faked, so the rule that decides

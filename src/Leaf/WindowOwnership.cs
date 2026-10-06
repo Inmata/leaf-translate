@@ -12,6 +12,8 @@ namespace Leaf
         bool IsChildOf(IntPtr parent, IntPtr child);
         // The window class name, "" when Windows did not report one.
         string ClassName(IntPtr window);
+        // The window's native parent, IntPtr.Zero when Windows did not report one.
+        IntPtr ParentOf(IntPtr window);
     }
 
     // The ownership rule of the capture and copy paths: a window that hangs natively under the
@@ -53,6 +55,24 @@ namespace Leaf
                 if (string.Equals(known, name, StringComparison.OrdinalIgnoreCase)) return true;
             return false;
         }
+
+        // The verified WebView host window whose subtree contains the given window inside the
+        // captured one, found by walking the live native parents: the answer for this
+        // invocation, never a cached process id or class from an earlier one. IntPtr.Zero when
+        // the window hangs elsewhere or no verified host stands between it and the captured
+        // window. The walk is bounded; every fact is read again per call.
+        public static IntPtr VerifiedHostOf(IWindowOwnership ownership, IntPtr captured, IntPtr window)
+        {
+            if (ownership == null || captured == IntPtr.Zero || window == IntPtr.Zero) return IntPtr.Zero;
+            IntPtr current = window;
+            for (int depth = 0; depth < 16 && current != IntPtr.Zero; depth++) {
+                if (current == captured) return IntPtr.Zero; // reached the captured window without a host.
+                if (!Contains(ownership, captured, current)) return IntPtr.Zero; // left the captured window.
+                if (IsVerifiedHostWindow(ownership, captured, current)) return current;
+                try { current = ownership.ParentOf(current); } catch { return IntPtr.Zero; }
+            }
+            return IntPtr.Zero;
+        }
     }
 
     // The real native facts: IsChild walks the window hierarchy, GetClassName reads the class.
@@ -60,6 +80,7 @@ namespace Leaf
     {
         [DllImport("user32.dll", SetLastError = true)] private static extern bool IsChild(IntPtr parent, IntPtr child);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(IntPtr window, StringBuilder name, int count);
+        [DllImport("user32.dll")] private static extern IntPtr GetAncestor(IntPtr window, uint flags);
 
         public bool IsChildOf(IntPtr parent, IntPtr child)
         {
@@ -72,6 +93,12 @@ namespace Leaf
             var name = new StringBuilder(256);
             int length = GetClassName(window, name, name.Capacity);
             return length <= 0 ? "" : name.ToString();
+        }
+        // GA_PARENT: the owning parent for a top-level window, the parent for a child one.
+        public IntPtr ParentOf(IntPtr window)
+        {
+            if (window == IntPtr.Zero) return IntPtr.Zero;
+            return GetAncestor(window, 1);
         }
     }
 }

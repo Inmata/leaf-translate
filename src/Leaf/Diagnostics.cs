@@ -70,16 +70,28 @@ namespace Leaf
                 string stage = Token(step.Stage);
                 if (Array.IndexOf(CaptureStages, stage) < 0) continue;
                 elapsed += step.ElapsedMs;
+                // Only the fields the stage really checked are written: an unchecked field is
+                // left out instead of being logged as a false that was never looked at.
+                var fields = step.Checked;
                 var row = Base("capture_stage");
                 row["capture_id"] = id; row["stage"] = stage;
                 row["reason"] = step.Reason.ToString();
-                row["candidate_count"] = step.CandidateCount; row["control_type_id"] = step.ControlTypeId;
-                row["pattern_supported"] = step.PatternSupported; row["foreground_same"] = step.ForegroundSame;
-                row["clipboard_changed"] = step.ClipboardChanged; row["modifiers_released"] = step.ModifiersReleased;
-                row["focus_checked"] = step.FocusChecked; row["focus_owned"] = step.FocusOwned;
-                row["clipboard_owner_process"] = (long)step.ClipboardOwnerProcess;
-                row["owner_window_verified"] = step.OwnerWindowVerified;
-                row["native_error"] = step.NativeError; row["hresult"] = step.HResult;
+                if ((fields & CaptureFields.Read) != 0) {
+                    row["candidate_count"] = step.CandidateCount; row["control_type_id"] = step.ControlTypeId;
+                    row["pattern_supported"] = step.PatternSupported;
+                }
+                if ((fields & CaptureFields.Foreground) != 0) row["foreground_same"] = step.ForegroundSame;
+                if ((fields & CaptureFields.Clipboard) != 0) row["clipboard_changed"] = step.ClipboardChanged;
+                if ((fields & CaptureFields.Modifiers) != 0) row["modifiers_released"] = step.ModifiersReleased;
+                if ((fields & CaptureFields.Focus) != 0) {
+                    row["focus_checked"] = step.FocusChecked; row["focus_owned"] = step.FocusOwned;
+                }
+                if ((fields & CaptureFields.Owner) != 0) {
+                    row["clipboard_owner_process"] = (long)step.ClipboardOwnerProcess;
+                    row["owner_window_verified"] = step.OwnerWindowVerified;
+                }
+                if (step.NativeError != 0) row["native_error"] = step.NativeError;
+                if (step.HResult != 0) row["hresult"] = step.HResult;
                 row["elapsed_ms"] = step.ElapsedMs;
                 Write(row);
             }

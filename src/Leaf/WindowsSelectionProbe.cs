@@ -51,6 +51,10 @@ namespace Leaf
     public interface IUiTree
     {
         IUiNode Focused { get; }
+        // The window the foreground thread's keyboard focus is really on, read natively at
+        // call time. IntPtr.Zero when Windows did not report one. This is the independent
+        // witness for a focus whose UI Automation ancestor chain cannot be proven.
+        IntPtr NativeFocusWindow { get; }
         IUiNode Root(IntPtr window);
         bool IsForeground(CaptureTarget target);
     }
@@ -130,7 +134,8 @@ namespace Leaf
             // A worker that never returns keeps its slot instead of piling up new threads.
             if (Interlocked.CompareExchange(ref automationRunning, 1, 0) != 0)
                 return Task.FromResult(SelectionCaptureResult.Create(CaptureStatus.Unavailable, CaptureReason.AutomationBusy, "",
-                    new List<CaptureStep> { new CaptureStep { Stage = "uia", Reason = CaptureReason.AutomationBusy, ForegroundSame = ForegroundIs(target) } }));
+                    new List<CaptureStep> { new CaptureStep { Stage = "uia", Reason = CaptureReason.AutomationBusy,
+                        Checked = CaptureFields.Foreground, ForegroundSame = ForegroundIs(target) } }));
             var completion = new TaskCompletionSource<SelectionCaptureResult>();
             var owner = this;
             var worker = new Thread(() => {
@@ -139,7 +144,7 @@ namespace Leaf
                 try { outcome = Query(target, cancellation, steps, owner.tree, owner.ownership); }
                 catch (Exception error) {
                     steps.Add(new CaptureStep { Stage = "uia", Reason = CaptureReason.SystemFailure,
-                        HResult = error.HResult, ForegroundSame = ForegroundIs(target) });
+                        Checked = CaptureFields.Foreground, HResult = error.HResult, ForegroundSame = ForegroundIs(target) });
                     outcome = SelectionCaptureResult.Create(CaptureStatus.Unavailable, CaptureReason.SystemFailure, "", steps);
                 }
                 finally { Interlocked.Exchange(ref automationRunning, 0); }
@@ -252,8 +257,19 @@ namespace Leaf
             }
             // A focus that could not be shown to belong to the captured window is not a
             // foreground change, and this window's own tree must not answer for it either.
-            if (!associated && !focusedSameProcess)
-                return Finish(CaptureStatus.Unavailable, CaptureReason.OwnershipUnproven, steps, watch, scan, focusType, false, tree, target);
+            // The native keyboard focus is an independent witness: when it sits on a verified
+            // WebView host window inside the captured one - read live, for this invocation,
+            // not from a cached process id or class - a bounded selection query may run on
+            // that host's subtree. A window identity decides, never a process family.
+            IntPtr hostSubtree = IntPtr.Zero;
+            if (!associated && !focusedSameProcess) {
+                IntPtr nativeFocus = IntPtr.Zero;
+                try { nativeFocus = tree.NativeFocusWindow; } catch { }
+                hostSubtree = nativeFocus == IntPtr.Zero ? IntPtr.Zero
+                    : WindowOwnership.VerifiedHostOf(ownership, target == null ? IntPtr.Zero : target.Window, nativeFocus);
+                if (hostSubtree == IntPtr.Zero)
+                    return Finish(CaptureStatus.Unavailable, CaptureReason.OwnershipUnproven, steps, watch, scan, focusType, false, tree, target);
+            }
 
             if (associated) {
                 // Which chain nodes may answer: the captured window's own process, and the
@@ -272,10 +288,42 @@ namespace Leaf
             bool complete = !budgetSpent && scan.Candidates < MaxCandidates;
             IUiNode root = null;
             try { root = tree.Root(target.Window); } catch { }
-            if (root == null) complete = false;
-            if (root != null && complete && scan.Visited < MaxNodes) {
+            if (root == null) {
+                complete = false;
+                if (hostSubtree != IntPtr.Zero && !budgetSpent)
+                    return Finish(CaptureStatus.Unavailable, CaptureReason.OwnershipUnproven, steps, watch, scan, focusType, false, tree, target);
+            }
+            // In witness mode the query is confined to the verified host's own subtree: the
+            // element that carries the host window is located first, before anything is read.
+            IUiNode start = root;
+            bool startInsideHost = false;
+            if (root != null && hostSubtree != IntPtr.Zero) {
+                var locate = new Queue<IUiNode>();
+                locate.Enqueue(root);
+                while (locate.Count > 0 && scan.Visited < MaxNodes) {
+                    if (Stopped(cancellation)) return Cancelled(steps);
+                    if (watch.ElapsedMilliseconds > AutomationBudgetMs) { budgetSpent = true; break; }
+                    IUiNode current = locate.Dequeue(); scan.Visited++;
+                    if (WindowHandle(current) == hostSubtree.ToInt64()) { start = current; startInsideHost = true; break; }
+                    IUiNode child = FirstChild(current);
+                    while (child != null) {
+                        if (Stopped(cancellation)) return Cancelled(steps);
+                        if (watch.ElapsedMilliseconds > AutomationBudgetMs) { budgetSpent = true; break; }
+                        if (scan.Visited + locate.Count >= MaxNodes) { budgetSpent = true; break; }
+                        locate.Enqueue(child);
+                        child = NextSibling(child);
+                    }
+                    if (budgetSpent) break;
+                }
+                // The subtree the native focus vouches for is not exposed by this tree: it
+                // stays unproven rather than falling back to the rest of the window.
+                if (!startInsideHost && !budgetSpent)
+                    return Finish(CaptureStatus.Unavailable, CaptureReason.OwnershipUnproven, steps, watch, scan, focusType, false, tree, target);
+                if (!startInsideHost) complete = false;
+            }
+            if (start != null && complete && scan.Visited < MaxNodes) {
                 var pending = new Queue<WalkNode>();
-                pending.Enqueue(new WalkNode { Node = root, InsideVerifiedHost = false });
+                pending.Enqueue(new WalkNode { Node = start, InsideVerifiedHost = startInsideHost });
                 while (pending.Count > 0 && scan.Visited < MaxNodes && scan.Candidates < MaxCandidates) {
                     if (Stopped(cancellation)) return Cancelled(steps);
                     if (watch.ElapsedMilliseconds > AutomationBudgetMs) { budgetSpent = true; break; }
@@ -406,7 +454,8 @@ namespace Leaf
         private static SelectionCaptureResult Success(string text, List<CaptureStep> steps, Stopwatch watch,
             Scan scan, int controlTypeId, IUiTree tree, CaptureTarget target)
         {
-            steps.Add(new CaptureStep { Stage = "uia", Reason = CaptureReason.None, CandidateCount = scan.Candidates,
+            steps.Add(new CaptureStep { Stage = "uia", Reason = CaptureReason.None, Checked = CaptureFields.Foreground | CaptureFields.Read,
+                CandidateCount = scan.Candidates,
                 ControlTypeId = controlTypeId, PatternSupported = true, ForegroundSame = Same(tree, target),
                 ElapsedMs = watch.ElapsedMilliseconds });
             return SelectionCaptureResult.Create(CaptureStatus.Text, CaptureReason.None,
@@ -416,7 +465,8 @@ namespace Leaf
             Stopwatch watch, Scan scan, int controlTypeId, bool patternSupported,
             IUiTree tree, CaptureTarget target)
         {
-            steps.Add(new CaptureStep { Stage = "uia", Reason = reason, CandidateCount = scan.Candidates,
+            steps.Add(new CaptureStep { Stage = "uia", Reason = reason, Checked = CaptureFields.Foreground | CaptureFields.Read,
+                CandidateCount = scan.Candidates,
                 ControlTypeId = controlTypeId, PatternSupported = patternSupported,
                 // An unreadable query reports the code Windows gave it instead of losing it.
                 HResult = scan.ReadError,
@@ -459,6 +509,8 @@ namespace Leaf
                 return element == null ? null : new AutomationUiNode(element);
             }
         }
+        // The real keyboard focus of the foreground thread, read at call time.
+        public IntPtr NativeFocusWindow { get { return Native.ForegroundFocusWindow(); } }
         public IUiNode Root(IntPtr window)
         {
             AutomationElement element = null;

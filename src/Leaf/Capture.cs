@@ -15,6 +15,9 @@ namespace Leaf
     {
         None, Desktop, EmptySelection, UnsupportedPattern, AutomationTimeout,
         AutomationBusy, AutomationBudget, AutomationUnreadable, ForegroundChanged, ModifiersHeld, CopyNoUpdate,
+        // A direct clipboard-mode read found no text. That is what the clipboard held, not a
+        // statement about any selection, so it is never the copy path's "no update".
+        ClipboardEmpty,
         ClipboardOriginUnknown,
         ClipboardBusy, CaptureBusy, InputDenied, SystemFailure, Cancelled,
         // The focused element belongs to another process and could not be shown to be part of
@@ -33,10 +36,26 @@ namespace Leaf
         public bool IsLeaf { get; set; }
     }
 
+    // The fields one stage actually checked. A stage logs only what it looked at: a copy
+    // stage that never asked about modifiers must not emit "modifiers_released:false" -
+    // an absent field reads as unknown instead of a misleading checked-and-false.
+    [Flags]
+    public enum CaptureFields
+    {
+        None = 0,
+        Foreground = 1,   // foreground_same
+        Clipboard = 2,    // clipboard_changed
+        Modifiers = 4,    // modifiers_released
+        Focus = 8,        // focus_checked, focus_owned
+        Owner = 16,       // clipboard_owner_process, owner_window_verified
+        Read = 32         // candidate_count, control_type_id, pattern_supported
+    }
+
     // One stage of one invocation. Stage names come from a fixed whitelist in DiagnosticLog.
     public sealed class CaptureStep
     {
         public string Stage { get; set; }
+        public CaptureFields Checked { get; set; }
         public CaptureReason Reason { get; set; }
         public int CandidateCount { get; set; }
         public int ControlTypeId { get; set; }
@@ -142,6 +161,7 @@ namespace Leaf
             switch (reason) {
                 case CaptureReason.ClipboardBusy: detail = "剪贴板暂时不可用。"; break;
                 case CaptureReason.CopyNoUpdate: detail = "没有读到可用的文字。"; break;
+                case CaptureReason.ClipboardEmpty: detail = "剪贴板里没有文字。"; break;
                 case CaptureReason.ModifiersHeld: detail = "按键还没有松开，请松开快捷键后重试。"; break;
                 case CaptureReason.ForegroundChanged: detail = "前台窗口已经变化，取词已取消。"; break;
                 case CaptureReason.AutomationBusy: detail = "上一次取词还没有结束。"; break;
@@ -193,7 +213,8 @@ namespace Leaf
             long mark = 0;
             bool current = probe.IsCurrent(target);
             mark = watch.ElapsedMilliseconds;
-            steps.Add(new CaptureStep { Stage = "snapshot", Reason = CaptureReason.None, ForegroundSame = current, ElapsedMs = mark });
+            steps.Add(new CaptureStep { Stage = "snapshot", Reason = CaptureReason.None, Checked = CaptureFields.Foreground,
+                ForegroundSame = current, ElapsedMs = mark });
 
             if (clipboardMode) {
                 var fromClipboard = await probe.ReadClipboardAsync(target, cancellation);
@@ -212,7 +233,8 @@ namespace Leaf
                 // The foreground can move while UIA is querying; never inject a copy then.
                 if (!probe.IsCurrent(target)) {
                     deadline.Cancel(); Abandon(automation);
-                    steps.Add(new CaptureStep { Stage = "uia", Reason = CaptureReason.ForegroundChanged, ForegroundSame = false, ElapsedMs = automationWatch.ElapsedMilliseconds });
+                    steps.Add(new CaptureStep { Stage = "uia", Reason = CaptureReason.ForegroundChanged,
+                        Checked = CaptureFields.Foreground, ForegroundSame = false, ElapsedMs = automationWatch.ElapsedMilliseconds });
                     return SelectionCaptureResult.Create(CaptureStatus.Unavailable, CaptureReason.ForegroundChanged, "", steps);
                 }
                 if (first == automation) {
@@ -224,6 +246,7 @@ namespace Leaf
                     if (result != null && result.Steps != null && result.Steps.Count > 0) Merge(steps, result.Steps);
                     else steps.Add(new CaptureStep {
                         Stage = "uia", Reason = result == null ? CaptureReason.SystemFailure : result.Reason,
+                        Checked = CaptureFields.Foreground | CaptureFields.Read,
                         PatternSupported = concluded, ForegroundSame = true, ElapsedMs = automationWatch.ElapsedMilliseconds
                     });
                     if (concluded) return SelectionCaptureResult.Create(result.Status, result.Reason, result.Text, new List<CaptureStep>(steps));
@@ -235,7 +258,8 @@ namespace Leaf
                 cancellation.ThrowIfCancellationRequested();
                 if (!probe.IsCurrent(target)) {
                     long now = watch.ElapsedMilliseconds;
-                    steps.Add(new CaptureStep { Stage = "copy_wait", Reason = CaptureReason.ForegroundChanged, ForegroundSame = false, ElapsedMs = now - mark });
+                    steps.Add(new CaptureStep { Stage = "copy_wait", Reason = CaptureReason.ForegroundChanged,
+                        Checked = CaptureFields.Foreground, ForegroundSame = false, ElapsedMs = now - mark });
                     return SelectionCaptureResult.Create(CaptureStatus.Unavailable, CaptureReason.ForegroundChanged, "", steps);
                 }
                 var copied = await probe.CopySelectionAsync(target, cancellation);

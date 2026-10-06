@@ -282,6 +282,7 @@ namespace Leaf
             bool released = WaitForModifiers(deadline.Token, 600, host);
             steps.Add(new CaptureStep {
                 Stage = "copy_wait", Reason = released ? CaptureReason.None : CaptureReason.ModifiersHeld,
+                Checked = CaptureFields.Foreground | CaptureFields.Modifiers,
                 ModifiersReleased = released, ForegroundSame = host.ForegroundWindow == target.Window,
                 ElapsedMs = Next(watch, ref mark)
             });
@@ -325,6 +326,7 @@ namespace Leaf
                 Reason = !releasedNow ? CaptureReason.ModifiersHeld
                     : !foregroundNow ? CaptureReason.ForegroundChanged
                     : focusChecked && !focusOwned ? CaptureReason.FocusNotOwned : CaptureReason.None,
+                Checked = CaptureFields.Foreground | CaptureFields.Modifiers | CaptureFields.Focus,
                 ModifiersReleased = releasedNow, ForegroundSame = foregroundNow,
                 FocusChecked = focusChecked, FocusOwned = focusOwned, ElapsedMs = Next(watch, ref mark)
             });
@@ -338,6 +340,7 @@ namespace Leaf
             bool sent = host.SendCopy();
             steps.Add(new CaptureStep {
                 Stage = "copy_send", Reason = sent ? CaptureReason.None : CaptureReason.InputDenied,
+                Checked = CaptureFields.Foreground,
                 NativeError = sent ? 0 : host.SendError, ForegroundSame = host.ForegroundWindow == target.Window,
                 ElapsedMs = Next(watch, ref mark)
             });
@@ -381,6 +384,7 @@ namespace Leaf
                     ? (sequenceMoved ? CaptureReason.ClipboardOriginUnknown : CaptureReason.CopyNoUpdate)
                     : textRaced ? CaptureReason.ClipboardOriginUnknown
                     : readFailed ? CaptureReason.ClipboardBusy : CaptureReason.None,
+                Checked = CaptureFields.Foreground | CaptureFields.Clipboard | CaptureFields.Owner,
                 HResult = readFailed ? readError.HResult : 0,
                 ClipboardChanged = captured != 0, ForegroundSame = host.ForegroundWindow == target.Window,
                 ClipboardOwnerProcess = ownerProcess, OwnerWindowVerified = ownerWindowVerified,
@@ -413,6 +417,7 @@ namespace Leaf
         {
             if (previous == null) {
                 steps.Add(new CaptureStep { Stage = "clipboard_restore", Reason = CaptureReason.ClipboardOriginUnknown,
+                    Checked = CaptureFields.Foreground | CaptureFields.Clipboard,
                     ClipboardChanged = false, ForegroundSame = host.ForegroundWindow == target.Window, ElapsedMs = Next(watch, ref mark) });
                 return;
             }
@@ -428,6 +433,7 @@ namespace Leaf
             bool cancelled = Stopped(cancellation);
             if (cancelled) {
                 steps.Add(new CaptureStep { Stage = "clipboard_restore", Reason = CaptureReason.Cancelled,
+                    Checked = CaptureFields.Foreground | CaptureFields.Clipboard,
                     ClipboardChanged = false, ForegroundSame = foregroundSame, ElapsedMs = Next(watch, ref mark) });
                 return;
             }
@@ -435,6 +441,7 @@ namespace Leaf
                 steps.Add(new CaptureStep { Stage = "clipboard_restore",
                     Reason = !originTrusted ? CaptureReason.ClipboardOriginUnknown
                         : foregroundSame ? CaptureReason.CopyNoUpdate : CaptureReason.ForegroundChanged,
+                    Checked = CaptureFields.Foreground | CaptureFields.Clipboard,
                     ClipboardChanged = false, ForegroundSame = foregroundSame, ElapsedMs = Next(watch, ref mark) });
                 return;
             }
@@ -443,6 +450,7 @@ namespace Leaf
             catch (Exception failure) { error = failure.HResult; }
             steps.Add(new CaptureStep { Stage = "clipboard_restore",
                 Reason = restored ? CaptureReason.None : CaptureReason.ClipboardBusy,
+                Checked = CaptureFields.Foreground | CaptureFields.Clipboard,
                 ClipboardChanged = restored, HResult = error, ForegroundSame = foregroundSame,
                 ElapsedMs = Next(watch, ref mark) });
         }
@@ -493,7 +501,8 @@ namespace Leaf
         }
         // The keyboard focus of the foreground thread: the window a simulated copy reaches.
         // Zero means Windows did not report one, which is unknown rather than "somewhere else".
-        private static IntPtr ForegroundFocusWindow()
+        // Also the independent native witness the UIA probe reads for cross-process focus.
+        public static IntPtr ForegroundFocusWindow()
         {
             IntPtr foreground = GetForegroundWindow();
             if (foreground == IntPtr.Zero) return IntPtr.Zero;
@@ -622,17 +631,26 @@ namespace Leaf
             }
         }
 
+        // The direct clipboard-mode read maps what the clipboard held onto a typed result.
+        // No text is what the clipboard held - a fact about the clipboard, never about a
+        // selection - so it is ClipboardEmpty, not the copy path's CopyNoUpdate, and the
+        // stage claims no clipboard change it never compared sequences for.
+        public static SelectionCaptureResult DirectClipboardResult(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+                return SelectionCaptureResult.Create(CaptureStatus.Unavailable, CaptureReason.ClipboardEmpty, "",
+                    new List<CaptureStep> { new CaptureStep { Stage = "clipboard_read", Reason = CaptureReason.ClipboardEmpty } });
+            return SelectionCaptureResult.Create(CaptureStatus.Text, CaptureReason.None, text,
+                new List<CaptureStep> { new CaptureStep { Stage = "clipboard_read", Reason = CaptureReason.None } });
+        }
+
         // Clipboard mode reads the clipboard only for the invocation that asked for it.
         public static async Task<SelectionCaptureResult> ReadClipboardAsync(CaptureTarget target, CancellationToken cancellation)
         {
             if (Stopped(cancellation)) return SelectionCaptureResult.NoText(CaptureStatus.Cancelled, CaptureReason.Cancelled);
             try {
                 string text = await ClipboardTextAsync();
-                if (string.IsNullOrWhiteSpace(text))
-                    return Step(CaptureStatus.Unavailable, CaptureReason.CopyNoUpdate, "clipboard_read", CaptureReason.CopyNoUpdate);
-                return SelectionCaptureResult.Create(CaptureStatus.Text, CaptureReason.None, text, new List<CaptureStep> {
-                    new CaptureStep { Stage = "clipboard_read", Reason = CaptureReason.None, ClipboardChanged = true }
-                });
+                return DirectClipboardResult(text);
             } catch (OperationCanceledException) {
                 return SelectionCaptureResult.NoText(CaptureStatus.Cancelled, CaptureReason.Cancelled);
             } catch (UserError error) {
