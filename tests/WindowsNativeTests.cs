@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -51,7 +52,31 @@ public static class WindowsNativeTests
         settings.ProviderId = settings.Providers[0].Id;
         store.SaveSettings(settings);
         string sampleKey = "Leaf fake credential fixture 中文";
-        var credentialScopes = settings.Providers.Select(p => p.Id).ToList();
+        var migrationProfile = new ProviderProfile { Id = prefix + "migration", Name = "Migration",
+            BaseUrl = "https://legacy.invalid/v1", Model = "legacy-model" };
+        var invalidProfile = new ProviderProfile { Id = prefix + "migration-invalid", BaseUrl = "http://remote.example.invalid/v1" };
+        // Declare every credential scope this run can create: the migrated legacy target, the
+        // endpoint-bound target it moves to, the invalid profile's retained legacy target, and
+        // the endpoint-bound target the settings commit writes for the chosen provider.
+        var credentialScopes = new List<string> {
+            migrationProfile.Id,
+            Credentials.ScopedId(migrationProfile),
+            invalidProfile.Id,
+            Credentials.ScopedId(settings.Providers[2])
+        };
+        try {
+            Credentials.Save(migrationProfile.Id, "legacy-migration-fixture");
+            Credentials.MigrateLegacyProfiles(new[] { migrationProfile });
+            Check(Credentials.Read(migrationProfile) == "legacy-migration-fixture",
+                "Legacy provider keys migrate to the endpoint-bound target");
+            Check(Credentials.Read(migrationProfile.Id) == "", "A verified migration removes the legacy provider target");
+            Credentials.Save(invalidProfile.Id, "invalid-legacy-fixture");
+            Credentials.MigrateLegacyProfiles(new[] { invalidProfile });
+            Check(Credentials.Read(invalidProfile.Id) == "invalid-legacy-fixture",
+                "Migration keeps a legacy key when the profile has no valid endpoint");
+        } finally {
+            foreach (var scope in credentialScopes) { try { Credentials.Delete(scope); } catch { } }
+        }
         try {
             using (var transport = new FixtureTransport())
             using (var shell = new AppShell(store, true, new LlmClient(transport))) {
@@ -61,14 +86,18 @@ public static class WindowsNativeTests
                 Ui.Get<PasswordBox>(window.Window, "ApiKeyInput").Password = sampleKey;
                 Ui.Get<TextBox>(window.Window, "ShortcutInput").Text = "alt + space";
                 Ui.Get<Button>(window.Window, "SaveSettingsButton").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                await shell.WaitForSettingsAsync();
                 string chosenId = settings.Providers[2].Id;
                 Check(store.Settings.ProviderId == chosenId, "The chosen provider is saved with its API key");
-                Check(Credentials.Read(chosenId) == sampleKey && Credentials.Read(settings.Providers[0].Id) == "", "Credential Manager retains a Unicode key under the selected provider");
+                var chosenProfile = store.Settings.Provider;
+                Check(Credentials.Read(chosenProfile) == sampleKey && Credentials.Read(store.Settings.Providers[0]) == "",
+                    "Credential Manager retains a Unicode key under the endpoint-bound provider target");
                 Check(!File.ReadAllText(Path.Combine(folder, "settings.json")).Contains(sampleKey), "Native credential saving never writes the key into local settings");
                 Check(Ui.Get<PasswordBox>(window.Window, "ApiKeyInput").Password.Length == 0 &&
                     Ui.Get<TextBlock>(window.Window, "KeyPlaceholder").Text.Replace(" ", "") == "●●●●●●●●" &&
                     Ui.Get<TextBlock>(window.Window, "KeyHint").Text.Contains("已保存密钥"), "Applying a key clears the editor, shows only password dots and places its saved status below");
                 window.Window.Close();
+                await shell.WaitForSettingsAsync();
                 window = new SettingsWindow(shell);
                 Check(((ProviderProfile)Ui.Get<ComboBox>(window.Window, "ProviderCombo").SelectedItem).Id == chosenId &&
                     Ui.Get<TextBlock>(window.Window, "KeyHint").Text.Contains("已保存密钥"), "Reopened settings recognize the saved key for the active provider");
@@ -77,17 +106,20 @@ public static class WindowsNativeTests
                 Check(keyEditor.Password.Length == 0 && keyEditor.PasswordChar == '●' && mask.Visibility == Visibility.Visible,
                     "Reopened saved credentials are represented by a visible separate dot mask, never filled back into the password editor");
                 keyEditor.Password = "replacement-fixture";
-                Check(mask.Visibility == Visibility.Collapsed && Credentials.Read(chosenId) == sampleKey,
+                Check(mask.Visibility == Visibility.Collapsed && Credentials.Read(chosenProfile) == sampleKey,
                     "Typing a replacement hides the mask and keeps the saved key until explicitly applied");
                 keyEditor.Clear();
                 Check(mask.Visibility == Visibility.Visible && !mask.Text.Contains("已保存") && mask.Text.Replace(" ", "") == "●●●●●●●●",
                     "Clearing an uncommitted replacement restores a dots-only placeholder");
                 Ui.Get<Button>(window.Window, "SaveSettingsButton").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-                Check(Credentials.Read(chosenId) == sampleKey, "Saving with a blank password preserves the existing credential");
+                await shell.WaitForSettingsAsync();
+                Check(Credentials.Read(chosenProfile) == sampleKey, "Saving with a blank password preserves the existing credential");
                 Ui.Get<ComboBox>(window.Window, "ModelInput").Text = "fixture-model-2"; await Task.Delay(650);
-                Check(store.Settings.Provider.Model == "fixture-model-2" && Credentials.Read(chosenId) == sampleKey,
+                await shell.WaitForSettingsAsync();
+                Check(store.Settings.Provider.Model == "fixture-model-2" && Credentials.Read(store.Settings.Provider) == sampleKey,
                     "Model auto-apply preserves the saved native key");
                 window.Window.Close();
+                await shell.WaitForSettingsAsync();
 
                 window = new SettingsWindow(shell); window.Window.Show(); window.Window.Activate();
                 var recorder = Ui.Get<TextBox>(window.Window, "ShortcutInput");
@@ -144,6 +176,34 @@ public static class WindowsNativeTests
                 Check(shell.Popup.IsActive && Ui.Get<TextBox>(shell.Popup, "SourceInput").IsKeyboardFocused &&
                     Ui.Get<TextBox>(shell.Popup, "SourceInput").SelectedText == shell.Current.Source,
                     "Explicit direct input focuses the editor and selects the original for replacement");
+                // Keyboard entry into a word and the collapse behaviour, which offscreen
+                // rendering cannot prove. What runs here is focus and activation on a real
+                // window: the desktop matrix still has to confirm the real Tab order and the
+                // cross-application foreground, so this is not claimed as done on a desktop.
+                shell.OpenRecord(shell.Current); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                var words = WordLinks(shell.Popup);
+                Check(words.Count > 0 && words.All(x => x.Focusable && x.ToolTip != null),
+                    "Original words are focusable and explain themselves in a real window");
+                var word = words[0];
+                word.Focus(); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                Check(word.IsKeyboardFocused, "A word takes keyboard focus, which is the state Tab moves to");
+                int beforeLookup = transport.Calls;
+                word.RaiseEvent(new RoutedEventArgs(System.Windows.Documents.Hyperlink.ClickEvent));
+                await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                Check(transport.Calls > beforeLookup, "Activating the focused word starts its explanation");
+                // An external window owns the foreground, so the collapse check never compares
+                // Leaf with Leaf's own handle.
+                var foreign = new Window {
+                    Title = "Leaf focus fixture", Width = 240, Height = 120, Left = 16, Top = 16, ShowInTaskbar = false
+                };
+                foreign.Show(); foreign.Activate(); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                IntPtr foreignHandle = new WindowInteropHelper(foreign).Handle;
+                shell.ShowPopup(); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                Check(Native.GetForegroundWindow() == foreignHandle,
+                    "Showing the popup leaves the foreground to the other window that owns it");
+                shell.HidePopup(); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+                Check(Native.GetForegroundWindow() == foreignHandle, "Collapsing the popup leaves the foreground application alone");
+                foreign.Close(); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
                 if (!OpenClipboard(new WindowInteropHelper(shell.Popup).Handle)) throw new Exception("Could not reserve clipboard for the isolated contention check.");
                 try {
                     var copy = Native.CopyTextAsync("Clipboard contention fixture");
@@ -160,6 +220,7 @@ public static class WindowsNativeTests
                 Native.SetWindowPos(new WindowInteropHelper(shell.Popup).Handle, new IntPtr(-1), original.Left - 60, original.Top + 12, 0, 0, 0x0011);
                 await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
                 shell.HidePopup();
+                await shell.WaitForPersistenceAsync();
                 var placement = new LocalStore(folder).Settings.Placement;
                 Check(Math.Abs(placement.Width - 520) < 1 && Math.Abs(placement.Height - 570) < 1, "A native resize persists the actual popup dimensions");
                 shell.ShowPopup();
@@ -188,18 +249,29 @@ public static class WindowsNativeTests
                 shell.HidePopup();
             }
         } finally {
+            // The touched and cleanup sets are exactly the same declared scopes, and each is
+            // deleted before its absence is reported, so a leftover credential fails the run.
             foreach (var scope in credentialScopes) Console.WriteLine("NATIVE-EVIDENCE touched provider=" + scope);
-            foreach (var scope in credentialScopes) Credentials.Delete(scope);
+            foreach (var scope in credentialScopes) { try { Credentials.Delete(scope); } catch { } }
             foreach (var scope in credentialScopes) {
                 Console.WriteLine("NATIVE-EVIDENCE cleanup provider=" + scope + " credential_present=" + (Credentials.Read(scope) == "" ? "false" : "true"));
             }
         }
     }
+    private static List<System.Windows.Documents.Hyperlink> WordLinks(Window popup)
+    {
+        var links = new List<System.Windows.Documents.Hyperlink>();
+        foreach (var block in Ui.Get<RichTextBox>(popup, "SourceText").Document.Blocks.OfType<System.Windows.Documents.Paragraph>())
+            foreach (var inline in block.Inlines.OfType<System.Windows.Documents.Hyperlink>()) links.Add(inline);
+        return links;
+    }
     private sealed class FixtureTransport : HttpMessageHandler
     {
         public bool KeyMatched;
+        public int Calls;
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellation)
         {
+            Calls++;
             KeyMatched = request.Headers.Authorization.Parameter == "Leaf fake credential fixture 中文";
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) {
                 Content = new StringContent("{\"choices\":[{\"message\":{\"content\":\"测试译文\"},\"finish_reason\":\"stop\"}]}", System.Text.Encoding.UTF8, "application/json")

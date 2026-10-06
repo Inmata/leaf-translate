@@ -2,171 +2,471 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading.Tasks;
 
 namespace Leaf
 {
     public sealed class LocalStore
     {
+        private const long ReadLimit = 33554432;
         private readonly string folder;
-        public string Folder { get { return folder; } }
+        private readonly IStoreFiles files;
+        private readonly StoreQueue queue = new StoreQueue();
         private readonly object sync = new object();
         private List<TranslationRecord> records;
-        public Settings Settings { get; private set; }
+        private Settings settings;
+        private long historyEpoch = 1;
+        private readonly HashSet<string> tombstones = new HashSet<string>(StringComparer.Ordinal);
+        private readonly List<FailedWrite> failedWrites = new List<FailedWrite>();
+        private readonly List<FailedSettings> failedSettings = new List<FailedSettings>();
+        private readonly List<FailedCleanup> failedCleanups = new List<FailedCleanup>();
+        public Settings Settings { get { lock (sync) return settings; } }
         public string Warning { get; private set; }
-        public LocalStore(string directory)
+        public bool RecoveryBlocked { get; private set; }
+        // Files were rolled back, but an applied credential/hotkey could not be; a later
+        // explicit settings reapply is required before requests may run again.
+        public bool ExternalRollbackPending { get; private set; }
+        public bool NeedsExplicitRecovery
         {
-            folder = directory; Directory.CreateDirectory(folder);
-            Settings = Read<Settings>("settings.json") ?? Leaf.Settings.Defaults(); Settings.Normalize();
-            records = Read<List<TranslationRecord>>("history.json") ?? new List<TranslationRecord>();
-            records = records.Where(r => r != null && r.Completed && r.Context != null && r.Source != null).ToList();
-            foreach (var record in records) {
-                record.Context.Normalize();
-                if (record.Cards == null) record.Cards = new Dictionary<string, WordCard>();
-                if (record.Chat == null) record.Chat = new List<ChatTurn>();
-            }
-            if (!Settings.HistoryEnabled) records.Clear();
-            Trim();
+            get { return RecoveryBlocked || ExternalRollbackPending; }
         }
+        public string Folder { get { return folder; } }
+        public long HistoryEpoch { get { lock (sync) return historyEpoch; } }
+
+        private sealed class FailedWrite
+        {
+            public Action Retry;
+            public string Id;
+            public long Epoch;
+            public long QueueId;
+        }
+
+        private sealed class FailedSettings
+        {
+            public long QueueId;
+            public string Scope;
+        }
+
+        // A cleanup that runs after a durable commit; it is retried through the same ordered
+        // queue without ever being presented as a rolled-back settings commit.
+        private sealed class FailedCleanup
+        {
+            public Action Retry;
+            public long QueueId;
+        }
+
+        public LocalStore(string directory) : this(directory, new PhysicalStoreFiles()) { }
+
+        public LocalStore(string directory, IStoreFiles files)
+        {
+            folder = directory; this.files = files;
+            Directory.CreateDirectory(folder);
+            var recovery = new AtomicFileBatch(folder, files);
+            try { recovery.Recover(false); } catch { RecoveryBlocked = true; }
+            if (recovery.RecoveryBlocked) RecoveryBlocked = true;
+            ExternalRollbackPending = recovery.ExternalRollbackPending;
+            settings = ReadSettings() ?? Settings.Defaults();
+            records = ReadHistory() ?? new List<TranslationRecord>();
+            if (!settings.HistoryEnabled) records.Clear();
+        }
+
+        public Task SaveSettingsAsync(SettingsUpdate update)
+        {
+            return CommitSettingsAsync(update, null, null);
+        }
+
+        public Task CommitSettingsAsync(SettingsUpdate update, Action<Settings, Settings> applyExternal, Action<Settings, Settings> rollbackExternal)
+        {
+            return CommitSettingsAsync(update, applyExternal, rollbackExternal, false, null);
+        }
+
+        // resolveExternalPending is passed only by an explicit user reapply; it is the only
+        // way to clear a pending external rollback or quarantine an unreadable marker.
+        public Task CommitSettingsAsync(SettingsUpdate update, Action<Settings, Settings> applyExternal,
+            Action<Settings, Settings> rollbackExternal, bool resolveExternalPending, Action afterCommit)
+        {
+            if (update == null) throw new ArgumentNullException("update");
+            return queue.Enqueue(queueId => {
+                bool committed = false;
+                try {
+                    Settings latest; List<TranslationRecord> currentRecords;
+                    lock (sync) { latest = settings; currentRecords = records; }
+                    var candidate = update.Build(latest);
+                    var payloads = new Dictionary<string, string>();
+                    payloads[AtomicFileBatch.SettingsName] = Json.Write(candidate);
+                    List<TranslationRecord> candidateRecords = null;
+                    bool disableBarrier = !candidate.HistoryEnabled && latest.HistoryEnabled;
+                    if (disableBarrier) {
+                        // Turning history off is the user's barrier: every snapshot captured
+                        // before this point is invalid even if this commit fails and history is
+                        // enabled again later. The settings candidate itself stays unpublished.
+                        List<FailedWrite> obsolete;
+                        lock (sync) {
+                            historyEpoch++; tombstones.Clear();
+                            obsolete = failedWrites.ToList(); failedWrites.Clear();
+                        }
+                        AcknowledgeHistoryFailures(obsolete);
+                    }
+                    if (!candidate.HistoryEnabled) {
+                        candidateRecords = new List<TranslationRecord>();
+                        payloads[AtomicFileBatch.HistoryName] =
+                            HistorySnapshots.Encode(candidateRecords, candidate.HistoryLimit).Json;
+                    } else if (candidate.HistoryLimit != latest.HistoryLimit) {
+                        var limited = currentRecords.OrderByDescending(r => r.UpdatedUtcTicks)
+                            .Take(candidate.HistoryLimit).ToList();
+                        var encoded = HistorySnapshots.Encode(limited, candidate.HistoryLimit);
+                        candidateRecords = encoded.Records;
+                        payloads[AtomicFileBatch.HistoryName] = encoded.Json;
+                    }
+                    var batch = new AtomicFileBatch(folder, files);
+                    try {
+                        batch.Commit(payloads,
+                            applyExternal == null ? (Action)null : () => applyExternal(latest, candidate),
+                            rollbackExternal == null ? (Action)null : () => rollbackExternal(latest, candidate),
+                            () => {
+                                // Publish is memory-only: no file, credential or hotkey I/O here.
+                                lock (sync) {
+                                    settings = candidate;
+                                    if (candidateRecords != null) records = candidateRecords;
+                                }
+                            }, resolveExternalPending);
+                        committed = true;
+                        lock (sync) { RecoveryBlocked = false; ExternalRollbackPending = false; }
+                    } finally {
+                        if (batch.RecoveryBlocked) RecoveryBlocked = true;
+                        if (batch.ExternalRollbackPending) ExternalRollbackPending = true;
+                    }
+                    // Only a commit in the same patch scope/target supersedes the matching failure;
+                    // an unrelated success leaves the lost user configuration unresolved.
+                    AcknowledgeSettingsFailures(update.Scope);
+                    RunPostCommitCleanups(queueId, candidate, candidateRecords, afterCommit);
+                } catch (Exception) {
+                    // A post-commit cleanup fault must not be recorded as a failed settings
+                    // commit; the files and memory are already durable.
+                    if (!committed)
+                        lock (sync) failedSettings.Add(new FailedSettings { QueueId = queueId, Scope = update.Scope });
+                    throw;
+                }
+            });
+        }
+
+        // Cleanup runs after the settings files and memory are durable. A cleanup fault never
+        // presents the commit as rolled back, but it stays reported until an explicit retry.
+        private void RunPostCommitCleanups(long queueId, Settings candidate,
+            List<TranslationRecord> candidateRecords, Action afterCommit)
+        {
+            var cleanups = new List<Action>();
+            if (candidateRecords != null && !candidate.HistoryEnabled) cleanups.Add(DeleteHistoryBackups);
+            if (afterCommit != null) cleanups.Add(afterCommit);
+            if (cleanups.Count == 0) return;
+            Exception failure = RunCleanups(cleanups);
+            if (failure == null) return;
+            var retry = new Action(() => {
+                Exception remaining = RunCleanups(cleanups);
+                if (remaining != null) throw remaining;
+            });
+            lock (sync) failedCleanups.Add(new FailedCleanup { Retry = retry, QueueId = queueId });
+            throw new UserError("storage", "本地数据已保存，但清理未完成；请重试。", failure);
+        }
+
+        private static Exception RunCleanups(List<Action> cleanups)
+        {
+            Exception failure = null;
+            foreach (var cleanup in cleanups) {
+                try { cleanup(); }
+                catch (Exception error) { if (failure == null) failure = error; }
+            }
+            return failure;
+        }
+
+        private void AcknowledgeSettingsFailures(string scope)
+        {
+            List<long> resolved;
+            lock (sync) {
+                resolved = failedSettings.Where(item => item.Scope == scope).Select(item => item.QueueId).ToList();
+                failedSettings.RemoveAll(item => item.Scope == scope);
+            }
+            foreach (long id in resolved) queue.AcknowledgeFailure(id);
+        }
+
+        private void AcknowledgeHistoryFailures(List<FailedWrite> items)
+        {
+            foreach (var item in items) queue.AcknowledgeFailure(item.QueueId);
+        }
+
+        // Compatibility wrapper for imperative tests; the UI never calls a synchronous queue wait.
         public void SaveSettings(Settings settings)
         {
-            lock (sync) {
-                settings.Normalize(); Write("settings.json", settings); Settings = settings;
-                if (!Settings.HistoryEnabled) records.Clear();
-                Trim(); Write("history.json", records);
-            }
+            SaveSettingsAsync(SettingsUpdate.Full(settings)).GetAwaiter().GetResult();
         }
+
+        public Task SavePlacementAsync(WindowPlacement placement)
+        {
+            return SaveSettingsAsync(SettingsUpdate.Placement(placement));
+        }
+
         public void SavePlacement(WindowPlacement placement)
         {
+            SavePlacementAsync(placement).GetAwaiter().GetResult();
+        }
+
+        public Task FlushAsync() { return queue.FlushAsync(); }
+
+        // Replays failed history writes in their original order after re-checking the
+        // epoch/tombstone barriers. Only fully resolved failures are acknowledged.
+        public async Task RetryFailedWritesAsync()
+        {
+            List<FailedWrite> pending;
+            List<FailedCleanup> cleanups;
             lock (sync) {
-                var next = Json.Copy(Settings); next.Placement = placement;
-                Write("settings.json", next); Settings = next;
+                pending = failedWrites.ToList();
+                cleanups = failedCleanups.ToList();
+            }
+            foreach (var item in pending) {
+                var capture = item;
+                try {
+                    await queue.EnqueueRetry(() => {
+                        capture.Retry();
+                        lock (sync) failedWrites.Remove(capture);
+                        queue.AcknowledgeFailure(capture.QueueId);
+                    }).ConfigureAwait(false);
+                } catch {
+                    // The original failure entry stays until this snapshot is replayed successfully.
+                }
+            }
+            foreach (var item in cleanups) {
+                var capture = item;
+                try {
+                    await queue.EnqueueRetry(() => {
+                        capture.Retry();
+                        lock (sync) failedCleanups.Remove(capture);
+                        queue.AcknowledgeFailure(capture.QueueId);
+                    }).ConfigureAwait(false);
+                } catch {
+                    // The cleanup stays tracked until it succeeds.
+                }
             }
         }
-        public TranslationRecord Find(string key) { lock (sync) return records.FirstOrDefault(r => r.CacheKey == key); }
+
+        public TranslationRecord Find(string key)
+        {
+            lock (sync) return HistorySnapshots.Copy(records.FirstOrDefault(r => r.CacheKey == key));
+        }
+
         public List<TranslationRecord> History(string query)
         {
             lock (sync) {
                 query = (query ?? "").Trim();
                 return records.Where(r => query.Length == 0 || r.Source.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0 ||
                     (r.Translation ?? "").IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0)
-                    .OrderByDescending(r => r.UpdatedUtcTicks).ToList();
+                    .OrderByDescending(r => r.UpdatedUtcTicks).Select(HistorySnapshots.Copy).ToList();
             }
         }
-        public void Save(TranslationRecord record)
+
+        public void Save(TranslationRecord record) { SaveAsync(record, HistoryEpoch).GetAwaiter().GetResult(); }
+        public Task SaveAsync(TranslationRecord record) { return SaveAsync(record, HistoryEpoch); }
+        public Task SaveAsync(TranslationRecord record, long expectedEpoch)
         {
-            if (!record.Completed) return;
+            if (record == null || !record.Completed) return Task.FromResult(0);
+            var snapshot = HistorySnapshots.Copy(record);
+            return EnqueueHistory(() => SaveCore(snapshot, expectedEpoch), snapshot.Id, expectedEpoch);
+        }
+
+        public void Delete(string id) { DeleteAsync(id).GetAwaiter().GetResult(); }
+        public Task DeleteAsync(string id)
+        {
+            if (string.IsNullOrEmpty(id)) return Task.FromResult(0);
+            long epoch; List<FailedWrite> resolved;
             lock (sync) {
-                if (!Settings.HistoryEnabled) return;
-                records.RemoveAll(r => r.Id == record.Id || r.CacheKey == record.CacheKey);
-                record.UpdatedUtcTicks = DateTime.UtcNow.Ticks; records.Insert(0, record);
-                Trim(); Write("history.json", records);
+                tombstones.Add(id);
+                resolved = failedWrites.Where(item => item.Id == id).ToList();
+                failedWrites.RemoveAll(item => item.Id == id);
+                epoch = historyEpoch;
+            }
+            // A failed write for this id is permanently superseded by the delete tombstone.
+            AcknowledgeHistoryFailures(resolved);
+            return EnqueueHistory(() => DeleteCore(id), id, epoch);
+        }
+
+        public void Clear() { ClearAsync().GetAwaiter().GetResult(); }
+        // The boundary is frozen on the first queued execution so a retry cannot later wipe a
+        // record saved under the new epoch. Computing it at call time would miss a save that had
+        // already passed its epoch check and was still writing in the background.
+        private sealed class ClearBoundary
+        {
+            public HashSet<string> Ids;
+        }
+        public Task ClearAsync()
+        {
+            long epoch; List<FailedWrite> resolved;
+            lock (sync) {
+                epoch = ++historyEpoch; tombstones.Clear();
+                resolved = failedWrites.ToList(); failedWrites.Clear();
+            }
+            AcknowledgeHistoryFailures(resolved);
+            var boundary = new ClearBoundary();
+            return EnqueueHistory(() => ClearCore(boundary), null, epoch);
+        }
+
+        private Task EnqueueHistory(Action action, string id, long epoch)
+        {
+            return queue.Enqueue(queueId => {
+                try { action(); }
+                catch (Exception) {
+                    lock (sync) failedWrites.Add(new FailedWrite {
+                        Retry = action, Id = id, Epoch = epoch, QueueId = queueId
+                    });
+                    throw;
+                }
+            });
+        }
+        private void SaveCore(TranslationRecord snapshot, long expectedEpoch)
+        {
+            var candidate = new List<TranslationRecord>();
+            int limit;
+            lock (sync) {
+                if (!settings.HistoryEnabled) return;
+                if (expectedEpoch != historyEpoch) return;
+                if (tombstones.Contains(snapshot.Id)) return;
+                candidate = records.Where(r => r.Id != snapshot.Id && r.CacheKey != snapshot.CacheKey).ToList();
+                snapshot.UpdatedUtcTicks = DateTime.UtcNow.Ticks;
+                candidate.Insert(0, snapshot);
+                limit = settings.HistoryLimit;
+            }
+            var payload = HistorySnapshots.Encode(candidate, limit);
+            if (payload.Utf8Bytes > HistorySnapshots.HardLimit)
+                throw new UserError("length", "单条历史记录过大，无法安全保存。请缩小输入后重试。");
+            CommitHistoryPayload(payload);
+        }
+        private void DeleteCore(string id)
+        {
+            List<TranslationRecord> candidate;
+            int limit;
+            lock (sync) {
+                candidate = records.Where(r => r.Id != id).ToList();
+                limit = settings.HistoryLimit;
+            }
+            CommitHistoryPayload(HistorySnapshots.Encode(candidate, limit));
+        }
+        // A replayed clear removes exactly the records that existed when the queued clear first
+        // ran, so later successful saves in the same epoch are not wiped by a late retry.
+        private void ClearCore(ClearBoundary boundary)
+        {
+            List<TranslationRecord> candidate; int limit;
+            lock (sync) {
+                if (boundary.Ids == null)
+                    boundary.Ids = new HashSet<string>(records.Select(r => r.Id), StringComparer.Ordinal);
+                candidate = records.Where(r => !boundary.Ids.Contains(r.Id)).ToList();
+                limit = settings.HistoryLimit;
+            }
+            CommitHistoryPayload(HistorySnapshots.Encode(candidate, limit));
+            DeleteHistoryBackups();
+        }
+        private void CommitHistoryPayload(HistorySnapshots.HistoryPayload payload)
+        {
+            var payloads = new Dictionary<string, string> {
+                { AtomicFileBatch.HistoryName, payload.Json }
+            };
+            var batch = new AtomicFileBatch(folder, files);
+            try {
+                batch.Commit(payloads, null, null, () => { lock (sync) records = payload.Records; }, false);
+                RecoveryBlocked = false;
+            } finally {
+                if (batch.RecoveryBlocked) RecoveryBlocked = true;
+                if (batch.ExternalRollbackPending) ExternalRollbackPending = true;
             }
         }
-        public void Delete(string id) { lock (sync) { records.RemoveAll(r => r.Id == id); Write("history.json", records); } }
-        public void Clear() { lock (sync) { records.Clear(); Write("history.json", records); } }
-        private void Trim()
+
+        private Settings ReadSettings()
         {
-            records = records.OrderByDescending(r => r.UpdatedUtcTicks).Take(Settings.HistoryLimit).ToList();
-            while (records.Count > 1 && Json.Write(records).Length > 4194304) records.RemoveAt(records.Count - 1);
-        }
-        private T Read<T>(string name) where T : class
-        {
-            string path = Path.Combine(folder, name);
-            if (!File.Exists(path)) return null;
+            string path = Path.Combine(folder, AtomicFileBatch.SettingsName);
+            if (!files.Exists(path)) return null;
             try {
-                if (new FileInfo(path).Length > 33554432) throw new InvalidDataException();
-                string payload = File.ReadAllText(path, Encoding.UTF8);
-                var result = Json.Read<T>(payload);
-                var settings = result as Settings;
-                if (settings != null && settings.Placement == null) {
+                if (files.Length(path) > ReadLimit) throw new InvalidDataException();
+                string payload = files.Read(path);
+                var parsed = Json.Read<Settings>(payload);
+                if (parsed == null) throw new InvalidDataException();
+                if (parsed.Placement == null) {
                     var legacy = Json.Read<LegacyPlacement>(payload);
                     if (legacy.Positions != null && legacy.Positions.Count > 0) {
                         var position = legacy.Positions.FirstOrDefault(p => p.Key == legacy.Monitor);
                         if (position.Value == null) position = legacy.Positions.First();
-                        settings.Placement = new WindowPlacement { X = position.Value.X, Y = position.Value.Y,
+                        parsed.Placement = new WindowPlacement { X = position.Value.X, Y = position.Value.Y,
                             Width = 456, Height = 620, Screen = position.Key };
                     }
                 }
-                return result;
+                parsed.NormalizeLoaded();
+                return parsed;
             } catch {
-                try { File.Move(path, path + ".corrupt-" + DateTime.UtcNow.ToString("yyyyMMddHHmmss")); } catch { }
-                Warning = "一份本地数据无法读取，已尽量保留备份。请检查设置。"; return null;
+                BackupFile(path, AtomicFileBatch.SettingsName);
+                Warning = "一份本地数据无法读取，已尽量保留备份。请检查设置。";
+                return null;
             }
         }
+
+        private List<TranslationRecord> ReadHistory()
+        {
+            string path = Path.Combine(folder, AtomicFileBatch.HistoryName);
+            if (!files.Exists(path)) return new List<TranslationRecord>();
+            try {
+                if (files.Length(path) > ReadLimit) throw new InvalidDataException();
+                var parsed = Json.Read<List<TranslationRecord>>(files.Read(path));
+                if (parsed == null) return new List<TranslationRecord>();
+                var kept = new List<TranslationRecord>(); int rejected = 0;
+                foreach (var record in parsed) {
+                    if (record != null && record.TryNormalizeLoaded()) kept.Add(record);
+                    else rejected++;
+                }
+                if (rejected > 0) {
+                    QuarantineFile(path, AtomicFileBatch.HistoryName);
+                    Warning = "部分历史记录已跳过，原始数据已保留一份隔离副本。";
+                }
+                return kept;
+            } catch {
+                BackupFile(path, AtomicFileBatch.HistoryName);
+                Warning = "一份本地数据无法读取，已尽量保留备份。请检查设置。";
+                return new List<TranslationRecord>();
+            }
+        }
+
+        private void BackupFile(string path, string name)
+        {
+            try {
+                files.Copy(path, Path.Combine(folder, name + ".corrupt-" + Stamp()), false);
+            } catch { }
+        }
+        private void QuarantineFile(string path, string name)
+        {
+            try {
+                files.Copy(path, Path.Combine(folder, name + ".quarantine-" + Stamp()), false);
+            } catch { }
+        }
+        private static string Stamp()
+        {
+            return DateTime.UtcNow.ToString("yyyyMMddHHmmssfff") + "-" + Guid.NewGuid().ToString("N");
+        }
+        // Sensitive quarantine/corrupt copies must not survive a clear or history-disable while
+        // that operation reports success; cleanup failures stay visible and retryable.
+        private void DeleteHistoryBackups()
+        {
+            bool failed = false;
+            foreach (string pattern in new[] { "history.json.corrupt-*", "history.json.quarantine-*" }) {
+                string[] paths;
+                try { paths = Directory.GetFiles(folder, pattern); }
+                catch { failed = true; continue; }
+                foreach (string path in paths) {
+                    try { files.Delete(path); }
+                    catch { failed = true; }
+                }
+            }
+            if (failed) throw new UserError("storage", "无法清理历史备份，请检查目录权限后重试。");
+        }
+
         private sealed class LegacyPlacement
         {
             public string Monitor { get; set; }
             public Dictionary<string, PointSetting> Positions { get; set; }
-        }
-        private void Write(string name, object value)
-        {
-            string target = Path.Combine(folder, name), temporary = target + ".tmp";
-            try {
-                File.WriteAllText(temporary, Json.Write(value), new UTF8Encoding(false));
-                if (File.Exists(target)) File.Replace(temporary, target, null); else File.Move(temporary, target);
-            } catch {
-                try { if (File.Exists(temporary)) File.Delete(temporary); } catch { }
-                throw new UserError("storage", "无法保存本地数据。请检查磁盘空间或目录权限。");
-            }
-        }
-    }
-    public static class Credentials
-    {
-        private const int Generic = 1;
-        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-        private struct Credential {
-            public int Flags; public int Type; public string TargetName; public string Comment;
-            public System.Runtime.InteropServices.ComTypes.FILETIME LastWritten;
-            public int CredentialBlobSize; public IntPtr CredentialBlob; public int Persist;
-            public int AttributeCount; public IntPtr Attributes; public string TargetAlias; public string UserName;
-        }
-        [DllImport("advapi32.dll", EntryPoint = "CredWriteW", CharSet = CharSet.Unicode, SetLastError = true)]
-        private static extern bool CredWrite(ref Credential credential, int flags);
-        [DllImport("advapi32.dll", EntryPoint = "CredReadW", CharSet = CharSet.Unicode, SetLastError = true)]
-        private static extern bool CredRead(string target, int type, int flags, out IntPtr credential);
-        [DllImport("advapi32.dll", EntryPoint = "CredDeleteW", CharSet = CharSet.Unicode, SetLastError = true)]
-        private static extern bool CredDelete(string target, int type, int flags);
-        [DllImport("advapi32.dll")] private static extern void CredFree(IntPtr credential);
-        private static string Target(string provider) { return "LeafTranslate/" + provider; }
-        public static string Read(string provider)
-        {
-            IntPtr pointer;
-            if (!CredRead(Target(provider), Generic, 0, out pointer)) {
-                if (Marshal.GetLastWin32Error() == 1168) return "";
-                throw new UserError("credentials", "无法读取 Windows 中的已存密钥，请检查系统权限或重新保存密钥。");
-            }
-            try {
-                var credential = (Credential)Marshal.PtrToStructure(pointer, typeof(Credential));
-                if (credential.CredentialBlobSize == 0) return "";
-                byte[] bytes = new byte[credential.CredentialBlobSize];
-                Marshal.Copy(credential.CredentialBlob, bytes, 0, bytes.Length);
-                return Encoding.Unicode.GetString(bytes);
-            } finally { CredFree(pointer); }
-        }
-        public static void Save(string provider, string key)
-        {
-            if (string.IsNullOrWhiteSpace(key)) return;
-            byte[] bytes = Encoding.Unicode.GetBytes(key.Trim());
-            if (bytes.Length > 2560) throw new UserError("key", "密钥过长，请检查填写内容。");
-            IntPtr pointer = Marshal.AllocHGlobal(bytes.Length);
-            try {
-                Marshal.Copy(bytes, 0, pointer, bytes.Length);
-                var credential = new Credential { Type = Generic, TargetName = Target(provider), UserName = "Leaf",
-                    CredentialBlob = pointer, CredentialBlobSize = bytes.Length, Persist = 2 };
-                if (!CredWrite(ref credential, 0)) throw new UserError("credentials", "无法保存密钥到 Windows 凭据管理器。");
-            } finally {
-                for (int i = 0; i < bytes.Length; i++) Marshal.WriteByte(pointer, i, 0);
-                Marshal.FreeHGlobal(pointer); Array.Clear(bytes, 0, bytes.Length);
-            }
-            if (Read(provider) != key.Trim())
-                throw new UserError("credentials", "密钥写入后未能重新读取，请重新保存。");
-        }
-        public static void Delete(string provider)
-        {
-            if (!CredDelete(Target(provider), Generic, 0) && Marshal.GetLastWin32Error() != 1168)
-                throw new UserError("credentials", "无法删除已保存的密钥。");
         }
     }
 }

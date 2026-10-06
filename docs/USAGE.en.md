@@ -38,7 +38,9 @@ Source text is limited to 6000 UTF-16 code units per request. Split long passage
 
 ## Type and copy text
 
-When no selection is captured, the shortcut opens the source editor ready for manual input without a generic error. With existing text, use the pencil beside the source or enable direct input. Press `Enter` or the arrow beside the editor to submit a new conversation; `Shift+Enter` inserts a new line. Clearing the draft without submitting keeps the current result: pressing the shortcut again on the same text restores the conversation, translation, word cards, and questions without repeating the request or adding an API call. `Esc` exits editing and restores the original display.
+When nothing is captured, the shortcut opens a source editor immediately, without a generic error and without discarding an existing translation. With existing text, use the pencil beside the source or enable direct input. Press `Enter` or the arrow button at the right of the input to submit a new conversation; `Shift+Enter` inserts a new line. `Esc` exits editing and restores the original display.
+
+On the shortcut: a confirmed empty selection is not an error and only prepares manual input. When the selection could not be read, the source badge says no selection was captured and its tooltip gives the reason. Pressing the shortcut again on the same text returns to the existing translation, word card and follow-up draft without another request or API call, including after clearing the editor without submitting. An edited but unsubmitted draft is kept rather than overwritten.
 
 Select translated text and press `Ctrl+C`, or use its copy context menu. `Ctrl+A` selects all. Clipboard contention produces a visible error without blocking the UI. There is no separate copy button. Ask is at the lower left; its input can be collapsed.
 
@@ -52,7 +54,9 @@ For phrases or scripts without spaces, select text inside the popup and use **Ex
 
 **Ask (追问)** reveals the question input. It does not pin the popup automatically. Questions concern either the current word or the passage; the topic is displayed above the input.
 
-Use `Enter` to send or `Shift+Enter` for a new line. A new source opens a new conversation. Completed conversations can be restored from history.
+Use `Enter` or the arrow button under the input to send, and `Shift+Enter` for a new line. A new source opens a new conversation. Completed conversations can be restored from history.
+
+**Stop (停止)** cancels whatever translation, word lookup or follow-up is running. The **Retry (重试)** entry that appears then repeats only what was stopped: a stopped word lookup looks up that same word again, and a stopped follow-up sends the original question again even if the input has been edited since. When a word lookup and a follow-up run together, both are restored. It never turns into re-translating the whole sentence, and the existing translation and conversation are kept.
 
 ## Set context and learning preferences
 
@@ -84,9 +88,9 @@ Successful translations are saved locally by default. The original passage, tran
 
 Open **History (历史记录)** from the tray, search the source or translation, and double-click a record or choose **View and continue (查看与继续追问)**. Reopening makes no API call. New word lookups and follow-ups use the current API endpoint and model while preserving the record's learning context.
 
-History keeps the latest 200 entries by default. Retention can be set to 20–1000, with a soft UTF-8 byte limit of about 4 MiB that keeps at least one completed record. If saving fails, Leaf reports it instead of pretending the data was stored. Delete or clear records as needed. **Disabling history saving clears existing records and prevents new ones.**
+History keeps the latest 200 entries by default. Retention can be set to 20–1000, with an additional content-size limit. History is saved on a background queue and exiting waits for the flush; after deleting, clearing or disabling history, late results cannot reappear. Failed saves keep a retryable snapshot and are reported instead of pretending to succeed. History is trimmed to a 4 MiB UTF-8 soft limit (at least one record is kept), and a single record above 32 MiB is refused with a message. Delete or clear records as needed. **Disabling history saving clears existing records and prevents new ones.**
 
-Settings and history are stored in `%LOCALAPPDATA%\LeafTranslate`. If a file cannot be read, Leaf attempts to preserve a `.corrupt-...` backup. API keys are stored separately in Windows Credential Manager under `LeafTranslate/provider-id`.
+Settings and history are stored in `%LOCALAPPDATA%\LeafTranslate`. If a file cannot be read, Leaf attempts to preserve a `.corrupt-<time>-<random>` backup; individually broken records inside otherwise valid JSON are skipped and the original file is kept as a `.quarantine-<time>-<random>` copy. API keys are stored separately in Windows Credential Manager under an endpoint-bound target such as `LeafTranslate/provider-id/endpoint/<digest>`.
 
 Translation sends source text and context to the configured endpoint. Word lookups and follow-ups also send relevant translations, preferences, or recent conversation. Leaf has no project-operated relay server. Stopping a request ends the local wait but does not guarantee the provider will waive usage charges.
 

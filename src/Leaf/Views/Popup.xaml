@@ -8,30 +8,45 @@
           <TextBlock x:Name="SourceBadge" Text="来自剪贴板" FontSize="12" Foreground="{StaticResource Secondary}"/>
         </StackPanel>
         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-          <Button x:Name="SettingsButton" Content="&#xE713;" Style="{StaticResource IconButton}" ToolTip="设置"/>
-          <Button x:Name="PinButton" Content="&#xE718;" Style="{StaticResource IconButton}" ToolTip="置顶并保持显示"/>
-          <Button x:Name="HideButton" Content="&#xE738;" Style="{StaticResource IconButton}" ToolTip="收起"/>
+          <Button x:Name="SettingsButton" Content="&#xE713;" Style="{StaticResource IconButton}" ToolTip="设置" AutomationProperties.Name="设置"/>
+          <Button x:Name="PinButton" Content="&#xE718;" Style="{StaticResource IconButton}" ToolTip="置顶并保持显示" AutomationProperties.Name="置顶或取消置顶"/>
+          <Button x:Name="HideButton" Content="&#xE738;" Style="{StaticResource IconButton}" ToolTip="收起" AutomationProperties.Name="收起浮窗"/>
         </StackPanel>
       </Grid>
       <Border x:Name="SourcePanel" Grid.Row="1" Padding="0,12,0,12">
         <StackPanel>
           <Grid Margin="0,0,0,7">
             <TextBlock Text="原文" Foreground="{StaticResource Muted}" FontSize="12" VerticalAlignment="Center"/>
-            <Button x:Name="EditSourceButton" Content="&#xE70F;" Style="{StaticResource IconButton}" HorizontalAlignment="Right" Height="24" Width="24" ToolTip="编辑原文"/>
+            <Button x:Name="EditSourceButton" Content="&#xE70F;" Style="{StaticResource IconButton}" HorizontalAlignment="Right" Height="24" Width="24" ToolTip="编辑原文" AutomationProperties.Name="编辑原文"/>
           </Grid>
           <RichTextBox x:Name="SourceText" IsReadOnly="True" IsUndoEnabled="False" IsDocumentEnabled="True" BorderThickness="0" Background="Transparent" Padding="0" MaxHeight="100" FontSize="16" Foreground="{StaticResource Secondary}" VerticalScrollBarVisibility="Auto">
             <FlowDocument PagePadding="0" FontFamily="Segoe UI, Microsoft YaHei UI" FontSize="16"/>
           </RichTextBox>
           <Grid x:Name="SourceEditor" Visibility="Collapsed">
-            <TextBox x:Name="SourceInput" AcceptsReturn="True" TextWrapping="Wrap" BorderThickness="0" Background="Transparent" Padding="0,3" MinHeight="38" MaxHeight="110" FontSize="16" MaxLength="6000" VerticalScrollBarVisibility="Auto"/>
-            <TextBlock x:Name="SourcePlaceholder" Text="输入要翻译的文字…" IsHitTestVisible="False" Foreground="{StaticResource Muted}" FontSize="16" Margin="0,3,0,0"/>
-          </Grid>
-          <Grid x:Name="SourceActions" Visibility="Collapsed" Margin="0,8,0,0">
             <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-            <TextBlock x:Name="SourceEditHint" Text="Enter 翻译 · Shift+Enter 换行" FontSize="11" Foreground="{StaticResource Muted}" VerticalAlignment="Center" Margin="0,0,8,0"/>
-            <Button x:Name="TranslateButton" Grid.Column="1" Content="翻译  ↵" Style="{StaticResource PrimaryButton}" FontSize="12" Padding="12,6"/>
+            <TextBox x:Name="SourceInput" Grid.Column="0" Style="{StaticResource PopupEditor}"
+                     AcceptsReturn="True" TextWrapping="Wrap" MinHeight="38" MaxHeight="110"
+                     FontSize="16" MaxLength="6000" VerticalScrollBarVisibility="Auto"
+                     AutomationProperties.Name="原文"/>
+            <TextBox x:Name="SourcePlaceholder" Grid.Column="0" Text="输入要翻译的文字…"
+                     Style="{StaticResource PopupEditor}" IsReadOnly="True" Focusable="False"
+                     IsTabStop="False" IsHitTestVisible="False" AcceptsReturn="True" TextWrapping="Wrap"
+                     MinHeight="38" MaxHeight="110"
+                     Foreground="{StaticResource Muted}"
+                     Padding="{Binding Padding, ElementName=SourceInput}"
+                     FontFamily="{Binding FontFamily, ElementName=SourceInput}"
+                     FontSize="{Binding FontSize, ElementName=SourceInput}"
+                     FontWeight="{Binding FontWeight, ElementName=SourceInput}"/>
+            <Button x:Name="TranslateButton" Grid.Column="1" Margin="8,0,0,0"
+                    Style="{StaticResource PopupActionButton}" VerticalAlignment="Top" Visibility="Collapsed"
+                    ToolTip="翻译" AutomationProperties.Name="翻译原文">
+              <Viewbox Width="14" Height="14">
+                <Path Data="{StaticResource SubmitArrow}" Stroke="{StaticResource Ink}"
+                      StrokeThickness="1.5" StrokeStartLineCap="Round"
+                      StrokeEndLineCap="Round" StrokeLineJoin="Round"/>
+              </Viewbox>
+            </Button>
           </Grid>
-          <TextBlock x:Name="EmptyHint" Text="也可以选中或复制文字，再按快捷键。" Foreground="{StaticResource Muted}" FontSize="12" Margin="0,4,0,0" Visibility="Collapsed"/>
         </StackPanel>
       </Border>
       <ScrollViewer x:Name="BodyScroll" Style="{StaticResource SlimScrollViewer}" Grid.Row="2" VerticalScrollBarVisibility="Auto" Margin="0,18,0,0">
@@ -75,9 +90,13 @@
         </StackPanel>
       </ScrollViewer>
       <Grid Grid.Row="3" Margin="0,14,0,0">
-        <Button x:Name="AskButton" Style="{StaticResource GhostButton}" HorizontalAlignment="Left" FontSize="13" Foreground="{StaticResource Ink}" Padding="8,7" Margin="-8,0,0,0">
+        <Button x:Name="AskButton" Style="{StaticResource GhostButton}" HorizontalAlignment="Left" FontSize="13" Foreground="{StaticResource Ink}" Padding="8,7" Margin="-8,0,0,0" ToolTip="追问这段原文或当前词" AutomationProperties.Name="追问">
           <StackPanel Orientation="Horizontal">
-            <TextBlock Text="&#xE8BD;" FontFamily="Segoe MDL2 Assets" FontSize="14" Margin="0,0,7,0" VerticalAlignment="Center"/>
+            <Viewbox Width="13" Height="13" Margin="0,0,7,0" VerticalAlignment="Center">
+              <Path Data="{StaticResource ChatOutline}" Stroke="{StaticResource Secondary}"
+                    StrokeThickness="1.5" StrokeStartLineCap="Round"
+                    StrokeEndLineCap="Round" StrokeLineJoin="Round"/>
+            </Viewbox>
             <TextBlock Text="追问" FontWeight="Medium" VerticalAlignment="Center"/>
           </StackPanel>
         </Button>
@@ -87,12 +106,24 @@
         <StackPanel>
           <Grid Margin="0,0,0,8">
             <TextBlock x:Name="TopicLabel" Text="关于这段原文" FontSize="12" Foreground="{StaticResource Muted}" VerticalAlignment="Center"/>
-            <Button x:Name="CloseQuestionButton" Content="&#xE70E;" Style="{StaticResource IconButton}" Width="24" Height="24" HorizontalAlignment="Right" ToolTip="收起追问"/>
+            <Button x:Name="CloseQuestionButton" Style="{StaticResource PopupActionButton}" HorizontalAlignment="Right" ToolTip="收起追问" AutomationProperties.Name="收起追问">
+              <Viewbox Width="12" Height="12">
+                <Path Data="{StaticResource FoldChevron}" Stroke="{StaticResource Secondary}"
+                      StrokeThickness="1.5" StrokeStartLineCap="Round"
+                      StrokeEndLineCap="Round" StrokeLineJoin="Round"/>
+              </Viewbox>
+            </Button>
           </Grid>
           <Grid>
-            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="44"/></Grid.ColumnDefinitions>
-            <TextBox x:Name="QuestionInput" AcceptsReturn="True" Height="66" MaxLength="1500" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" Padding="10,8"/>
-            <Button x:Name="SendButton" Grid.Column="1" Content="&#xE724;" FontFamily="Segoe MDL2 Assets" Style="{StaticResource PrimaryButton}" Margin="8,0,0,0" Padding="0" VerticalAlignment="Bottom" Height="36" ToolTip="发送（Enter；Shift+Enter 换行）"/>
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <TextBox x:Name="QuestionInput" AcceptsReturn="True" Height="66" MaxLength="1500" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" Padding="10,8" AutomationProperties.Name="追问输入"/>
+            <Button x:Name="SendButton" Grid.Column="1" Style="{StaticResource PopupActionButton}" Margin="8,0,0,0" VerticalAlignment="Bottom" ToolTip="发送" AutomationProperties.Name="发送追问">
+              <Viewbox Width="14" Height="14">
+                <Path Data="{StaticResource SubmitArrow}" Stroke="{StaticResource Ink}"
+                      StrokeThickness="1.5" StrokeStartLineCap="Round"
+                      StrokeEndLineCap="Round" StrokeLineJoin="Round"/>
+              </Viewbox>
+            </Button>
           </Grid>
         </StackPanel>
       </Border>

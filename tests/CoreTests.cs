@@ -14,10 +14,24 @@ using Leaf;
 public static class CoreTests
 {
     private static int assertions;
+    private static readonly List<string> softFailures = new List<string>();
     private static void Check(bool condition, string label)
     {
         if (!condition) throw new Exception("FAILED: " + label);
         assertions++; Console.WriteLine("PASS " + label);
+    }
+    // Task 1 red/green evidence collects each multilingual/Unicode defect in one run.
+    private static void SoftCheck(bool condition, string label)
+    {
+        if (!condition) { softFailures.Add(label); Console.Error.WriteLine("FAILED " + label); return; }
+        assertions++; Console.WriteLine("PASS " + label);
+    }
+    private static void FlushSoftChecks()
+    {
+        if (softFailures.Count == 0) return;
+        string message = "FAILED: " + string.Join("; ", softFailures.ToArray());
+        softFailures.Clear();
+        throw new Exception(message);
     }
     private static void Throws(Action action, string code, string label)
     {
@@ -35,7 +49,11 @@ public static class CoreTests
         string folder = Path.Combine(Path.GetTempPath(), "leaf-tests-" + Guid.NewGuid().ToString("N"));
         try {
             if (args.Contains("--native")) return WindowsNativeTests.Run(folder);
-            Domain(); Storage(folder); Transport().GetAwaiter().GetResult(); Diagnostics(folder).GetAwaiter().GetResult();
+            if (args.Length > 2 && args[0] == "--exit-scenario") return ExitScenarioTests.Run(args[1], args[2]);
+            Domain(); Storage(folder);
+            assertions += SelectionTests.Run().GetAwaiter().GetResult();
+            Transport().GetAwaiter().GetResult(); Diagnostics(folder).GetAwaiter().GetResult();
+            assertions += StorageRegressionTests.Run(Path.Combine(folder, "storage-regression")).GetAwaiter().GetResult();
             assertions += ApplicationTests.Run(Path.Combine(folder, "app"));
             Console.WriteLine("SUCCESS: " + assertions + " assertions"); return 0;
         } catch (Exception error) { Console.Error.WriteLine(error); return 1; }
@@ -76,6 +94,25 @@ public static class CoreTests
         Check(repeated.Count == 2 && repeated[0].Key != repeated[1].Key, "Repeated words have independent offsets");
         Check(pieces.Any(p => p.Text == "L'homme" && p.IsWord), "French apostrophes stay in the word");
         Check(TextTools.Pieces("e\u0301lan").Count == 1, "Combining marks are preserved");
+        SoftCheck(!TextTools.IsWordInput("这是一句需要翻译的完整中文句子。"),
+            "A complete Chinese sentence uses the translation path");
+        SoftCheck(!TextTools.IsWordInput("彼は本を読んでいます。"),
+            "A complete Japanese sentence uses the translation path");
+        SoftCheck(!TextTools.IsWordInput("这句话没有标点"),
+            "Continuous-script input is not inferred to be one word");
+        SoftCheck(!TextTools.IsWordInput("สวัสดี"),
+            "Non-segmented script defaults to translation");
+        SoftCheck(TextTools.IsWordInput("l'homme") && TextTools.IsWordInput("re-enter") &&
+            TextTools.IsWordInput("e\u0301te\u0301"),
+            "Apostrophes, hyphens and combining marks retain word support");
+        var surrogateCard = WordCard.Parse(Json.Write(new { meaning = "本领", lemma = new string('a', 249) + "😀" }), "word", "本领");
+        SoftCheck(surrogateCard.lemma == new string('a', 249),
+            "Word card truncation does not split a surrogate pair");
+        SoftCheck(TextTools.TruncateElements(new string('a', 249) + "😀", 250) ==
+            new string('a', 249), "Truncation does not split a surrogate pair");
+        SoftCheck(TextTools.TruncateElements("Ae\u0301", 2) == "A",
+            "Truncation does not detach a combining mark");
+        FlushSoftChecks();
         Throws(() => TextTools.ValidateInput(" "), "empty", "Empty input fails explicitly");
         Throws(() => TextTools.ValidateInput(new string('x', 6001)), "length", "Long input is bounded");
         var card = WordCard.Parse(Json.Write(new {

@@ -38,11 +38,14 @@ namespace Leaf
         public static void Visible(UIElement control, bool visible) { control.Visibility = visible ? Visibility.Visible : Visibility.Collapsed; }
         public static Brush Brush(string resource) { return (Brush)Application.Current.Resources[resource]; }
         public static void Click(Window window, string name, Action action) { Get<Button>(window, name).Click += (s, e) => action(); }
-        public static void Render(Window window, string path)
+        public static void Render(Window window, string path) { Render(window, path, 96); }
+        // Layout stays in device-independent units; only the output pixels follow the DPI.
+        public static void Render(Window window, string path, double dpi)
         {
+            if (dpi <= 0 || double.IsNaN(dpi) || double.IsInfinity(dpi)) throw new ArgumentOutOfRangeException("dpi");
             var element = (FrameworkElement)window.Content;
             element.Measure(new Size(window.Width, window.Height)); element.Arrange(new Rect(0, 0, window.Width, window.Height)); element.UpdateLayout();
-            var image = new RenderTargetBitmap((int)window.Width, (int)window.Height, 96, 96, PixelFormats.Pbgra32);
+            var image = new RenderTargetBitmap((int)Math.Ceiling(window.Width * dpi / 96), (int)Math.Ceiling(window.Height * dpi / 96), dpi, dpi, PixelFormats.Pbgra32);
             var background = new DrawingVisual();
             using (var drawing = background.RenderOpen()) drawing.DrawRectangle(window.Background, null, new Rect(0, 0, window.Width, window.Height));
             image.Render(background);
@@ -64,6 +67,12 @@ namespace Leaf
         private CancellationTokenSource modelCancellation;
         private readonly RequestGate providerGeneration = new RequestGate();
         private bool closed;
+        private bool allowClose;
+        // Monotonic edit markers: a completion may only touch UI state that still belongs to
+        // the exact edit it started from, never a newer draft or a different service.
+        private long serviceRevision;
+        private long preferenceApplySequence;
+        private long modelApplySequence;
         private bool fillingProvider, recordingShortcut;
         private string shortcutBeforeRecording;
         private readonly DispatcherTimer modelDebounce = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(600) };
@@ -111,7 +120,7 @@ namespace Leaf
                 }
                 active.BaseUrl = endpoint.Text.Trim(); modelOwners.Clear(); ModelOwnerHint();
                 Ui.Get<ComboBox>(Window, "ModelInput").ItemsSource = null;
-                KeyHint(); ScheduleModels();
+                serviceRevision++; KeyHint(); ScheduleModels();
             };
             Ui.Get<PasswordBox>(Window, "ApiKeyInput").PasswordChanged += (s, e) => {
                 if (loading || fillingProvider || closed) return;
@@ -120,6 +129,7 @@ namespace Leaf
                 if (active == null) unassignedKey = edited;
                 else if (edited.Length == 0) pendingKeys.Remove(active.Id);
                 else { pendingKeys[active.Id] = edited; deletedKeys.Remove(active.Id); }
+                serviceRevision++;
                 modelOwners.Clear(); ModelOwnerHint();
                 Ui.Get<ComboBox>(Window, "ModelInput").ItemsSource = null;
                 KeyHint(); ScheduleModels();
@@ -131,9 +141,11 @@ namespace Leaf
                 if (!fillingProvider && testCancellation != null) { testCancellation.Cancel(); Status("模型已变化，请重新测试连接。", false); }
             };
             modelTextProperty.AddValueChanged(Ui.Get<ComboBox>(Window, "ModelInput"), modelTextChanged);
-            Ui.Get<ComboBox>(Window, "ThinkingModeCombo").SelectionChanged += (s, e) => ThinkingFields();
+            Ui.Get<ComboBox>(Window, "ThinkingModeCombo").SelectionChanged += (s, e) => { serviceRevision++; ThinkingFields(); };
+            Ui.Get<ComboBox>(Window, "ReasoningCombo").SelectionChanged += (s, e) => serviceRevision++;
+            Ui.Get<TextBox>(Window, "OutputLimitInput").TextChanged += (s, e) => serviceRevision++;
             bool configured = !string.IsNullOrWhiteSpace(draft.Provider.Model) ||
-                (shell.NativeEnabled && Credentials.Read(draft.ProviderId).Length > 0);
+                (shell.NativeEnabled && shell.ReadCredential(draft.Provider).Length > 0);
             if (configured) Ui.Get<ComboBox>(Window, "ProviderCombo").SelectedItem = draft.Provider;
             Ui.Visible(Ui.Get<TextBlock>(Window, "ProviderPlaceholder"), !configured);
             Ui.Get<ComboBox>(Window, "ModelInput").IsEnabled = configured;
@@ -173,6 +185,7 @@ namespace Leaf
             });
             Ui.Click(Window, "DeleteKey", () => {
                 if (active == null) return;
+                serviceRevision++;
                 deletedKeys.Add(active.Id); pendingKeys.Remove(active.Id);
                 Ui.Get<PasswordBox>(Window, "ApiKeyInput").Clear(); KeyHint(); Status("应用服务配置后删除密钥。", false);
                 InvalidateRequests(); ModelStatus("密钥待删除，已停止获取模型。", false);
@@ -181,8 +194,8 @@ namespace Leaf
             Ui.Click(Window, "FetchModels", async () => await FetchModels(true));
             Ui.Click(Window, "SaveSettingsButton", Save);
             Ui.Click(Window, "CloseSettingsButton", () => Window.Close());
-            preferenceDebounce.Tick += (s, e) => { preferenceDebounce.Stop(); ApplyPreferences(); };
-            modelApplyDebounce.Tick += (s, e) => { modelApplyDebounce.Stop(); AutoApplyModel(); };
+            preferenceDebounce.Tick += async (s, e) => { preferenceDebounce.Stop(); await ApplyPreferencesAsync(); };
+            modelApplyDebounce.Tick += async (s, e) => { modelApplyDebounce.Stop(); await AutoApplyModelAsync(); };
             foreach (string name in new[] { "TargetInput", "SceneDetailInput", "HistoryLimitInput" })
                 Ui.Get<TextBox>(Window, name).TextChanged += (s, e) => SchedulePreferences();
             foreach (string name in new[] { "GameTypeCombo", "StyleCombo" })
@@ -193,10 +206,20 @@ namespace Leaf
             }
             var password = Ui.Get<PasswordBox>(Window, "ApiKeyInput");
             password.GotKeyboardFocus += (s, e) => KeyHint(); password.LostKeyboardFocus += (s, e) => KeyHint();
-            Window.Closing += (s, e) => {
+            Window.Closing += async (s, e) => {
+                if (allowClose) return;
+                e.Cancel = true;
                 EndShortcutRecording(false);
-                if (preferenceDebounce.IsEnabled) { preferenceDebounce.Stop(); ApplyPreferences(); }
-                if (modelApplyDebounce.IsEnabled) { modelApplyDebounce.Stop(); AutoApplyModel(); }
+                if (preferenceDebounce.IsEnabled) { preferenceDebounce.Stop(); if (!await ApplyPreferencesAsync()) return; }
+                if (modelApplyDebounce.IsEnabled) { modelApplyDebounce.Stop(); await AutoApplyModelAsync(); }
+                try { await shell.WaitForSettingsAsync(); }
+                catch (Exception error) {
+                    shell.Log.Event("settings_close_flush_failed", error);
+                    Status(error is UserError ? error.Message : "保存未完成，设置窗口保持打开。", true);
+                    return;
+                }
+                allowClose = true;
+                Window.Close();
             };
             Window.Closed += (s, e) => {
                 closed = true; providerGeneration.Next();
@@ -243,6 +266,7 @@ namespace Leaf
             Ui.Get<Expander>(Window, "EndpointExpander").IsExpanded = active.Id == "custom";
             fillingProvider = false; KeyHint(); ThinkingFields(); ScheduleModels();
             if (!loading) {
+                serviceRevision++;
                 Status("已切换服务。已配置的模型自动应用；新密钥和接口需应用服务配置。", false);
                 modelApplyDebounce.Stop(); modelApplyDebounce.Start();
             }
@@ -288,7 +312,7 @@ namespace Leaf
             var input = Ui.Get<PasswordBox>(Window, "ApiKeyInput");
             var placeholder = Ui.Get<TextBlock>(Window, "KeyPlaceholder");
             bool saved = active != null && !deletedKeys.Contains(active.Id) && shell.NativeEnabled &&
-                original.Providers.Any(p => p.Id == active.Id && p.BaseUrl.TrimEnd('/') == Ui.Get<TextBox>(Window, "EndpointInput").Text.TrimEnd('/')) && Credentials.Read(active.Id).Length > 0;
+                original.Providers.Any(p => p.Id == active.Id && p.BaseUrl.TrimEnd('/') == Ui.Get<TextBox>(Window, "EndpointInput").Text.TrimEnd('/')) && shell.ReadCredential(active).Length > 0;
             placeholder.Text = saved ? "● ● ● ● ● ● ● ●" : "输入此服务的 API Key…";
             placeholder.Foreground = Ui.Brush(saved ? "Ink" : "Muted");
             placeholder.FontSize = saved ? 11 : 13;
@@ -398,54 +422,74 @@ namespace Leaf
         }
         private void SchedulePreferences()
         {
-            if (loading || closed || recordingShortcut) return;
+            if (loading || closed || recordingShortcut || shell.IsExiting) return;
             Status("正在应用…", false); preferenceDebounce.Stop(); preferenceDebounce.Start();
         }
-        private bool ApplyPreferences()
+        // Stops debounced patches and applies the latest draft; used by Closing and ExitAsync.
+        internal async Task<bool> FlushPendingAsync()
         {
+            if (closed) return true;
+            bool ok = true;
+            if (preferenceDebounce.IsEnabled) { preferenceDebounce.Stop(); if (!await ApplyPreferencesAsync()) ok = false; }
+            if (modelApplyDebounce.IsEnabled) { modelApplyDebounce.Stop(); if (!await AutoApplyModelAsync()) ok = false; }
+            return ok;
+        }
+        // Used by a flushed exit: the timers are already stopped, so closing must not run
+        // the normal flush again or start a task that needs the dispatcher.
+        internal void CloseForExit()
+        {
+            closed = true; allowClose = true; Window.Close();
+        }
+        private Task<bool> ApplyPreferencesAsync() { return ApplyPreferencesAsync(false); }
+        private async Task<bool> ApplyPreferencesAsync(bool explicitApply)
+        {
+            long version = ++preferenceApplySequence;
             try {
                 CapturePreferences();
                 if (string.IsNullOrWhiteSpace(draft.TargetLanguage)) throw new UserError("target", "目标语言不能为空，尚未应用。" );
                 int limit;
                 if (!int.TryParse(Ui.Get<TextBox>(Window, "HistoryLimitInput").Text, out limit) || limit < 20 || limit > 1000)
                     throw new UserError("history", "历史条数应为 20 到 1000，尚未应用。" );
-                var next = Json.Copy(shell.Store.Settings);
-                next.TargetLanguage = draft.TargetLanguage; next.Scene = draft.Scene; next.SceneDetail = draft.SceneDetail;
-                next.SceneDetails = Json.Copy(draft.SceneDetails); next.GameTextType = draft.GameTextType; next.Style = draft.Style;
-                next.Learning = Json.Copy(draft.Learning); next.Presets = Json.Copy(draft.Presets);
-                next.ClipboardMode = Ui.Get<CheckBox>(Window, "ClipboardModeCheck").IsChecked == true;
-                next.FocusInputOnShortcut = Ui.Get<CheckBox>(Window, "FocusInputCheck").IsChecked == true;
-                next.Shortcut = Ui.Get<TextBox>(Window, "ShortcutInput").Text.Trim(); HotkeySpec.Parse(next.Shortcut);
-                next.AutoStart = Ui.Get<CheckBox>(Window, "AutoStartCheck").IsChecked == true;
-                next.HistoryEnabled = Ui.Get<CheckBox>(Window, "HistoryCheck").IsChecked == true; next.HistoryLimit = limit;
-                if (Json.Write(next) != Json.Write(shell.Store.Settings)) shell.ApplySettings(next, new Dictionary<string, string>(), new HashSet<string>());
-                Status("已应用并保存 · 下次翻译使用新偏好", false);
-                Ui.Get<TextBlock>(Window, "ShortcutHint").Text = "点击上方，再按下组合键；Esc 取消。";
+                draft.ClipboardMode = Ui.Get<CheckBox>(Window, "ClipboardModeCheck").IsChecked == true;
+                draft.FocusInputOnShortcut = Ui.Get<CheckBox>(Window, "FocusInputCheck").IsChecked == true;
+                draft.Shortcut = Ui.Get<TextBox>(Window, "ShortcutInput").Text.Trim(); HotkeySpec.Parse(draft.Shortcut);
+                draft.AutoStart = Ui.Get<CheckBox>(Window, "AutoStartCheck").IsChecked == true;
+                draft.HistoryEnabled = Ui.Get<CheckBox>(Window, "HistoryCheck").IsChecked == true; draft.HistoryLimit = limit;
+                await shell.ApplySettingsAsync(SettingsUpdate.Preferences(draft), new Dictionary<string, string>(), new HashSet<string>(), explicitApply);
+                if (version == preferenceApplySequence) {
+                    Status("已应用并保存 · 下次翻译使用新偏好", false);
+                    Ui.Get<TextBlock>(Window, "ShortcutHint").Text = "点击上方，再按下组合键；Esc 取消。";
+                }
                 return true;
             } catch (Exception error) {
                 shell.Log.Event("preferences_save_failed", error);
-                Status(error is UserError ? error.Message : "应用失败，请检查配置后重试。", true); return false;
+                if (version == preferenceApplySequence)
+                    Status(error is UserError ? error.Message : "应用失败，请检查配置后重试。", true);
+                return false;
             }
         }
-        private void AutoApplyModel()
+        private async Task<bool> AutoApplyModelAsync()
         {
-            if (closed || loading || fillingProvider || active == null || pendingKeys.ContainsKey(active.Id) || deletedKeys.Contains(active.Id)) return;
+            if (closed || loading || fillingProvider || shell.IsExiting || active == null ||
+                pendingKeys.ContainsKey(active.Id) || deletedKeys.Contains(active.Id)) return true;
             var committed = shell.Store.Settings.Providers.FirstOrDefault(p => p.Id == active.Id);
-            if (committed == null || committed.BaseUrl.TrimEnd('/') != Ui.Get<TextBox>(Window, "EndpointInput").Text.TrimEnd('/') || string.IsNullOrWhiteSpace(committed.Model)) return;
-            if (shell.NativeEnabled && string.IsNullOrEmpty(ActiveKey())) return;
+            if (committed == null || committed.BaseUrl.TrimEnd('/') != Ui.Get<TextBox>(Window, "EndpointInput").Text.TrimEnd('/') || string.IsNullOrWhiteSpace(committed.Model)) return true;
+            if (shell.NativeEnabled && string.IsNullOrEmpty(ActiveKey())) return true;
+            CaptureProfile();
+            if (string.IsNullOrWhiteSpace(active.Model)) return true;
+            var profile = Json.Copy(active);
+            long version = ++modelApplySequence;
             try {
-                CaptureProfile();
-                if (string.IsNullOrWhiteSpace(active.Model)) return;
                 // Advanced parameters have their own explicit apply action.
-                var next = Json.Copy(shell.Store.Settings);
-                var profile = next.Providers.First(p => p.Id == active.Id); profile.Model = active.Model;
-                if (LlmClient.IsGlm53(profile) && profile.ThinkingMode == "disabled") profile.ThinkingMode = "auto";
-                LlmClient.ValidateProfile(profile); next.ProviderId = active.Id;
-                if (Json.Write(next) == Json.Write(shell.Store.Settings)) return;
-                shell.ApplySettings(next, new Dictionary<string, string>(), new HashSet<string>());
-                original = Json.Copy(shell.Store.Settings); Status("已切换模型并保存", false);
+                await shell.ApplySettingsAsync(SettingsUpdate.Model(profile.Id, profile.Model), new Dictionary<string, string>(), new HashSet<string>());
+                if (version == modelApplySequence && active != null && active.Id == profile.Id)
+                    original = Json.Copy(shell.Store.Settings);
+                if (version == modelApplySequence) Status("已切换模型并保存", false);
+                return true;
             } catch (Exception error) {
-                shell.Log.Event("model_apply_failed", error); Status(error is UserError ? error.Message : "模型切换失败。", true);
+                shell.Log.Event("model_apply_failed", error);
+                if (version == modelApplySequence) Status(error is UserError ? error.Message : "模型切换失败。", true);
+                return false;
             }
         }
         private void InvalidateRequests()
@@ -463,7 +507,7 @@ namespace Leaf
             string key = Ui.Get<PasswordBox>(Window, "ApiKeyInput").Password.Trim();
             var previous = original.Providers.FirstOrDefault(p => p.Id == active.Id);
             if (string.IsNullOrEmpty(key) && !deletedKeys.Contains(active.Id) && previous != null &&
-                previous.BaseUrl.TrimEnd('/') == active.BaseUrl.TrimEnd('/') && shell.NativeEnabled) key = Credentials.Read(active.Id);
+                previous.BaseUrl.TrimEnd('/') == active.BaseUrl.TrimEnd('/') && shell.NativeEnabled) key = shell.ReadCredential(active);
             return key;
         }
         private void ModelStatus(string text, bool error)
@@ -473,7 +517,7 @@ namespace Leaf
         }
         private void ScheduleModels()
         {
-            if (loading || fillingProvider || closed) return;
+            if (loading || fillingProvider || closed || shell.IsExiting) return;
             if (active == null) { ModelStatus("选择服务或填写接口地址后，自动加载模型。", false); return; }
             active.BaseUrl = Ui.Get<TextBox>(Window, "EndpointInput").Text.Trim();
             try { LlmClient.Endpoint(active.BaseUrl); }
@@ -543,31 +587,46 @@ namespace Leaf
                 cancellation.Dispose();
             }
         }
-        private void Save()
+        private async void Save()
         {
+            var button = Ui.Get<Button>(Window, "SaveSettingsButton");
+            if (!button.IsEnabled) return;
+            button.IsEnabled = false;
             try {
                 EndShortcutRecording(false); InvalidateRequests();
                 preferenceDebounce.Stop(); modelApplyDebounce.Stop();
                 if (active == null) throw new UserError("endpoint", "请先选择 API 服务或填写接口地址。");
                 CaptureProfile();
+                // Bind the transaction to the exact captured profile and edit revision so a
+                // provider/key/model change during the awaits cannot be overwritten or cleared.
+                var profile = Json.Copy(active);
+                string profileId = profile.Id;
+                long revision = serviceRevision;
                 string limitText = Ui.Get<TextBox>(Window, "OutputLimitInput").Text.Trim(); int outputLimit;
                 if (limitText.Length > 0 && !int.TryParse(limitText, out outputLimit)) throw new UserError("parameter", "输出上限请填写整数，或留空自动适配。");
-                LlmClient.Endpoint(active.BaseUrl); LlmClient.ValidateProfile(active);
-                if (string.IsNullOrWhiteSpace(active.Model)) throw new UserError("model", "请选择或填写当前服务的模型 ID。");
-                var previous = original.Providers.FirstOrDefault(p => p.Id == active.Id);
-                if (previous != null && previous.BaseUrl.TrimEnd('/') != active.BaseUrl.TrimEnd('/') && !pendingKeys.ContainsKey(active.Id))
+                LlmClient.Endpoint(profile.BaseUrl); LlmClient.ValidateProfile(profile);
+                if (string.IsNullOrWhiteSpace(profile.Model)) throw new UserError("model", "请选择或填写当前服务的模型 ID。");
+                var previous = original.Providers.FirstOrDefault(p => p.Id == profileId);
+                if (previous != null && previous.BaseUrl.TrimEnd('/') != profile.BaseUrl.TrimEnd('/') && !pendingKeys.ContainsKey(profileId))
                     throw new UserError("key", "修改接口地址后，请为该服务重新填写密钥。");
-                if (!ApplyPreferences()) return;
-                var next = Json.Copy(shell.Store.Settings); next.ProviderId = active.Id;
-                next.Providers[next.Providers.FindIndex(p => p.Id == active.Id)] = Json.Copy(active);
+                if (!await ApplyPreferencesAsync(true)) return;
                 var keys = new Dictionary<string, string>(); string pending;
-                if (pendingKeys.TryGetValue(active.Id, out pending)) keys[active.Id] = pending;
-                var deleted = new HashSet<string>(); if (deletedKeys.Contains(active.Id)) deleted.Add(active.Id);
-                shell.ApplySettings(next, keys, deleted);
-                original = Json.Copy(shell.Store.Settings); pendingKeys.Remove(active.Id); deletedKeys.Remove(active.Id);
-                fillingProvider = true; Ui.Get<PasswordBox>(Window, "ApiKeyInput").Clear(); fillingProvider = false;
-                KeyHint(); Status("服务配置已应用并保存", false);
+                if (pendingKeys.TryGetValue(profileId, out pending)) keys[profileId] = pending;
+                var deleted = new HashSet<string>(); if (deletedKeys.Contains(profileId)) deleted.Add(profileId);
+                await shell.ApplySettingsAsync(SettingsUpdate.Provider(profile), keys, deleted, true);
+                original = Json.Copy(shell.Store.Settings);
+                bool pendingMatchesSaved = !pendingKeys.ContainsKey(profileId) ||
+                    (keys.ContainsKey(profileId) && pendingKeys[profileId] == keys[profileId]);
+                if (pendingMatchesSaved) pendingKeys.Remove(profileId);
+                if (deletedKeys.Contains(profileId) && !pendingKeys.ContainsKey(profileId)) deletedKeys.Remove(profileId);
+                if (revision == serviceRevision && active != null && active.Id == profileId) {
+                    fillingProvider = true; Ui.Get<PasswordBox>(Window, "ApiKeyInput").Clear(); fillingProvider = false;
+                    KeyHint(); Status("服务配置已应用并保存", false);
+                } else {
+                    KeyHint(); Status("已保存「" + profile.Name + "」的服务配置；当前编辑的改动仍待应用。", false);
+                }
             } catch (Exception error) { shell.Log.Event("settings_save_failed", error); Status(error is UserError ? error.Message : "保存失败，请检查配置后重试。", true); }
+            finally { button.IsEnabled = true; }
         }
     }
 
@@ -581,20 +640,28 @@ namespace Leaf
             Ui.Get<TextBox>(Window, "HistorySearch").TextChanged += (s, e) => Refresh();
             Ui.Get<ListBox>(Window, "HistoryList").MouseDoubleClick += (s, e) => Open();
             Ui.Click(Window, "OpenHistory", Open);
-            Ui.Click(Window, "DeleteHistory", () => {
-                var record = Ui.Get<ListBox>(Window, "HistoryList").SelectedItem as TranslationRecord;
-                if (record == null) return;
-                Try(() => { shell.Store.Delete(record.Id); shell.Forget(record.Id); Refresh(); });
-            });
-            Ui.Click(Window, "ClearHistory", () => {
-                if (MessageBox.Show(Window, "清空全部本地历史？", "Leaf", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
-                Try(() => { shell.Store.Clear(); shell.Forget(null); Refresh(); });
-            });
+            Ui.Click(Window, "DeleteHistory", DeleteSelectedAsync);
+            Ui.Click(Window, "ClearHistory", ClearAllAsync);
             Refresh();
         }
-        private void Try(Action action)
+        private async void DeleteSelectedAsync()
         {
-            try { action(); } catch (Exception error) {
+            var record = Ui.Get<ListBox>(Window, "HistoryList").SelectedItem as TranslationRecord;
+            if (record == null) return;
+            try {
+                await shell.Store.DeleteAsync(record.Id);
+                shell.Forget(record.Id); Refresh();
+            } catch (Exception error) {
+                MessageBox.Show(Window, error is UserError ? error.Message : "无法更新本地历史。", "Leaf");
+            }
+        }
+        private async void ClearAllAsync()
+        {
+            if (MessageBox.Show(Window, "清空全部本地历史？", "Leaf", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
+            try {
+                await shell.Store.ClearAsync();
+                shell.Forget(null); Refresh();
+            } catch (Exception error) {
                 MessageBox.Show(Window, error is UserError ? error.Message : "无法更新本地历史。", "Leaf");
             }
         }
