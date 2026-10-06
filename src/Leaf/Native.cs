@@ -468,6 +468,15 @@ namespace Leaf
             return copy.GetFormats(false).Length == 0 ? null : ClipboardBackup.Of(copy);
         }
 
+        // The desktop read behind the host's Backup(): the data object the clipboard handed
+        // over. Split out so a check can drive the real adapter - including the object it was
+        // handed - with no real clipboard.
+        public static ClipboardBackup BackupFrom(Forms.IDataObject data)
+        {
+            if (data == null) return ClipboardBackup.Empty();
+            return Materialize(new ClipboardFormatSource(data));
+        }
+
         // The real clipboard behind the materialisation: one data object, read once per format.
         private sealed class ClipboardFormatSource : IClipboardFormatSource
         {
@@ -509,9 +518,7 @@ namespace Leaf
             // clipboard that cannot be read completely stays "unknown" instead of empty.
             public ClipboardBackup Backup()
             {
-                var data = Forms.Clipboard.GetDataObject();
-                if (data == null) return ClipboardBackup.Empty();
-                return Materialize(new ClipboardFormatSource(data));
+                return BackupFrom(Forms.Clipboard.GetDataObject());
             }
             public void Restore(ClipboardBackup backup)
             {
