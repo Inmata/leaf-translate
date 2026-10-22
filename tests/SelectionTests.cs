@@ -117,7 +117,9 @@ internal static class SelectionTests
 
         await StagesRetained(reader, probe);
         await Diagnostics(reader, probe);
+        ChineseDiagnostics();
         CopyStateMachine();
+        CopyInjection();
         OwnershipRules();
         await CopyWorker();
         ClipboardBackups();
@@ -146,6 +148,10 @@ internal static class SelectionTests
             "A window too large for the budget is inconclusive instead of confirmed empty (was " + wideResult.Status + "/" + wideResult.Reason + ")");
         Check(wide.TotalReads <= WindowsSelectionProbe.MaxNodes && wide.SiblingCalls <= WindowsSelectionProbe.MaxNodes,
             "A sibling list is never walked past the node budget (reads " + wide.TotalReads + ", siblings " + wide.SiblingCalls + ")");
+        var wideStep = wideResult.Steps.First(s => s.Stage == "uia");
+        Check(wideStep.NodeBound && !wideStep.TimeBound && !wideStep.CandidateBound,
+            "A walk stopped by the node cap records the node bound alone, not time or the candidate cap (was node "
+                + wideStep.NodeBound + ", time " + wideStep.TimeBound + ", candidate " + wideStep.CandidateBound + ")");
 
         // Cancelling between two TreeWalker calls must stop the walk before it enumerates on.
         var cancelTree = new ScriptedUiTree();
@@ -157,6 +163,10 @@ internal static class SelectionTests
             var cancelResult = await new WindowsSelectionProbe(cancelTree).ReadAutomationAsync(target, cancelled.Token);
             Check(cancelResult.Status == CaptureStatus.Cancelled && cancelTree.SiblingCalls == 0,
                 "Cancelling a walk stops it before it can enumerate the next sibling list");
+            var cancelStep = cancelResult.Steps.First(s => s.Stage == "uia");
+            Check((cancelStep.Checked & CaptureFields.Read) != 0 && cancelStep.CandidateCount > 0,
+                "A cancelled walk keeps the read statistics it had already gathered instead of dropping them (candidates "
+                    + cancelStep.CandidateCount + ")");
         }
 
         // The walk stays inside the captured window: a same-process window above it is never read.
@@ -178,9 +188,53 @@ internal static class SelectionTests
         Check(sameResult.Status == CaptureStatus.Text && sameResult.Text == "document selection",
             "An empty focused editor does not hide the selection of the window's document");
         var sameStep = sameResult.Steps.First(s => s.Stage == "uia");
-        Check(sameStep.ControlTypeId == WindowsSelectionProbe.DocumentTypeId && sameStep.PatternSupported && sameStep.CandidateCount >= 2,
-            "The UIA stage names the control type that supplied the text");
+        Check(sameStep.ControlTypeId == WindowsSelectionProbe.DocumentTypeId && sameStep.PatternSupported && sameStep.CandidateCount >= 2 &&
+            sameStep.DocumentCount >= 1 && sameStep.DocumentChainCount == 0,
+            "The UIA stage names the control type that supplied the text, and the window walk, not the focus chain, found it");
         Check(document.Reads == 1, "The document that answered was read exactly once");
+
+        // A constructed shape where the walk reaches a document that answers "nothing selected",
+        // but the candidate cap stops the walk before it finishes. The stage has to say that a
+        // document was read and that the candidate budget - not time, not the node cap - is what
+        // stopped the walk, so "a document was read with nothing selected" is never confused with
+        // "the walk never reached one" when a real log is read. This is not a capture of any
+        // particular application: it is the shape the fields are meant to make legible. A deep
+        // single-child chain spends the budget on panes, so the document hangs beside the chain
+        // and is read before the budget runs out.
+        var reachedTree = new ScriptedUiTree();
+        var reachedRoot = reachedTree.WindowRoot = new ScriptedUiNode { ControlTypeIdValue = 50033, Selection = null, WindowHandle = 123 };
+        reachedRoot.Add(new ScriptedUiNode { ControlTypeIdValue = WindowsSelectionProbe.DocumentTypeId, Selection = "" });
+        var reachedCursor = reachedRoot;
+        for (int i = 0; i < WindowsSelectionProbe.MaxCandidates + 8; i++)
+            reachedCursor = reachedCursor.Add(new ScriptedUiNode { ControlTypeIdValue = 50033, Selection = null });
+        reachedTree.Focus = reachedRoot;
+        var reachedResult = await new WindowsSelectionProbe(reachedTree).ReadAutomationAsync(target, CancellationToken.None);
+        var reachedStep = reachedResult.Steps.First(s => s.Stage == "uia");
+        Check(reachedResult.Status == CaptureStatus.Unavailable && reachedResult.Reason == CaptureReason.AutomationBudget &&
+            reachedStep.CandidateCount == WindowsSelectionProbe.MaxCandidates &&
+            reachedStep.DocumentCount == 1 && reachedStep.DocumentChainCount == 0 && reachedStep.DocumentEmptyCount == 1 &&
+            reachedStep.CandidateBound && !reachedStep.TimeBound && !reachedStep.NodeBound && reachedStep.PatternSupported,
+            "A truncated walk that did reach a document records the document, its empty answer and the candidate stop (was "
+                + reachedResult.Status + "/" + reachedResult.Reason + ", documents " + reachedStep.DocumentCount + ")");
+
+        // The other shape: the candidate budget is spent on panes before the walk ever reaches the
+        // document at the end of the chain. The same reason and the same candidate count are
+        // logged, and only document_count tells the two apart - the point of recording it. The
+        // document that was never reached contributes nothing, not an empty selection.
+        var unreachedTree = new ScriptedUiTree();
+        var unreachedRoot = unreachedTree.WindowRoot = new ScriptedUiNode { ControlTypeIdValue = 50033, Selection = null, WindowHandle = 123 };
+        var unreachedCursor = unreachedRoot;
+        for (int i = 0; i < WindowsSelectionProbe.MaxCandidates + 8; i++)
+            unreachedCursor = unreachedCursor.Add(new ScriptedUiNode { ControlTypeIdValue = 50033, Selection = null });
+        var farDocument = unreachedCursor.Add(new ScriptedUiNode { ControlTypeIdValue = WindowsSelectionProbe.DocumentTypeId, Selection = "far document selection" });
+        unreachedTree.Focus = unreachedRoot;
+        var unreachedResult = await new WindowsSelectionProbe(unreachedTree).ReadAutomationAsync(target, CancellationToken.None);
+        var unreachedStep = unreachedResult.Steps.First(s => s.Stage == "uia");
+        Check(unreachedResult.Reason == CaptureReason.AutomationBudget && unreachedStep.CandidateCount == WindowsSelectionProbe.MaxCandidates &&
+            unreachedStep.DocumentCount == 0 && unreachedStep.DocumentChainCount == 0 && unreachedStep.DocumentEmptyCount == 0 &&
+            unreachedStep.CandidateBound && farDocument.Reads == 0,
+            "A walk cut off before any document is reached records no document read, not an empty selection (was "
+                + unreachedResult.Reason + ", documents " + unreachedStep.DocumentCount + ")");
 
         // A focus inside another top-level window of the same process belongs to that window,
         // so it is never read and never becomes this capture's answer: the captured window is
@@ -227,6 +281,14 @@ internal static class SelectionTests
         var ancestorResult = await new WindowsSelectionProbe(ancestorTree).ReadAutomationAsync(target, CancellationToken.None);
         Check(ancestorResult.Status == CaptureStatus.Text && ancestorResult.Text == "ancestor selection",
             "The focused element's own document is read before the window is scanned");
+        // That document was reached through the focused element's own ancestor chain, so the real
+        // probe has to count it as a chain document rather than a walk one - the fact that tells a
+        // real log where in the window a document was read from. This is the only shape asserted
+        // to produce a non-zero chain count; the walk cases below all stay at zero.
+        var ancestorStep = ancestorResult.Steps.First(s => s.Stage == "uia");
+        Check(ancestorStep.DocumentCount == 1 && ancestorStep.DocumentChainCount == 1 && ancestorStep.DocumentEmptyCount == 0,
+            "A document found by the focus chain is counted as a chain document, not a walk one (was chain "
+                + ancestorStep.DocumentChainCount + " of " + ancestorStep.DocumentCount + ")");
 
         // A scan that ran out of budget must not conclude "nothing selected" from the one
         // empty document it happened to reach first.
@@ -258,6 +320,10 @@ internal static class SelectionTests
         var slowResult = await new WindowsSelectionProbe(slowChild).ReadAutomationAsync(target, CancellationToken.None);
         Check(slowResult.Status == CaptureStatus.Unavailable && slowResult.Reason == CaptureReason.AutomationBudget,
             "A child enumeration that ran out of budget is inconclusive instead of a confirmed empty (was " + slowResult.Status + "/" + slowResult.Reason + ")");
+        var slowStep = slowResult.Steps.First(s => s.Stage == "uia");
+        Check(slowStep.TimeBound && !slowStep.NodeBound && !slowStep.CandidateBound,
+            "A walk stopped by the time budget records the time bound alone, not a node or candidate one (was time "
+                + slowStep.TimeBound + ", node " + slowStep.NodeBound + ", candidate " + slowStep.CandidateBound + ")");
 
         // The same for the selection query itself: spending the budget inside one read leaves
         // the walk unfinished, whatever the node answered.
@@ -268,6 +334,23 @@ internal static class SelectionTests
         var slowReadResult = await new WindowsSelectionProbe(slowRead).ReadAutomationAsync(target, CancellationToken.None);
         Check(slowReadResult.Status == CaptureStatus.Unavailable && slowReadResult.Reason == CaptureReason.AutomationBudget,
             "A selection query that overran the budget is inconclusive too (was " + slowReadResult.Status + "/" + slowReadResult.Reason + ")");
+
+        // A document that exposes no text pattern at all is a capability answer of its own: the
+        // stage has to count it as no-pattern, never as an unreadable query and never as an empty
+        // selection. The focused document is the captured window itself, so it is read once through
+        // the focus chain and once through the window walk, and both counts and the total agree.
+        var noPatternTree = new ScriptedUiTree();
+        var noPatternDocument = noPatternTree.WindowRoot = new ScriptedUiNode {
+            ControlTypeIdValue = WindowsSelectionProbe.DocumentTypeId, Selection = null, WindowHandle = 123 };
+        noPatternTree.Focus = noPatternDocument;
+        var noPatternResult = await new WindowsSelectionProbe(noPatternTree).ReadAutomationAsync(target, CancellationToken.None);
+        var noPatternStep = noPatternResult.Steps.First(s => s.Stage == "uia");
+        Check(noPatternResult.Status == CaptureStatus.Unavailable && noPatternResult.Reason == CaptureReason.AutomationUnreadable &&
+            noPatternStep.DocumentCount == 2 && noPatternStep.DocumentChainCount == 1 &&
+            noPatternStep.DocumentNoPatternCount == 2 && noPatternStep.DocumentUnreadableCount == 0 &&
+            noPatternStep.DocumentEmptyCount == 0 && !noPatternStep.PatternSupported,
+            "A document with no text pattern is counted as no-pattern by the real probe, never as unreadable or empty (was "
+                + noPatternStep.DocumentNoPatternCount + " no-pattern, " + noPatternStep.DocumentUnreadableCount + " unreadable)");
 
         // A control that has a text pattern but cannot answer is not a confirmed empty
         // selection, and the error code Windows reported has to survive into the stage.
@@ -282,6 +365,13 @@ internal static class SelectionTests
             unreadableResult.Text == "" && unreadableResult.Steps.First(s => s.Stage == "uia").HResult == unchecked((int)0x800401D0),
             "A document whose selection query failed is unavailable with its HResult, not an empty selection (was "
                 + unreadableResult.Status + "/" + unreadableResult.Reason + ")");
+        // The same document is read through the chain and the walk, and each unreadable answer has
+        // to be counted as unreadable - never as a no-pattern one, which is a different fact.
+        var unreadableStep = unreadableResult.Steps.First(s => s.Stage == "uia");
+        Check(unreadableStep.DocumentUnreadableCount == 2 && unreadableStep.DocumentNoPatternCount == 0 &&
+            unreadableStep.DocumentCount == 2 && unreadableStep.DocumentChainCount == 1,
+            "A document whose query failed is counted as unreadable by the real probe, not as a no-pattern one (was "
+                + unreadableStep.DocumentUnreadableCount + " unreadable, " + unreadableStep.DocumentNoPatternCount + " no-pattern)");
 
         // A sibling call that blocks the same way is bounded too: the enumeration is abandoned
         // and the scan stays inconclusive instead of concluding anything from a partial list.
@@ -679,6 +769,110 @@ internal static class SelectionTests
             "Clipboard content is used only when its owner is the captured process");
     }
 
+    // The simulated copy is injected one key event per call so that a refused step can be undone
+    // precisely: the only keys it may lift are the ones this call pressed itself. This is a
+    // cleanup property of the injection, not a claim about why a copy intermittently finds no
+    // clipboard update - that is not established here, and the injection asserts no timing.
+    private static void CopyInjection()
+    {
+        var injector = new ScriptedKeyInjector();
+        var accepted = Native.InjectCopy(injector);
+        Check(accepted.Sent && accepted.Error == 0 && injector.Calls == 4,
+            "The simulated copy injects the modifier and the key as separate calls, not one batch");
+        Check(injector.Keys.SequenceEqual(new ushort[] { 17, 67, 67, 17 }) &&
+            injector.Ups.SequenceEqual(new bool[] { false, false, true, true }),
+            "The injected copy is Ctrl down, C down, C up, Ctrl up in that order");
+        Check(Held(injector) == 0, "A completed copy leaves none of its own keys down");
+
+        // The modifier is already down when the key is refused. The failure must lift exactly
+        // that modifier and nothing else, so no key this program pressed is left held.
+        var refused = new ScriptedKeyInjector { RejectAt = 2, RejectError = 5 };
+        var sent = Native.InjectCopy(refused);
+        Check(!sent.Sent && sent.Error == 5 && refused.Calls == 3,
+            "A refused key stops the copy and reports its own error");
+        Check(refused.Keys.SequenceEqual(new ushort[] { 17, 67, 17 }) &&
+            refused.Ups.SequenceEqual(new bool[] { false, false, true }),
+            "Only the key this copy pressed itself is lifted again, never one it never pressed");
+        Check(Held(refused) == 0 && !sent.CleanupFailed,
+            "A refused copy whose own keys all came up reports a clean cleanup");
+
+        // A refused release must not strand the key either: the key is still down, so lifting it
+        // before the modifier is the correct cleanup and neither key stays held.
+        var refusedRelease = new ScriptedKeyInjector { RejectAt = 3, RejectError = 6 };
+        var released = Native.InjectCopy(refusedRelease);
+        Check(!released.Sent && released.Error == 6 && refusedRelease.Calls == 5 &&
+            refusedRelease.Keys.SequenceEqual(new ushort[] { 17, 67, 67, 67, 17 }) &&
+            refusedRelease.Ups.SequenceEqual(new bool[] { false, false, true, true, true }),
+            "A refused release lifts the still-held key and then its modifier, newest first");
+        Check(Held(refusedRelease) == 0, "A copy whose release was refused leaves no key held");
+
+        // The very first event failing means nothing was pressed, so nothing may be lifted.
+        var refusedFirst = new ScriptedKeyInjector { RejectAt = 1, RejectError = 7 };
+        var started = Native.InjectCopy(refusedFirst);
+        Check(!started.Sent && started.Error == 7 && refusedFirst.Calls == 1 &&
+            refusedFirst.Keys.SequenceEqual(new ushort[] { 17 }) && refusedFirst.Ups.SequenceEqual(new bool[] { false }) &&
+            refusedFirst.Applied.Count == 0,
+            "A copy refused before its first press lifts nothing, so no held key is released");
+
+        // A key the user is already holding is not this copy's to press: pressing it would
+        // duplicate a down the user owns, and lifting it afterwards would release the user's own
+        // key. The copy refuses before it presses such a key, so a held C is never injected and
+        // never released - only the modifier this copy did press is lifted again.
+        var heldC = new ScriptedKeyInjector();
+        heldC.Down.Add(67);
+        var heldCResult = Native.InjectCopy(heldC);
+        Check(!heldCResult.Sent && heldCResult.Error == 0 && !heldC.Keys.Contains((ushort)67) &&
+            heldC.Keys.SequenceEqual(new ushort[] { 17, 17 }) && heldC.Ups.SequenceEqual(new bool[] { false, true }),
+            "A copy refuses the key before pressing one the user already holds, and lets go only of the modifier it pressed");
+        Check(Held(heldC) == 0, "A copy refused over a held C leaves no key of its own down");
+
+        // A held modifier is the same rule at the very first press: nothing is sent at all, so
+        // there is nothing of the user's that this copy could release.
+        var heldCtrl = new ScriptedKeyInjector();
+        heldCtrl.Down.Add(17);
+        var heldCtrlResult = Native.InjectCopy(heldCtrl);
+        Check(!heldCtrlResult.Sent && heldCtrl.Calls == 0 && heldCtrl.Applied.Count == 0,
+            "A copy refuses before its first press when Ctrl is already held and sends nothing");
+
+        // A key the cleanup could not lift is reported with its error instead of a quiet success:
+        // the copy says the key may still be down rather than promising the desktop is clean.
+        var stuck = new ScriptedKeyInjector { RejectAt = 2, RejectError = 5, FailLiftAt = 3, LiftError = 87 };
+        var stuckResult = Native.InjectCopy(stuck);
+        Check(!stuckResult.Sent && stuckResult.CleanupFailed && stuckResult.CleanupError == 87 && Held(stuck) == 1,
+            "A refused copy whose own key could not be lifted reports the failed cleanup and its error");
+
+        // An injected event that throws is a refused event too, and is cleaned up the same way.
+        var throwing = new ScriptedKeyInjector { ThrowAt = 2, ThrowError = 8 };
+        var thrown = Native.InjectCopy(throwing);
+        Check(!thrown.Sent && thrown.Error == 8 && throwing.Calls == 3 && !thrown.CleanupFailed,
+            "An injected event that throws stops the copy like a refused one and still cleans up");
+
+        Check(!Native.InjectCopy(null).Sent,
+            "The simulated copy needs an injector before it can send anything");
+    }
+
+    // Replays the events Windows actually accepted - a refused call inserts nothing, so it may
+    // not count as a press - and returns how many of this copy's own keys are still down.
+    private static int Held(ScriptedKeyInjector injector)
+    {
+        var down = new List<ushort>();
+        for (int i = 0; i < injector.Applied.Count; i++) {
+            if (injector.AppliedUps[i]) down.Remove(injector.Applied[i]);
+            else down.Add(injector.Applied[i]);
+        }
+        return down.Count;
+    }
+
+    // ChineseLog is internal to Leaf.exe, so the negative cases reach its renderer by reflection
+    // instead of widening its surface for a test. The row has the same shape DiagnosticLog
+    // builds; only the values are chosen to be the ones that must not be printed.
+    private static string RenderChinese(Dictionary<string, object> row)
+    {
+        var type = typeof(DiagnosticLog).Assembly.GetType("Leaf.ChineseLog", true);
+        var render = type.GetMethod("Render", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+        return (string)render.Invoke(null, new object[] { row });
+    }
+
     // What the worker is allowed to put back is decided by these rules, and the rule that
     // materialises the old clipboard runs as production code over a scripted format source.
     private static void ClipboardBackups()
@@ -845,6 +1039,17 @@ internal static class SelectionTests
             Check(outcome.Status == CaptureStatus.Failed && outcome.Reason == CaptureReason.InputDenied &&
                 Step(outcome, "copy_send").NativeError == 5,
                 "A refused copy injection reports its own Win32 error");
+        }
+
+        // A refused copy whose own keys could not all be lifted records the failed cleanup and
+        // its error on the send stage, instead of reporting an input denial that looks clean.
+        var stuckKeys = new ScriptedCopyHost {
+            SendAccepted = false, LastSendError = 5, SendCleanupFailed = true, SendCleanupError = 87 };
+        using (var deadline = new CancellationTokenSource()) {
+            var outcome = Native.CopyOnSta(target, deadline, new List<CaptureStep>(), stuckKeys);
+            Check(Step(outcome, "copy_send") != null && Step(outcome, "copy_send").KeyCleanupFailed &&
+                Step(outcome, "copy_send").KeyCleanupError == 87,
+                "A refused copy whose own keys could not be lifted reports the failed cleanup with its error");
         }
 
         // The last check before the injected copy reads the token again after the foreground
@@ -1041,7 +1246,7 @@ internal static class SelectionTests
     }
 
     // The log records fixed stage names and typed reasons only, never content.
-    private static Task Diagnostics(SelectionAcquirer reader, FakeSelectionProbe probe)
+    private static async Task Diagnostics(SelectionAcquirer reader, FakeSelectionProbe probe)
     {
         string folder = Path.Combine(Path.GetTempPath(), "leaf-capture-" + Guid.NewGuid().ToString("N"));
         try {
@@ -1050,7 +1255,15 @@ internal static class SelectionTests
             var captured = SelectionCaptureResult.Success("private-selection-fixture");
             captured.Steps.Add(new CaptureStep {
                 Stage = "uia", Reason = CaptureReason.None, Checked = CaptureFields.Foreground | CaptureFields.Read,
-                CandidateCount = 3, ControlTypeId = 50030, PatternSupported = true, ForegroundSame = true, ElapsedMs = 12
+                CandidateCount = 3, ControlTypeId = 50030, PatternSupported = true, ForegroundSame = true, ElapsedMs = 12,
+                DocumentCount = 2, DocumentChainCount = 1, DocumentEmptyCount = 1, DocumentNoPatternCount = 1,
+                CandidateBound = true, NodeBound = false, TimeBound = false
+            });
+            // A refused copy that could not lift one of its own keys logs the real cleanup
+            // outcome and its error, never a clean input denial it cannot vouch for.
+            captured.Steps.Add(new CaptureStep {
+                Stage = "copy_send", Reason = CaptureReason.InputDenied, Checked = CaptureFields.Foreground | CaptureFields.Cleanup,
+                NativeError = 5, KeyCleanupFailed = true, KeyCleanupError = 87, ElapsedMs = 3
             });
             captured.Steps.Add(new CaptureStep { Stage = "private-selection-fixture", Reason = CaptureReason.None });
             log.Capture(CaptureTelemetry.For("fixture-capture", probe.Snapshot(), false, "Ctrl+Alt+T", captured));
@@ -1059,13 +1272,20 @@ internal static class SelectionTests
             Check(entries.Contains("capture_id") && entries.Contains("fixture-capture"), "Capture diagnostics carry a capture id");
             Check(entries.Contains("\"stage\":\"uia\"") && entries.Contains("candidate_count") && entries.Contains("pattern_supported"),
                 "Capture diagnostics record a fixed stage with typed detail");
+            Check(entries.Contains("\"document_count\":2") && entries.Contains("\"document_chain_count\":1") &&
+                entries.Contains("\"document_empty_count\":1") && entries.Contains("\"document_nopattern_count\":1") &&
+                entries.Contains("\"candidate_bound\":true") && entries.Contains("\"node_bound\":false") && entries.Contains("\"time_bound\":false"),
+                "The UIA stage records which documents it reached, from where, what they answered and which budget stopped the walk");
+            Check(entries.Contains("\"key_cleanup_failed\":true") && entries.Contains("\"key_cleanup_error\":87"),
+                "A refused copy that could not lift its own key logs the failed cleanup and its error");
             Check(entries.Contains("\"reason\":\"None\"") && entries.Contains("\"foreground_same\":true"),
                 "Capture reasons and flags are emitted as typed values");
             Check(entries.Contains("\"status\":\"Text\"") && entries.Contains("text_length"),
                 "The final capture result records status and text length");
             Check(!entries.Contains("private-selection-fixture"),
                 "Neither selection text nor unknown stage names can enter the log");
-            Check(Directory.GetFiles(log.Folder).SelectMany(File.ReadAllLines).All(x => Json.Read(x) is Dictionary<string, object>),
+            Check(Directory.GetFiles(log.Folder).Where(f => !Path.GetFileName(f).StartsWith("leaf.zh-CN"))
+                .SelectMany(File.ReadAllLines).All(x => Json.Read(x) is Dictionary<string, object>),
                 "Capture diagnostics remain complete JSON records");
 
             var busy = new DiagnosticLog(folder);
@@ -1103,7 +1323,188 @@ internal static class SelectionTests
                 "The in-window read records typed metadata with a whitelisted source name");
             Check(!pageEntries.Contains("ApiKeyInput") && pageEntries.Contains("\"source\":\"other\""),
                 "A control name outside the whitelist cannot become free text in the log");
-            return Task.FromResult(0);
+
+            // The document counts are produced by the real probe here, not assigned by this test:
+            // a document whose selection read itself throws is counted as unreadable by the probe,
+            // and the formatter writes that count to the log under its own key. This is the throw
+            // branch of ReadCandidate; the unknown-answer branch is covered in BoundedTraversal.
+            var unreadableTarget = new CaptureTarget { Window = new IntPtr(123), ProcessId = 456 };
+            var unreadableTree = new ScriptedUiTree();
+            var unreadableDocument = unreadableTree.WindowRoot = new ScriptedUiNode {
+                ControlTypeIdValue = WindowsSelectionProbe.DocumentTypeId, WindowHandle = 123 };
+            unreadableTree.Focus = unreadableDocument;
+            int readError = unchecked((int)0x80070005);
+            unreadableTree.OnRead = node => {
+                if (node == unreadableDocument)
+                    throw new System.Runtime.InteropServices.ExternalException("fixture read failure", readError);
+            };
+            var unreadableOutcome = await new WindowsSelectionProbe(unreadableTree).ReadAutomationAsync(unreadableTarget, CancellationToken.None);
+            unreadableTree.OnRead = null;
+            var unreadableUia = unreadableOutcome.Steps.First(s => s.Stage == "uia");
+            Check(unreadableUia.DocumentUnreadableCount == 2 && unreadableUia.DocumentNoPatternCount == 0 &&
+                unreadableUia.DocumentCount == 2 && unreadableUia.HResult == readError,
+                "A document whose selection read threw is counted as unreadable by the real probe, with its error kept");
+            string unreadableFolder = Path.Combine(folder, "unreadable");
+            new DiagnosticLog(unreadableFolder).Capture(
+                CaptureTelemetry.For("fixture-unreadable", unreadableTarget, false, "Ctrl+Alt+T", unreadableOutcome));
+            string unreadableEntries = string.Concat(Directory.GetFiles(unreadableFolder).Select(File.ReadAllText));
+            Check(unreadableEntries.Contains("\"capture_id\":\"fixture-unreadable\"") &&
+                unreadableEntries.Contains("\"document_unreadable_count\":2") && unreadableEntries.Contains("\"document_nopattern_count\":0"),
+                "The real probe's unreadable-document count reaches the log under its own key");
+            return;
+        } finally {
+            if (Directory.Exists(folder) && Path.GetFullPath(folder).StartsWith(Path.GetFullPath(Path.GetTempPath()), StringComparison.OrdinalIgnoreCase))
+                Directory.Delete(folder, true);
+        }
+    }
+
+    // The zh-CN companion of leaf.log. Every check reads the file the process really wrote,
+    // so what is verified is the on-disk format and its rotation, not the formatter.
+    private static void ChineseDiagnostics()
+    {
+        string folder = Path.Combine(Path.GetTempPath(), "leaf-zh-" + Guid.NewGuid().ToString("N"));
+        try {
+            var log = new DiagnosticLog(folder);
+            string text = "private-selection-fixture";
+            var steps = new List<CaptureStep> {
+                new CaptureStep { Stage = "snapshot", Reason = CaptureReason.None, Checked = CaptureFields.Foreground,
+                    ForegroundSame = true, ElapsedMs = 1 },
+                new CaptureStep { Stage = "uia", Reason = CaptureReason.None, Checked = CaptureFields.Foreground | CaptureFields.Read,
+                    CandidateCount = 3, ControlTypeId = 50030, PatternSupported = true, ForegroundSame = true, ElapsedMs = 12,
+                    DocumentCount = 2, DocumentChainCount = 1, DocumentEmptyCount = 1, DocumentNoPatternCount = 1,
+                    DocumentUnreadableCount = 0, CandidateBound = true },
+                new CaptureStep { Stage = "copy_send", Reason = CaptureReason.InputDenied,
+                    Checked = CaptureFields.Foreground | CaptureFields.Cleanup, NativeError = 5,
+                    KeyCleanupFailed = true, KeyCleanupError = 87, ElapsedMs = 3 },
+                // A stage name outside the whitelist is dropped by the JSON writer; the zh-CN
+                // companion is rendered from that same row, so it can never echo it either.
+                new CaptureStep { Stage = "unknown_stage_fixture", Reason = CaptureReason.None }
+            };
+            log.Capture(CaptureTelemetry.For("zh-text", null, false, "Ctrl+Alt+T",
+                SelectionCaptureResult.Create(CaptureStatus.Text, CaptureReason.None, text, steps)));
+
+            // A definite failure and an inconclusive result carry the failure-stage note; a
+            // cancellation and a confirmed empty are answers of their own and must not.
+            log.Capture(CaptureTelemetry.For("zh-failed", null, false, "Ctrl+Alt+T",
+                SelectionCaptureResult.NoText(CaptureStatus.Failed, CaptureReason.InputDenied)));
+            log.Capture(CaptureTelemetry.For("zh-unavailable", null, false, "Ctrl+Alt+T",
+                SelectionCaptureResult.NoText(CaptureStatus.Unavailable, CaptureReason.CopyNoUpdate)));
+            log.Capture(CaptureTelemetry.For("zh-cancelled", null, false, "Ctrl+Alt+T",
+                SelectionCaptureResult.NoText(CaptureStatus.Cancelled, CaptureReason.Cancelled)));
+            log.Capture(CaptureTelemetry.For("zh-empty", null, false, "Ctrl+Alt+T",
+                SelectionCaptureResult.NoText(CaptureStatus.Empty, CaptureReason.EmptySelection)));
+            // An unknown event name, and an exception whose message contains a key-shaped
+            // fixture: neither the name's unsafe characters nor the message may reach the file.
+            // The second event name is one the JSON layer's own charset filter would pass whole,
+            // so it is the case that must be stopped by the fixed placeholder and not by a filter.
+            log.Event("unknown\nevent", new Exception("private-key-fixture"));
+            log.Event("private-key-fixture", null);
+            log.InternalSelection(InternalSelectionStatus.Unavailable, InternalSelectionReason.SensitiveControl, "ApiKeyInput", 0);
+
+            string zhPath = Path.Combine(folder, "leaf.zh-CN.log");
+            string jsonPath = Path.Combine(folder, "leaf.log");
+            Check(File.Exists(zhPath) && File.Exists(jsonPath), "取词诊断同时写出 JSON 主日志与中文伴生日志");
+            string zh = File.ReadAllText(zhPath);
+            var jsonRows = File.ReadAllLines(jsonPath).Select(x => Json.Read(x) as Dictionary<string, object>).ToList();
+            Check(jsonRows.All(x => x != null), "JSON 主日志保持每行一条完整记录");
+
+            var textRow = jsonRows.First(x => (string)x["capture_id"] == "zh-text");
+            string version = (string)textRow["version"];
+            var textLines = zh.Split('\n').Where(x => x.Contains("capture=zh-text")).ToList();
+            string resultLine = textLines.First(x => x.Contains("事件=取词结果"));
+            string uiaLine = textLines.First(x => x.Contains("阶段=自动化读取"));
+            string sendLine = textLines.First(x => x.Contains("阶段=模拟复制发送"));
+            Check(resultLine.Contains("版本=" + version), "中文日志与 JSON 日志写明同一个真实版本号（" + version + "）");
+            Check(zh.Contains("capture=zh-failed") && zh.Contains("capture=zh-empty"),
+                "中文日志按 event 逐条输出，不用等待全部事件的会话汇总");
+
+            Check(resultLine.Contains("状态=取得文字") && resultLine.Contains("文本长度=" + text.Length) &&
+                uiaLine.Contains("文档数=2") && uiaLine.Contains("焦点链文档=1") &&
+                uiaLine.Contains("文档空选区=1") && uiaLine.Contains("文档无文本模式=1") &&
+                uiaLine.Contains("支持文本模式=是") && uiaLine.Contains("候选截断=是") &&
+                sendLine.Contains("键清理失败=是") && sendLine.Contains("键清理错误=87") &&
+                sendLine.Contains("系统错误=5"),
+                "中文日志可读懂本次取得文字、各阶段事实、文档计数、截断与键清理失败（" + uiaLine + "）");
+            Check(zh.Contains("事件=取词失败") && zh.Contains("状态=系统失败") && zh.Contains("原因=输入被拒绝") &&
+                zh.Contains("说明=日志显示失败阶段，尚不能确认唯一根因"),
+                "系统失败在中文日志里明确区分，并说明尚未确认唯一根因");
+            Check(zh.Contains("状态=未取得") && zh.Contains("原因=模拟复制无新内容") &&
+                zh.Contains("说明=日志显示失败阶段，尚不能确认唯一根因"),
+                "未取得把 CopyNoUpdate 记为阶段事实，而不是宣布它是唯一根因");
+            Check(zh.Contains("状态=已取消") && zh.Contains("原因=已取消") && zh.Contains("状态=确认空选区"),
+                "取消与确认空选区在中文日志里各自明确区分");
+            var cancelledLine = zh.Split('\n').First(x => x.Contains("capture=zh-cancelled"));
+            var emptyLine = zh.Split('\n').First(x => x.Contains("capture=zh-empty"));
+            Check(!cancelledLine.Contains("说明=") && !emptyLine.Contains("说明="),
+                "取消与确认空选区不带失败阶段的未定根因说明");
+
+            Check(zh.Contains("事件=未分类") && !zh.Contains("unknownevent") && !zh.Contains("事件=未分类("),
+                "未知事件只写固定占位，原代码不进入中文日志");
+            Check(!zh.Contains("unknown\nevent") && !zh.Contains(text) && !zh.Contains("private-key-fixture") &&
+                !zh.Contains("unknown_stage_fixture") && !zh.Contains("ApiKeyInput"),
+                "中文日志不落原文、异常消息、key 或白名单外的控件名");
+            Check(zh.Split('\n').All(x => !x.Contains("ApiKeyInput")),
+                "中文日志的窗口内选区写固定来源名，未知控件名不进入文件");
+            Check(zh.Contains("事件=窗口内选区读取") && zh.Contains("来源=其他来源"),
+                "窗口内选区在中文日志里用固定映射的来源名");
+
+            // The renderer's own negative rules, reached directly because a row DiagnosticLog
+            // builds always carries a typed value: an unknown enum code and a numeric field
+            // holding the wrong type must both be refused, never printed.
+            var stageRow = new Dictionary<string, object> {
+                { "utc", DateTime.UtcNow.ToString("o") }, { "event", "capture_stage" }, { "version", "0.0.0" }, { "pid", 1 },
+                { "capture_id", "zh-negative" }, { "stage", "uia" }, { "reason", "None" },
+                { "candidate_count", "private-key-fixture" }, { "document_count", 2 }
+            };
+            string stageLine = RenderChinese(stageRow);
+            Check(stageLine.Contains("文档数=2") && !stageLine.Contains("候选数=") &&
+                !stageLine.Contains("private-key-fixture"),
+                "已知数字字段拿到错误类型时整个字段被略去，其内容绝不回显");
+
+            var unknownEnumRow = new Dictionary<string, object> {
+                { "utc", DateTime.UtcNow.ToString("o") }, { "event", "capture_result" }, { "version", "0.0.0" }, { "pid", 1 },
+                { "capture_id", "zh-negative" }, { "status", "private-key-fixture" }, { "reason", "private-key-fixture" }
+            };
+            string unknownEnumLine = RenderChinese(unknownEnumRow);
+            Check(unknownEnumLine.Contains("状态=未分类") && unknownEnumLine.Contains("原因=未分类") &&
+                !unknownEnumLine.Contains("private-key-fixture"),
+                "未知枚举只写固定占位，原代码不进入中文日志");
+
+            // Both files rotate on their own limit and never share a backup name.
+            string rotate = Path.Combine(folder, "rotate");
+            var rolling = new DiagnosticLog(rotate, 1024);
+            for (int i = 0; i < 40; i++)
+                rolling.Capture(CaptureTelemetry.For("roll-" + i, null, false, "Ctrl+Alt+T",
+                    SelectionCaptureResult.Create(CaptureStatus.Text, CaptureReason.None, new string('x', 40), new List<CaptureStep>())));
+            var names = Directory.GetFiles(rotate).Select(Path.GetFileName).ToList();
+            Check(names.Count == 10 && names.Contains("leaf.zh-CN.1.log") && names.Contains("leaf.1.log"),
+                "两份日志各自轮转出四份备份，备份名互不覆盖（" + names.Count + " 个文件）");
+            Check(names.Where(x => x.StartsWith("leaf.zh-CN")).All(x => !File.ReadAllText(Path.Combine(rotate, x)).Contains("\"event\"")),
+                "中文日志的备份里没有 JSON 记录");
+            Check(names.Where(x => x.StartsWith("leaf.") && !x.StartsWith("leaf.zh-CN"))
+                .All(x => !File.ReadAllText(Path.Combine(rotate, x)).Contains("事件=")),
+                "JSON 主日志的备份里没有中文行");
+
+            // One file unwritable must not stop the other, and neither may throw to the caller.
+            string zhBlocked = Path.Combine(folder, "zh-blocked");
+            Directory.CreateDirectory(Path.Combine(zhBlocked, "leaf.zh-CN.log"));
+            var zhBlockedLog = new DiagnosticLog(zhBlocked);
+            bool survivedZh = true;
+            try { zhBlockedLog.Event("fixture_zh_blocked", null); } catch { survivedZh = false; }
+            Check(survivedZh && zhBlockedLog.ChineseWriteFailed && !zhBlockedLog.WriteFailed &&
+                File.ReadAllText(Path.Combine(zhBlocked, "leaf.log")).Contains("fixture_zh_blocked"),
+                "中文文件不可写时从不抛异常，JSON 主日志仍照常写入，失败状态各记各的");
+
+            string jsonBlocked = Path.Combine(folder, "json-blocked");
+            Directory.CreateDirectory(Path.Combine(jsonBlocked, "leaf.log"));
+            var jsonBlockedLog = new DiagnosticLog(jsonBlocked);
+            bool survivedJson = true;
+            try { jsonBlockedLog.Event("fixture_json_blocked", null); } catch { survivedJson = false; }
+            string jsonBlockedZh = File.ReadAllText(Path.Combine(jsonBlocked, "leaf.zh-CN.log"));
+            Check(survivedJson && jsonBlockedLog.WriteFailed && !jsonBlockedLog.ChineseWriteFailed &&
+                jsonBlockedZh.Contains("事件=未分类") && !jsonBlockedZh.Contains("fixture_json_blocked"),
+                "JSON 主日志不可写时中文文件仍写入，前者失败不被后者成功掩盖，未知事件仍不回显代码");
+            return;
         } finally {
             if (Directory.Exists(folder) && Path.GetFullPath(folder).StartsWith(Path.GetFullPath(Path.GetTempPath()), StringComparison.OrdinalIgnoreCase))
                 Directory.Delete(folder, true);
@@ -1214,6 +1615,8 @@ internal sealed class ScriptedCopyHost : ICopyHost
     public Exception ReadThrows, BackupThrows, RestoreThrows;
     public bool SendAccepted = true;
     public int LastSendError;
+    public bool SendCleanupFailed;
+    public int SendCleanupError;
     public bool CopyLandsOnSend = true;
     public int SequenceChangeAfterPauses = -1;
     public int PauseMs = 1;
@@ -1233,6 +1636,8 @@ internal sealed class ScriptedCopyHost : ICopyHost
     }
     public IntPtr ClipboardOwnerWindow { get { return OwnerWindow; } }
     public int SendError { get { return LastSendError; } }
+    public bool KeyCleanupFailed { get { return SendCleanupFailed; } }
+    public int KeyCleanupError { get { return SendCleanupError; } }
     public bool ModifiersHeld() { return Modifiers(); }
     public void Pause(int milliseconds)
     {
@@ -1267,6 +1672,41 @@ internal sealed class ScriptedCopyHost : ICopyHost
         RestoreCalls++;
         if (backup != null && backup.IsEmpty) EmptyRestoreCalls++;
         if (RestoreThrows != null) throw RestoreThrows;
+    }
+}
+
+// The key injection behind the simulated copy, scripted: it records every call the production
+// sequence makes, can refuse, fail or throw one, and reports which keys the desktop already
+// holds. A refused call inserts nothing, exactly as a failed SendInput does, so Applied is what
+// the target would really have seen. This checks the ordering and, above all, that a refused
+// copy touches only the keys it pressed itself - and reports a lift that did not work - with no
+// input sent to the desktop.
+internal sealed class ScriptedKeyInjector : IKeyInjector
+{
+    public readonly List<ushort> Keys = new List<ushort>();          // every attempt, in order
+    public readonly List<bool> Ups = new List<bool>();
+    public readonly List<ushort> Applied = new List<ushort>();       // only the accepted events
+    public readonly List<bool> AppliedUps = new List<bool>();
+    public readonly HashSet<ushort> Down = new HashSet<ushort>();    // keys the desktop already holds
+    public int Calls;
+    public int RejectAt;                     // The 1-based call to refuse; 0 refuses none.
+    public int RejectError;
+    public int FailLiftAt;                   // The 1-based call to refuse while lifting; 0 refuses none.
+    public int LiftError;
+    public int ThrowAt;                      // The 1-based call to throw; 0 throws none.
+    public int ThrowError;
+    public bool IsDown(ushort virtualKey) { return Down.Contains(virtualKey); }
+    public bool Inject(ushort virtualKey, bool up, out int error)
+    {
+        Calls++; Keys.Add(virtualKey); Ups.Add(up);
+        if (ThrowAt != 0 && Calls == ThrowAt)
+            throw new System.Runtime.InteropServices.ExternalException("fixture injection failure", ThrowError);
+        if ((RejectAt != 0 && Calls == RejectAt) || (FailLiftAt != 0 && Calls == FailLiftAt)) {
+            error = Calls == FailLiftAt ? LiftError : RejectError;
+            return false;
+        }
+        Applied.Add(virtualKey); AppliedUps.Add(up);
+        error = 0; return true;
     }
 }
 

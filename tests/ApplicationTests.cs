@@ -28,7 +28,13 @@ public static class ApplicationTests
         try {
             var frame = new DispatcherFrame();
             var task = Scenarios(folder);
-            var timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(30) };
+            // This budget covers the whole WPF group - these request checks and the popup
+            // regression group they hand over to - and is a hang guard, not a performance target:
+            // it must fail a request that never settles instead of letting the run stand forever.
+            // The group really takes about half a minute of work on a loaded desktop, so the guard
+            // has to sit clearly above that; a cap the ordinary path can reach only reports the
+            // machine's load.
+            var timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(120) };
             timer.Tick += (s, e) => frame.Continue = false;
             timer.Start();
             task.ContinueWith(t => application.Dispatcher.BeginInvoke(new Action(() => frame.Continue = false)));

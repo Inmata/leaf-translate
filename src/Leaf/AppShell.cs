@@ -71,7 +71,15 @@ namespace Leaf
             else if (native) { credentialProfiles = new WindowsCredentialProfiles(); migrateLegacyCredentials = true; }
             Log = client.Log ?? new DiagnosticLog(System.IO.Path.Combine(store.Folder, "logs")); Client.Log = Log;
             Selection = new SelectionAcquirer(new WindowsSelectionProbe());
-            Popup = Ui.Load("Popup"); InitializePopup();
+            Popup = Ui.Load("Popup");
+            // The paper's typeface is a shell-wide resource, so it is written here, once, the
+            // moment the window exists and before the reading page is wired: the popup, its
+            // bundled documents and any window opened later all start on the stored face.
+            // A saved name that no installed font answers falls back to the embedded Source
+            // Han Sans SC quietly; the settings page is what tells the user.
+            bool missingFont;
+            Ui.ApplyPaperFont(Store.Settings.FontFamilyName, out missingFont);
+            InitializePopup();
             InternalSelection = new InternalSelectionReader(Popup);
         }
         public void Start(bool background, bool demonstration)
@@ -176,6 +184,9 @@ namespace Leaf
         public async Task InvokeShortcutAsync()
         {
             if (captureBusy || shortcutRecording || exiting) return;
+            // A shortcut is a new reading of its own, so an identification still running for the
+            // page it is about to replace must not land on it or store its target language.
+            CancelSwap();
             var target = Selection.Snapshot();
             var invocation = Json.Copy(Store.Settings);
             if (!invocation.ClipboardMode && target.IsLeaf) {
@@ -342,6 +353,9 @@ namespace Leaf
         public void HidePopup()
         {
             CancelCapture();
+            // A page nobody is looking at must not flip under the user, nor store the target
+            // language a hidden identification happened to find.
+            CancelSwap();
             // Hiding ends a drag that was still running: the next show reads the window's own
             // size, and the highlight pass that was queued is dropped rather than painted.
             CancelInteractiveResize();
@@ -476,6 +490,14 @@ namespace Leaf
             if (Store.Settings.ProviderId != previous.ProviderId || Json.Write(Store.Settings.Provider) != Json.Write(previous.Provider) || keys.Count > 0 || deleted.Count > 0) CancelRequests();
             if (!Store.Settings.HistoryEnabled) Forget(null);
             if (clipboardMenu != null) { clipboardMenu.Checked = Store.Settings.ClipboardMode; tray.Text = "Leaf · " + Store.Settings.Shortcut; }
+            // A committed typeface travels from the settings the transaction left behind, so the
+            // popup, the settings page, the history window and every reading document move
+            // together even when the change arrived without the picker's own live preview - a
+            // preset load, a reapply after recovery, a store restored from disk.
+            if (Store.Settings.FontFamilyName != previous.FontFamilyName) {
+                bool missingFont;
+                Ui.ApplyPaperFont(Store.Settings.FontFamilyName, out missingFont);
+            }
             if (historyWindow != null) historyWindow.Refresh();
             Log.Event("settings_saved", null);
         }
@@ -571,7 +593,10 @@ namespace Leaf
         public async Task SaveCurrentAsync()
         {
             var record = Current;
-            if (record == null || demo) return;
+            // The reverse view of a swapped pair is a view of the record that pair already has:
+            // saving it would add a second history entry for the same two bodies and would touch
+            // neither of that entry's own bodies.
+            if (record == null || demo || IsSwappedView(record)) return;
             try {
                 await Store.SaveAsync(record, currentHistoryEpoch).ConfigureAwait(true);
                 if (historyWindow != null) historyWindow.Refresh();
@@ -594,6 +619,9 @@ namespace Leaf
         private void CancelRequests()
         {
             generation.Next(); wordGeneration.Next();
+            // Stopping, a new session and a replaced store are all the same boundary for a flip
+            // that is still identifying: it must not land on the page or store its target.
+            CancelSwap();
             if (mainCancellation != null) mainCancellation.Cancel();
             if (wordCancellation != null) wordCancellation.Cancel();
             if (chatCancellation != null) chatCancellation.Cancel();
@@ -622,11 +650,14 @@ namespace Leaf
         }
         private void Busy()
         {
-            Ui.Visible(Ui.Get<Grid>(Popup, "BusyPanel"), translating || wordBusy || chatBusy);
-            Ui.Get<TextBlock>(Popup, "BusyLabel").Text = translating ? "正在翻译…" : wordBusy ? "正在查词…" : "正在回答…";
+            Ui.Visible(Ui.Get<Grid>(Popup, "BusyPanel"), translating || wordBusy || chatBusy || swapBusy);
+            Ui.Get<TextBlock>(Popup, "BusyLabel").Text = swapBusy ? "正在识别原文语言…" : translating ? "正在翻译…" : wordBusy ? "正在查词…" : "正在回答…";
             Ui.Get<Button>(Popup, "SendButton").IsEnabled = Current != null && Current.Completed && !chatBusy;
             Ui.Get<Button>(Popup, "AskButton").IsEnabled = Current != null && Current.Completed;
             Ui.Visible(Ui.Get<Button>(Popup, "AskButton"), Current != null && Ui.Get<Grid>(Popup, "SourceEditor").Visibility != Visibility.Visible && Ui.Get<Border>(Popup, "InputPanel").Visibility != Visibility.Visible);
+            // The flip follows the same one state: it is usable exactly while a finished pair sits
+            // on the page with nothing running and nothing being edited.
+            UpdateSwapEntry();
         }
         public bool IsExiting { get { return exiting; } }
         public void Exit()
@@ -687,7 +718,7 @@ namespace Leaf
         private async Task SaveCurrentOrThrowAsync()
         {
             var record = Current;
-            if (record == null || demo) return;
+            if (record == null || demo || IsSwappedView(record)) return;
             await Store.SaveAsync(record, currentHistoryEpoch).ConfigureAwait(true);
         }
         public void Dispose()
@@ -716,7 +747,7 @@ namespace Leaf
             if (!alreadyFlushed) {
                 var placement = CapturePlacementToSave();
                 if (placement != null) Observe(Store.SavePlacementAsync(placement), "placement_save_failed");
-                if (Current != null && !demo) {
+                if (Current != null && !demo && !IsSwappedView(Current)) {
                     Current.Draft = Ui.Get<TextBox>(Popup, "QuestionInput").Text;
                     Observe(Store.SaveAsync(Current, currentHistoryEpoch), "history_save_failed");
                 }

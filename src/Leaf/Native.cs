@@ -85,6 +85,31 @@ namespace Leaf
         bool TryRead(string format, out object value);
     }
 
+    // The raw key injection the simulated copy performs, one key event per call, so the
+    // injected sequence can be checked with a scripted injector and no input is sent.
+    public interface IKeyInjector
+    {
+        // Injects one key event; false when Windows refused it, with the error it reported.
+        bool Inject(ushort virtualKey, bool up, out int error);
+        // Whether the desktop holds this key down right now. Read before a press so a key the
+        // user was already holding is never pressed as this copy's own - and so never lifted.
+        // It reports only the instant it is called: a key that comes down afterwards is not
+        // something this can see.
+        bool IsDown(ushort virtualKey);
+    }
+
+    // What one simulated copy did. Sent is false when a key event was refused, and Error is the
+    // error of that event. CleanupFailed says a key this copy pressed itself could not be lifted
+    // again afterwards, with the error Windows reported for the failing lift. That is the real
+    // outcome of the cleanup attempt only: it never claims the desktop holds no key.
+    public struct CopyInjection
+    {
+        public bool Sent;
+        public int Error;
+        public bool CleanupFailed;
+        public int CleanupError;
+    }
+
     // The desktop operations the copy worker is allowed to perform, so its sequence,
     // ownership, cancellation and restore rules can be checked with a scripted host.
     public interface ICopyHost
@@ -99,6 +124,11 @@ namespace Leaf
         // is owned by its browser process, so this window is what proves it belongs here.
         IntPtr ClipboardOwnerWindow { get; }
         int SendError { get; }
+        // Whether the keys the last SendCopy pressed itself could not all be lifted after it was
+        // refused, and the error of the failing lift. The real cleanup outcome only; it does not
+        // promise the desktop is clean. False when the copy was sent, which lifts nothing extra.
+        bool KeyCleanupFailed { get; }
+        int KeyCleanupError { get; }
         bool ModifiersHeld();
         void Pause(int milliseconds);
         bool SendCopy();
@@ -340,8 +370,11 @@ namespace Leaf
             bool sent = host.SendCopy();
             steps.Add(new CaptureStep {
                 Stage = "copy_send", Reason = sent ? CaptureReason.None : CaptureReason.InputDenied,
-                Checked = CaptureFields.Foreground,
+                Checked = CaptureFields.Foreground | CaptureFields.Cleanup,
                 NativeError = sent ? 0 : host.SendError, ForegroundSame = host.ForegroundWindow == target.Window,
+                // A refused copy reports the real outcome of lifting its own keys, including a
+                // lift that failed, instead of claiming the desktop was left clean.
+                KeyCleanupFailed = host.KeyCleanupFailed, KeyCleanupError = host.KeyCleanupError,
                 ElapsedMs = Next(watch, ref mark)
             });
             if (!sent) return Stepped(CaptureStatus.Failed, CaptureReason.InputDenied, steps);
@@ -542,7 +575,8 @@ namespace Leaf
             return SelectionCaptureResult.Create(CaptureStatus.Failed,
                 clipboard ? CaptureReason.ClipboardBusy : CaptureReason.SystemFailure, "", steps);
         }
-        private static bool ModifierKeysDown() { return new[] { 16, 17, 18, 91, 92 }.Any(key => (GetAsyncKeyState(key) & 0x8000) != 0); }
+        private static bool KeyDown(ushort key) { return (GetAsyncKeyState(key) & 0x8000) != 0; }
+        private static bool ModifierKeysDown() { return new ushort[] { 16, 17, 18, 91, 92 }.Any(KeyDown); }
 
         // The old clipboard is materialised while it can still be read: a delayed-rendering
         // proxy belongs to the source application and could not be rendered after this copy
@@ -593,22 +627,37 @@ namespace Leaf
 
         // Everything the copy worker does to the desktop. The worker's decisions are the
         // part worth checking, so they run against this seam instead of the real clipboard.
-        private sealed class DesktopCopyHost : ICopyHost
+        private sealed class DesktopCopyHost : ICopyHost, IKeyInjector
         {
             private int sendError;
+            private bool cleanupFailed;
+            private int cleanupError;
             public IntPtr ForegroundWindow { get { return GetForegroundWindow(); } }
             public IntPtr FocusedWindow { get { return ForegroundFocusWindow(); } }
             public uint ClipboardSequence { get { return GetClipboardSequenceNumber(); } }
             public uint ClipboardOwnerProcess { get { return OwnerProcess(); } }
             public IntPtr ClipboardOwnerWindow { get { return GetClipboardOwner(); } }
             public int SendError { get { return sendError; } }
+            public bool KeyCleanupFailed { get { return cleanupFailed; } }
+            public int KeyCleanupError { get { return cleanupError; } }
             public bool ModifiersHeld() { return ModifierKeysDown(); }
+            public bool IsDown(ushort virtualKey) { return KeyDown(virtualKey); }
             public void Pause(int milliseconds) { Thread.Sleep(milliseconds); }
+            // One key event per call so a refused step can be undone precisely: see
+            // Native.InjectCopy. Only this copy's own keys are ever lifted again.
             public bool SendCopy()
             {
-                var inputs = new[] { KeyInput(17, false), KeyInput(67, false), KeyInput(67, true), KeyInput(17, true) };
+                var copy = Native.InjectCopy(this);
+                sendError = copy.Sent ? 0 : copy.Error;
+                cleanupFailed = copy.CleanupFailed;
+                cleanupError = copy.CleanupError;
+                return copy.Sent;
+            }
+            public bool Inject(ushort virtualKey, bool up, out int error)
+            {
+                var inputs = new[] { KeyInput(virtualKey, up) };
                 uint sent = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(Input)));
-                sendError = sent == inputs.Length ? 0 : Marshal.GetLastWin32Error();
+                error = sent == inputs.Length ? 0 : Marshal.GetLastWin32Error();
                 return sent == inputs.Length;
             }
             public string ReadClipboardText()
@@ -683,6 +732,86 @@ namespace Leaf
         // The wrapper has no configured shortcut of its own; the acquirer only uses it to
         // reject free text, and this path never writes diagnostics.
         private const string WrapperShortcut = "Ctrl+Alt+T";
+
+        // The simulated copy: Ctrl down, C down, C up, Ctrl up, one key event per call. The
+        // reason is ownership, not timing: each event is injected on its own so that when
+        // Windows refuses one, exactly the keys this call pressed are known and can be lifted
+        // again. A copy that could not be sent is therefore cleaned up by this program without
+        // ever touching a key the user was holding, and nothing about the copy is retried.
+        //
+        // Ownership is decided before each press, not by the fact that the press succeeded: a
+        // successful down only proves the event was delivered, and for a key the user was
+        // already holding it would still be the user's key. So a key the desktop already holds
+        // is never pressed as this copy's own, and a key this copy did not press is never
+        // lifted - otherwise a copy that pressed C over a held C and then failed could lift the
+        // user's own C away. A key already down refuses the copy before anything is sent.
+        //
+        // This check reads the key state at the instant before each press, and that is the
+        // whole boundary it can promise: a key that comes down after this read and before
+        // Windows delivers the press is a real race this code cannot close, so it claims only
+        // that a key observed held is not pressed, never that no key can ever be lost.
+        //
+        // No inter-event delay is inserted. The order Ctrl, C then release is what matters, and
+        // that order is already the call order, so a pause would only add a timing assumption
+        // this code has no evidence for. An intermittent "clipboard did not change" is not
+        // claimed here to be a timing problem, and the injection does not try to address one.
+        private static readonly ushort[] CopyStrokes = { 17, 67, 67, 17 };
+        private static readonly bool[] CopyStrokeUps = { false, false, true, true };
+        public static CopyInjection InjectCopy(IKeyInjector injector)
+        {
+            var copy = new CopyInjection();
+            if (injector == null) return copy;
+            // The keys this call pressed down and has not lifted yet, oldest first.
+            var pressed = new List<ushort>();
+            for (int stroke = 0; stroke < CopyStrokes.Length; stroke++) {
+                int stepError;
+                bool accepted;
+                // A press is refused outright when the desktop already holds the key. Since the
+                // copy pressed nothing for it, nothing of the user's is lifted for it either;
+                // only keys this call really pressed are handed to Lift.
+                if (!CopyStrokeUps[stroke] && !Owned(injector, CopyStrokes[stroke], ref copy)) {
+                    Lift(injector, pressed, ref copy);
+                    return copy;
+                }
+                // An event that throws is a refused event too: the copy stops and is cleaned up
+                // exactly as for one Windows refused outright.
+                try { accepted = injector.Inject(CopyStrokes[stroke], CopyStrokeUps[stroke], out stepError); }
+                catch (Exception failure) { accepted = false; stepError = failure.HResult; }
+                if (!accepted) {
+                    copy.Error = stepError;
+                    Lift(injector, pressed, ref copy);
+                    return copy;
+                }
+                if (CopyStrokeUps[stroke]) pressed.Remove(CopyStrokes[stroke]);
+                else pressed.Add(CopyStrokes[stroke]);
+            }
+            copy.Sent = true;
+            return copy;
+        }
+        // Whether this copy may press a key: only when the desktop does not already hold it. A
+        // key state that could not be read is treated as held, so an unknown state never
+        // presses a key that might belong to the user. No Win32 error is set for a refusal on
+        // a held key - nothing Windows refused happened; the caller reports its own outcome.
+        private static bool Owned(IKeyInjector injector, ushort key, ref CopyInjection copy)
+        {
+            try { return !injector.IsDown(key); }
+            catch (Exception failure) { copy.Error = failure.HResult; return false; }
+        }
+        // Undoes only what this call pressed, newest first, so a modified key is lifted before
+        // its modifier. A key the sequence already released is no longer in the list, and a key
+        // this call never pressed is never touched at all. A lift Windows refused, or that threw,
+        // is recorded with its error: the copy reports that it could not be sure the key came up
+        // rather than silently pretending it did.
+        private static void Lift(IKeyInjector injector, List<ushort> pressed, ref CopyInjection copy)
+        {
+            for (int i = pressed.Count - 1; i >= 0; i--) {
+                int error = 0;
+                bool lifted;
+                try { lifted = injector.Inject(pressed[i], true, out error); }
+                catch (Exception failure) { lifted = false; error = failure.HResult; }
+                if (!lifted) { copy.CleanupFailed = true; copy.CleanupError = error; }
+            }
+        }
         private static Input KeyInput(ushort key, bool up)
         {
             return new Input { Type = 1, Data = new InputUnion { Keyboard = new KeyboardInput { Key = key, Flags = up ? 2u : 0u } } };

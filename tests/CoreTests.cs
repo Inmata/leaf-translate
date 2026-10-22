@@ -53,6 +53,7 @@ public static class CoreTests
             Domain(); Storage(folder);
             assertions += TranslationPresentationTests.Run();
             assertions += SelectionTests.Run().GetAwaiter().GetResult();
+            assertions += LanguageDetectionTests.Run().GetAwaiter().GetResult();
             Transport().GetAwaiter().GetResult(); Diagnostics(folder).GetAwaiter().GetResult();
             assertions += StorageRegressionTests.Run(Path.Combine(folder, "storage-regression")).GetAwaiter().GetResult();
             assertions += ApplicationTests.Run(Path.Combine(folder, "app"));
@@ -364,8 +365,13 @@ public static class CoreTests
         Check(!entries.Contains("private-key-fixture") && !entries.Contains("private source fixture") && !entries.Contains("thinking rejected"), "Neither keys, request text nor raw provider messages enter logs");
         await Task.WhenAll(Enumerable.Range(0, 60).Select(i => Task.Run(() => log.Event("fixture", new Exception("private exception fixture")))));
         var files = Directory.GetFiles(log.Folder);
-        Check(files.Length == 5 && files.All(x => new FileInfo(x).Length <= 1024), "Concurrent logging rotates at a bounded five-file limit");
-        Check(files.SelectMany(File.ReadAllLines).All(x => Json.Read(x) is Dictionary<string, object>), "Concurrent log writes remain complete JSON records");
+        var jsonFiles = files.Where(x => !Path.GetFileName(x).StartsWith("leaf.zh-CN")).ToList();
+        var chineseFiles = files.Where(x => Path.GetFileName(x).StartsWith("leaf.zh-CN")).ToList();
+        Check(jsonFiles.Count == 5 && jsonFiles.All(x => new FileInfo(x).Length <= 1024) && chineseFiles.Count == 5,
+            "Concurrent logging rotates each of the two files at a bounded five-file limit");
+        Check(jsonFiles.SelectMany(File.ReadAllLines).All(x => Json.Read(x) is Dictionary<string, object>), "Concurrent log writes remain complete JSON records");
+        Check(chineseFiles.SelectMany(File.ReadAllLines).All(x => x.Contains("版本=") && x.Contains("事件=")),
+            "Every zh-CN companion line names the same version and an event");
         string occupied = Path.Combine(folder, "log-path-is-file"); File.WriteAllText(occupied, "fixture");
         var unavailable = new DiagnosticLog(occupied); unavailable.Event("fixture", null);
         Check(unavailable.WriteFailed, "An unavailable log directory cannot crash the application");

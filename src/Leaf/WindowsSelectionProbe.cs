@@ -194,6 +194,15 @@ namespace Leaf
         private sealed class Scan
         {
             public int Visited, Candidates;
+            // The documents the read reached, split by where they were found - the focused
+            // element's own ancestor chain, or the bounded window walk - and by what their
+            // selection query answered. Counts only: this separates "a document was read and had
+            // nothing selected" from "no document was reached" from "the document had no text
+            // pattern" from "its query failed", without ever recording a name or content.
+            public int DocumentCount, DocumentChainCount, DocumentEmptyCount, DocumentNoPatternCount, DocumentUnreadableCount;
+            // Which budget is what stopped the walk - recorded as its own fact rather than left
+            // to be guessed from the elapsed time afterwards.
+            public bool NodeBound, TimeBound, CandidateBound;
             public bool PatternSupported, TrustedEmpty, Unreadable;
             public int EmptyType, ReadError;
         }
@@ -236,8 +245,8 @@ namespace Leaf
             int foreign = 0;
             IUiNode node = focused;
             for (int depth = 0; node != null && depth < AncestorDepth; depth++) {
-                if (Stopped(cancellation)) return Cancelled(steps);
-                if (watch.ElapsedMilliseconds > AutomationBudgetMs) { budgetSpent = true; break; }
+                if (Stopped(cancellation)) return Cancelled(steps, scan, watch);
+                if (watch.ElapsedMilliseconds > AutomationBudgetMs) { budgetSpent = true; scan.TimeBound = true; break; }
                 bool sameProcess = SameProcess(node, target);
                 if (!sameProcess) {
                     // Crossing into another process is allowed only while the chain can still be
@@ -276,12 +285,12 @@ namespace Leaf
                 // content that hangs under a verified WebView host inside the captured window.
                 bool[] mayAnswer = ChainOwnership(chain, target, ownership);
                 for (int i = 0; i < chain.Count; i++) {
-                    if (Stopped(cancellation)) return Cancelled(steps);
-                    if (watch.ElapsedMilliseconds > AutomationBudgetMs) { budgetSpent = true; break; }
+                    if (Stopped(cancellation)) return Cancelled(steps, scan, watch);
+                    if (watch.ElapsedMilliseconds > AutomationBudgetMs) { budgetSpent = true; scan.TimeBound = true; break; }
                     if (!mayAnswer[i]) continue;
-                    string selected = ReadCandidate(chain[i], scan);
+                    string selected = ReadCandidate(chain[i], scan, true);
                     if (!string.IsNullOrWhiteSpace(selected)) return Success(selected, steps, watch, scan, chain[i].ControlTypeId, tree, target);
-                    if (scan.Candidates >= MaxCandidates) { budgetSpent = true; break; }
+                    if (scan.Candidates >= MaxCandidates) { budgetSpent = true; scan.CandidateBound = true; break; }
                 }
             }
 
@@ -301,15 +310,15 @@ namespace Leaf
                 var locate = new Queue<IUiNode>();
                 locate.Enqueue(root);
                 while (locate.Count > 0 && scan.Visited < MaxNodes) {
-                    if (Stopped(cancellation)) return Cancelled(steps);
-                    if (watch.ElapsedMilliseconds > AutomationBudgetMs) { budgetSpent = true; break; }
+                    if (Stopped(cancellation)) return Cancelled(steps, scan, watch);
+                    if (watch.ElapsedMilliseconds > AutomationBudgetMs) { budgetSpent = true; scan.TimeBound = true; break; }
                     IUiNode current = locate.Dequeue(); scan.Visited++;
                     if (WindowHandle(current) == hostSubtree.ToInt64()) { start = current; startInsideHost = true; break; }
                     IUiNode child = FirstChild(current);
                     while (child != null) {
-                        if (Stopped(cancellation)) return Cancelled(steps);
-                        if (watch.ElapsedMilliseconds > AutomationBudgetMs) { budgetSpent = true; break; }
-                        if (scan.Visited + locate.Count >= MaxNodes) { budgetSpent = true; break; }
+                        if (Stopped(cancellation)) return Cancelled(steps, scan, watch);
+                        if (watch.ElapsedMilliseconds > AutomationBudgetMs) { budgetSpent = true; scan.TimeBound = true; break; }
+                        if (scan.Visited + locate.Count >= MaxNodes) { budgetSpent = true; scan.NodeBound = true; break; }
                         locate.Enqueue(child);
                         child = NextSibling(child);
                     }
@@ -325,21 +334,21 @@ namespace Leaf
                 var pending = new Queue<WalkNode>();
                 pending.Enqueue(new WalkNode { Node = start, InsideVerifiedHost = startInsideHost });
                 while (pending.Count > 0 && scan.Visited < MaxNodes && scan.Candidates < MaxCandidates) {
-                    if (Stopped(cancellation)) return Cancelled(steps);
-                    if (watch.ElapsedMilliseconds > AutomationBudgetMs) { budgetSpent = true; break; }
+                    if (Stopped(cancellation)) return Cancelled(steps, scan, watch);
+                    if (watch.ElapsedMilliseconds > AutomationBudgetMs) { budgetSpent = true; scan.TimeBound = true; break; }
                     WalkNode current = pending.Dequeue(); scan.Visited++;
                     // Only the captured window's own process, and the content hanging under a
                     // verified WebView host inside it, may answer for this window.
                     if (!SameProcess(current.Node, target) && !current.InsideVerifiedHost) continue;
-                    string selected = ReadCandidate(current.Node, scan);
+                    string selected = ReadCandidate(current.Node, scan, false);
                     if (!string.IsNullOrWhiteSpace(selected)) return Success(selected, steps, watch, scan, current.Node.ControlTypeId, tree, target);
                     // Siblings are enumerated under the same limits: a TreeWalker call can block
                     // on a foreign application, so each one is preceded by its own checks.
                     IUiNode child = FirstChild(current.Node);
                     while (child != null) {
-                        if (Stopped(cancellation)) return Cancelled(steps);
-                        if (watch.ElapsedMilliseconds > AutomationBudgetMs) { budgetSpent = true; break; }
-                        if (scan.Visited + pending.Count >= MaxNodes) { budgetSpent = true; break; }
+                        if (Stopped(cancellation)) return Cancelled(steps, scan, watch);
+                        if (watch.ElapsedMilliseconds > AutomationBudgetMs) { budgetSpent = true; scan.TimeBound = true; break; }
+                        if (scan.Visited + pending.Count >= MaxNodes) { budgetSpent = true; scan.NodeBound = true; break; }
                         pending.Enqueue(new WalkNode {
                             Node = child,
                             InsideVerifiedHost = current.InsideVerifiedHost || IsVerifiedHost(child, target, ownership)
@@ -348,16 +357,20 @@ namespace Leaf
                     }
                     // A child call that blocked long enough to spend the budget leaves the rest
                     // of that window unexamined even when it handed back no child at all.
-                    if (!budgetSpent && watch.ElapsedMilliseconds > AutomationBudgetMs) budgetSpent = true;
+                    if (!budgetSpent && watch.ElapsedMilliseconds > AutomationBudgetMs) { budgetSpent = true; scan.TimeBound = true; }
                     if (budgetSpent) break;
                 }
-                // A scan only counts as finished when nothing was left over for any reason.
+                // A scan only counts as finished when nothing was left over for any reason, and
+                // the cap that ended it is recorded as its own fact.
                 if (pending.Count > 0 || scan.Visited >= MaxNodes || scan.Candidates >= MaxCandidates) complete = false;
+                if (scan.Visited >= MaxNodes) scan.NodeBound = true;
+                if (scan.Candidates >= MaxCandidates) scan.CandidateBound = true;
             }
-            if (Stopped(cancellation)) return Cancelled(steps);
+            if (Stopped(cancellation)) return Cancelled(steps, scan, watch);
             // Time that ran out is an unfinished scan even when nothing was left pending: the
             // call that spent it may have been the one that would have found the selection.
-            if (budgetSpent || watch.ElapsedMilliseconds > AutomationBudgetMs) complete = false;
+            if (watch.ElapsedMilliseconds > AutomationBudgetMs) scan.TimeBound = true;
+            if (budgetSpent || scan.TimeBound) complete = false;
 
             // Only a trusted document that finished its selection query may report "nothing
             // selected"; a truncated scan is inconclusive, never a confirmed empty selection.
@@ -401,27 +414,47 @@ namespace Leaf
 
         // Reads one candidate. A node whose control type cannot be read is not a candidate; a
         // node that could not answer is recorded as such and is never a confirmed empty one.
-        private static string ReadCandidate(IUiNode node, Scan scan)
+        // fromFocusChain says where the node was found, so a document the focused element's own
+        // ancestor chain carried is counted apart from one the window walk reached.
+        private static string ReadCandidate(IUiNode node, Scan scan, bool fromFocusChain)
         {
             int type = node.ControlTypeId;
             if (type == 0) return null;
             scan.Candidates++;
+            bool document = type == DocumentTypeId;
+            if (document) {
+                scan.DocumentCount++;
+                if (fromFocusChain) scan.DocumentChainCount++;
+            }
             UiSelectionAnswer answer;
             try { answer = node.ReadSelection(); }
             catch (Exception error) {
-                scan.Unreadable = true; scan.ReadError = error.HResult; return null;
+                scan.Unreadable = true; scan.ReadError = error.HResult;
+                if (document) scan.DocumentUnreadableCount++;
+                return null;
             }
-            if (answer == null) { scan.Unreadable = true; return null; }
+            if (answer == null) {
+                scan.Unreadable = true;
+                if (document) scan.DocumentUnreadableCount++;
+                return null;
+            }
             if (answer.Text == null) {
                 // A control with no text pattern at all is a capability answer; one that has a
-                // pattern but did not answer is unknown, and neither may conclude Empty.
+                // pattern but did not answer is unknown, and neither may conclude Empty. The two
+                // are counted apart so a document that exposed no pattern is not read as one
+                // whose query failed.
                 scan.Unreadable = true;
                 if (answer.HResult != 0) scan.ReadError = answer.HResult;
+                if (document) {
+                    if (answer.Unreadable) scan.DocumentUnreadableCount++;
+                    else scan.DocumentNoPatternCount++;
+                }
                 return null;
             }
             scan.PatternSupported = true;
-            if (string.IsNullOrWhiteSpace(answer.Text) && type == DocumentTypeId) {
+            if (string.IsNullOrWhiteSpace(answer.Text) && document) {
                 scan.TrustedEmpty = true; scan.EmptyType = type;
+                scan.DocumentEmptyCount++;
             }
             return answer.Text;
         }
@@ -457,6 +490,10 @@ namespace Leaf
             steps.Add(new CaptureStep { Stage = "uia", Reason = CaptureReason.None, Checked = CaptureFields.Foreground | CaptureFields.Read,
                 CandidateCount = scan.Candidates,
                 ControlTypeId = controlTypeId, PatternSupported = true, ForegroundSame = Same(tree, target),
+                DocumentCount = scan.DocumentCount, DocumentChainCount = scan.DocumentChainCount,
+                DocumentEmptyCount = scan.DocumentEmptyCount, DocumentNoPatternCount = scan.DocumentNoPatternCount,
+                DocumentUnreadableCount = scan.DocumentUnreadableCount,
+                CandidateBound = scan.CandidateBound, NodeBound = scan.NodeBound, TimeBound = scan.TimeBound,
                 ElapsedMs = watch.ElapsedMilliseconds });
             return SelectionCaptureResult.Create(CaptureStatus.Text, CaptureReason.None,
                 text.Length > 6001 ? text.Substring(0, 6001) : text, steps);
@@ -468,6 +505,10 @@ namespace Leaf
             steps.Add(new CaptureStep { Stage = "uia", Reason = reason, Checked = CaptureFields.Foreground | CaptureFields.Read,
                 CandidateCount = scan.Candidates,
                 ControlTypeId = controlTypeId, PatternSupported = patternSupported,
+                DocumentCount = scan.DocumentCount, DocumentChainCount = scan.DocumentChainCount,
+                DocumentEmptyCount = scan.DocumentEmptyCount, DocumentNoPatternCount = scan.DocumentNoPatternCount,
+                DocumentUnreadableCount = scan.DocumentUnreadableCount,
+                CandidateBound = scan.CandidateBound, NodeBound = scan.NodeBound, TimeBound = scan.TimeBound,
                 // An unreadable query reports the code Windows gave it instead of losing it.
                 HResult = scan.ReadError,
                 ForegroundSame = Same(tree, target), ElapsedMs = watch.ElapsedMilliseconds });
@@ -477,9 +518,20 @@ namespace Leaf
         {
             try { return tree.IsForeground(target); } catch { return false; }
         }
-        private static SelectionCaptureResult Cancelled(List<CaptureStep> steps)
+        // A scan cancelled between two tree calls is still owed the counts it had already
+        // gathered synchronously up to that point - candidate and document counts, whether a text
+        // pattern was ever seen, and which budget it had hit - so a cancelled read is not reduced
+        // to nothing. Only what was really observed is written, never a zero invented for a fact
+        // the scan had not reached; the control type is left out because it was not obtained.
+        private static SelectionCaptureResult Cancelled(List<CaptureStep> steps, Scan scan, Stopwatch watch)
         {
-            steps.Add(new CaptureStep { Stage = "uia", Reason = CaptureReason.Cancelled, ElapsedMs = 0 });
+            steps.Add(new CaptureStep { Stage = "uia", Reason = CaptureReason.Cancelled, Checked = CaptureFields.Read,
+                CandidateCount = scan.Candidates, PatternSupported = scan.PatternSupported,
+                DocumentCount = scan.DocumentCount, DocumentChainCount = scan.DocumentChainCount,
+                DocumentEmptyCount = scan.DocumentEmptyCount, DocumentNoPatternCount = scan.DocumentNoPatternCount,
+                DocumentUnreadableCount = scan.DocumentUnreadableCount,
+                CandidateBound = scan.CandidateBound, NodeBound = scan.NodeBound, TimeBound = scan.TimeBound,
+                ElapsedMs = watch.ElapsedMilliseconds });
             return SelectionCaptureResult.Create(CaptureStatus.Cancelled, CaptureReason.Cancelled, "", steps);
         }
         private static bool Stopped(CancellationToken token)

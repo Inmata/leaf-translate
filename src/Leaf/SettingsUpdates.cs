@@ -27,6 +27,7 @@ namespace Leaf
             return new SettingsUpdate("preferences", s => {
                 var p = Json.Copy(captured);
                 s.TargetLanguage = p.TargetLanguage;
+                s.FontFamilyName = p.FontFamilyName;
                 s.Scene = p.Scene; s.SceneDetail = p.SceneDetail; s.SceneDetails = p.SceneDetails;
                 s.GameTextType = p.GameTextType; s.Style = p.Style;
                 s.Learning = p.Learning; s.Presets = p.Presets;
