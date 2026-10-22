@@ -1,6 +1,6 @@
 <Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
   <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-  <ScrollViewer Style="{StaticResource SlimScrollViewer}" VerticalScrollBarVisibility="Auto" Padding="0,0,10,0">
+  <ScrollViewer Style="{StaticResource SlimScrollViewer}" VerticalScrollBarVisibility="Auto" Padding="0,0,10,20">
     <StackPanel>
       <StackPanel Margin="0,0,0,24">
         <TextBlock Text="服务" Style="{StaticResource Caption}"/>
@@ -72,11 +72,19 @@
       <Expander Margin="0,0,0,16">
         <Expander.Header><TextBlock Text="阅读与翻译" FontSize="15" FontWeight="SemiBold" Foreground="{StaticResource Ink}"/></Expander.Header>
         <StackPanel Margin="0,14,0,0">
-          <Grid Margin="0,0,0,16">
-            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="14"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-            <StackPanel><TextBlock Text="阅读场景" Style="{StaticResource Caption}"/><ComboBox x:Name="SceneCombo"/></StackPanel>
-            <StackPanel Grid.Column="2"><TextBlock Text="目标语言" Style="{StaticResource Caption}"/><TextBox x:Name="TargetInput" MaxLength="40"/></StackPanel>
-          </Grid>
+          <StackPanel Margin="0,0,0,16">
+            <Grid>
+              <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="14"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+              <StackPanel><TextBlock Text="阅读场景" Style="{StaticResource Caption}"/><ComboBox x:Name="SceneCombo"/></StackPanel>
+              <StackPanel Grid.Column="2"><TextBlock Text="目标语言" Style="{StaticResource Caption}"/><ComboBox x:Name="TargetLanguageCombo"/></StackPanel>
+            </Grid>
+            <!-- Only a custom target language reveals its own field, aligned under the picker
+                 on the same two-column rhythm; a common language leaves this row collapsed. -->
+            <Grid x:Name="TargetCustomPanel" Margin="0,12,0,0" Visibility="Collapsed">
+              <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="14"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+              <TextBox x:Name="TargetInput" Grid.Column="2" MaxLength="40" AutomationProperties.Name="自定义目标语言"/>
+            </Grid>
+          </StackPanel>
           <StackPanel x:Name="SceneDetailPanel" Margin="0,0,0,16" Visibility="Collapsed">
             <TextBlock x:Name="SceneDetailLabel" Text="书名（选填）" Style="{StaticResource Caption}"/>
             <TextBox x:Name="SceneDetailInput" MaxLength="500"/>
@@ -86,6 +94,8 @@
           </StackPanel>
           <TextBlock Text="翻译风格" Style="{StaticResource Caption}"/>
           <ComboBox x:Name="StyleCombo" Margin="0,0,0,4"/>
+          <TextBlock Text="字体" Style="{StaticResource Caption}" Margin="0,16,0,8"/>
+          <ComboBox x:Name="FontCombo"/>
         </StackPanel>
       </Expander>
       <Expander Margin="0,0,0,16">
@@ -137,6 +147,10 @@
           <TextBlock Text="历史也有存储空间上限；超出后移除最旧记录。" Foreground="{StaticResource Muted}" FontSize="13" Margin="0,0,0,8"/>
         </StackPanel>
       </Expander>
+      <!-- The version is the last thing in the scrolling content: a quiet footnote after the
+           last group, with the scroll viewport's own bottom padding as the resting space
+           before the fixed status line below it. -->
+      <TextBlock x:Name="VersionLabel" Text="Leaf" Foreground="{StaticResource Muted}" FontSize="13" Margin="0,28,0,16"/>
     </StackPanel>
   </ScrollViewer>
   <Border Grid.Row="1" BorderBrush="{StaticResource Line}" BorderThickness="0,1,0,0" Padding="0,16,0,0" Margin="0,14,0,0">

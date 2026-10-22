@@ -48,7 +48,8 @@ namespace Leaf
         Modifiers = 4,    // modifiers_released
         Focus = 8,        // focus_checked, focus_owned
         Owner = 16,       // clipboard_owner_process, owner_window_verified
-        Read = 32         // candidate_count, control_type_id, pattern_supported
+        Read = 32,        // candidate_count, control_type_id, pattern_supported, document_*, *_bound
+        Cleanup = 64      // key_cleanup_failed, key_cleanup_error
     }
 
     // One stage of one invocation. Stage names come from a fixed whitelist in DiagnosticLog.
@@ -60,6 +61,27 @@ namespace Leaf
         public int CandidateCount { get; set; }
         public int ControlTypeId { get; set; }
         public bool PatternSupported { get; set; }
+        // The document controls the read actually reached, and from where: the focused element's
+        // own ancestor chain, or the bounded window walk. Counts only, and no control name, so a
+        // log can tell "a document was read but had nothing selected" from "no document was
+        // reached" without ever recording content. The three answer counts split what those
+        // documents answered - nothing selected, no text pattern at all, or a query that failed -
+        // because those are three different facts and only one of them is a confirmed empty.
+        public int DocumentCount { get; set; }
+        public int DocumentChainCount { get; set; }
+        public int DocumentEmptyCount { get; set; }
+        public int DocumentNoPatternCount { get; set; }
+        public int DocumentUnreadableCount { get; set; }
+        // Which budget - the node cap, the time budget, the candidate cap - is what stopped the
+        // walk. Recorded as separate facts instead of being guessed from elapsed_ms later.
+        public bool CandidateBound { get; set; }
+        public bool NodeBound { get; set; }
+        public bool TimeBound { get; set; }
+        // Whether the keys a refused simulated copy pressed itself could not all be lifted, and
+        // the error Windows reported for the failing lift. This is the real outcome of the
+        // cleanup attempt only - it is not a promise that no key is left held.
+        public bool KeyCleanupFailed { get; set; }
+        public int KeyCleanupError { get; set; }
         public bool ForegroundSame { get; set; }
         public bool ClipboardChanged { get; set; }
         public bool ModifiersReleased { get; set; }

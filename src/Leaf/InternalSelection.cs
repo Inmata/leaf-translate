@@ -69,7 +69,7 @@ namespace Leaf
         // around them looks like.
         private static readonly string[] SensitiveNames = {
             "QuestionInput", "ApiKeyInput", "EndpointInput", "ModelInput", "OutputLimitInput",
-            "TargetInput", "SceneDetailInput", "CustomNameInput", "CustomInstructionInput",
+            "TargetInput", "TargetLanguageCombo", "SceneDetailInput", "CustomNameInput", "CustomInstructionInput",
             "PresetNameInput", "ShortcutInput", "HistoryLimitInput"
         };
         private const int MaxParentDepth = 128;

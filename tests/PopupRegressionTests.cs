@@ -79,7 +79,507 @@ internal static class PopupRegressionTests
         await FailedSettingsLeaveBlocksCapture(Path.Combine(folder, "settings-leave-blocks"));
         await InconclusiveCaptureKeepsSettingsPage(Path.Combine(folder, "inconclusive-settings"));
         await ExitKeepsAppOnFailedSettingsLeave(Path.Combine(folder, "exit-settings-leave"));
+        await TargetLanguagePicker(Path.Combine(folder, "target-language"));
+        await FontSelectionAppliesEverywhere(Path.Combine(folder, "font-selection"));
+        StoredFontAppliesAtStartup(Path.Combine(folder, "font-startup"));
+        await SwapControlWiresRequest(Path.Combine(folder, "swap-seam"));
+        await SettingsVersionFooter(Path.Combine(folder, "version-footer"));
+        await SwapExchangesThePair(Path.Combine(folder, "swap-forward"));
+        await SwapBackRestoresTheOriginal(Path.Combine(folder, "swap-back"));
+        await SwapStaysDisabledWhileBusy(Path.Combine(folder, "swap-disabled"));
+        await SwapRefusesUndeterminedLanguage(Path.Combine(folder, "swap-undetermined"));
+        await SwapRefusesSameLanguage(Path.Combine(folder, "swap-same-language"));
+        await SwapKeepsPageWhenIdentificationFails(Path.Combine(folder, "swap-identify-failed"));
+        await SwapKeepsPageWhenTargetCannotBeSaved(Path.Combine(folder, "swap-save-failed"));
+        await LateIdentificationCannotTouchThePage(Path.Combine(folder, "swap-late"));
+        await SwapStoresACustomLanguage(Path.Combine(folder, "swap-custom"));
         return assertions;
+    }
+
+    // The target language is one picker over the common languages plus 自定义; the conditional
+    // field appears only for a custom value, a blank custom value is never saved, and a stored
+    // custom value survives reopening exactly. There is no source-language control anywhere.
+    private static async Task TargetLanguagePicker(string folder)
+    {
+        var handler = new FixtureHandler();
+        using (var shell = new AppShell(ConfiguredStore(folder), false, new LlmClient(handler))) {
+            await shell.TranslateAsync("A target language sentence.", "选中文字", false);
+            shell.ShowSettingsPage();
+            var panel = SettingsPanel(shell);
+            var combo = Ui.Get<ComboBox>(panel, "TargetLanguageCombo");
+            Check(combo.Items.Count == TargetLanguages.Common.Length + 1 &&
+                Convert.ToString(combo.Items[0]) == "中文" &&
+                Convert.ToString(combo.Items[combo.Items.Count - 1]) == TargetLanguages.Custom,
+                "The target language picker offers every common language then 自定义");
+            Check(panel.FindName("SourceLanguageCombo") == null && panel.FindName("SourceLanguageInput") == null,
+                "Settings carry no source-language control at all");
+
+            combo.SelectedItem = "日本語";
+            Check(Ui.Get<Grid>(panel, "TargetCustomPanel").Visibility == Visibility.Collapsed,
+                "A common target language hides the conditional field");
+            Check(await shell.TryLeaveSettingsPageAsync() && !shell.IsSettingsPageOpen &&
+                shell.Store.Settings.TargetLanguage == "日本語",
+                "Choosing a common target language applies and saves it");
+
+            shell.ShowSettingsPage();
+            panel = SettingsPanel(shell);
+            combo = Ui.Get<ComboBox>(panel, "TargetLanguageCombo");
+            Check(Convert.ToString(combo.SelectedItem) == "日本語" &&
+                Ui.Get<Grid>(panel, "TargetCustomPanel").Visibility == Visibility.Collapsed,
+                "Reopening shows the saved common language with the field collapsed");
+
+            combo.SelectedItem = TargetLanguages.Custom;
+            Check(Ui.Get<Grid>(panel, "TargetCustomPanel").Visibility == Visibility.Visible,
+                "Choosing 自定义 reveals the aligned custom field");
+            Ui.Get<TextBox>(panel, "TargetInput").Text = "   ";
+            Check(!await shell.TryLeaveSettingsPageAsync() && shell.IsSettingsPageOpen &&
+                Ui.Get<TextBlock>(panel, "SettingsStatus").Text.Contains("目标语言"),
+                "An empty custom target language is not saved and keeps the page with its reason");
+            Check(shell.Store.Settings.TargetLanguage == "日本語",
+                "An empty custom target language leaves the applied language untouched");
+
+            Ui.Get<TextBox>(panel, "TargetInput").Text = "  粤语  ";
+            Check(await shell.TryLeaveSettingsPageAsync() && !shell.IsSettingsPageOpen &&
+                shell.Store.Settings.TargetLanguage == "粤语",
+                "A typed custom target language is trimmed, saved and applied");
+
+            shell.ShowSettingsPage();
+            panel = SettingsPanel(shell);
+            Check(Convert.ToString(Ui.Get<ComboBox>(panel, "TargetLanguageCombo").SelectedItem) == TargetLanguages.Custom &&
+                Ui.Get<TextBox>(panel, "TargetInput").Text == "粤语" &&
+                Ui.Get<Grid>(panel, "TargetCustomPanel").Visibility == Visibility.Visible,
+                "A saved custom target language stays on 自定义 with its exact text");
+            Check(await shell.TryLeaveSettingsPageAsync() && !shell.IsSettingsPageOpen &&
+                shell.Store.Settings.TargetLanguage == "粤语",
+                "Leaving after inspecting the preserved custom language keeps it");
+        }
+    }
+
+    // The font picker defaults to the embedded Source Han Sans SC, applies an installed text
+    // font to the popup and its already-built document at once, persists the choice, and
+    // returns to the embedded face when the default is chosen again.
+    private static async Task FontSelectionAppliesEverywhere(string folder)
+    {
+        var handler = new FixtureHandler();
+        using (var shell = new AppShell(ConfiguredStore(folder), false, new LlmClient(handler))) {
+            await shell.TranslateAsync("A font selection sentence.", "选中文字", false);
+            var embedded = (FontFamily)Application.Current.Resources["PaperFontFamily"];
+            var translation = Ui.Get<RichTextBox>(shell.Popup, "TranslationText");
+            Check(translation.Document.Blocks.Count > 0, "The translation document exists before the font changes");
+
+            shell.ShowSettingsPage();
+            var panel = SettingsPanel(shell);
+            var combo = Ui.Get<ComboBox>(panel, "FontCombo");
+            Check(combo.Items.Count >= 2 && Convert.ToString(combo.Items[0]) == "思源黑体 SC（内置）" &&
+                Ui.Get<ComboBox>(panel, "FontCombo").SelectedIndex == 0,
+                "The font picker offers the embedded default first and starts on it");
+
+            string chosen = Convert.ToString(combo.Items[1]);
+            combo.SelectedIndex = 1;
+            Check(shell.Popup.FontFamily.Source == chosen &&
+                translation.Document.FontFamily.Source == chosen &&
+                ((FontFamily)Application.Current.Resources["PaperFontFamily"]).Source == chosen,
+                "Choosing an installed font updates the popup and its existing document at once");
+            Check(await shell.TryLeaveSettingsPageAsync() && !shell.IsSettingsPageOpen &&
+                shell.Store.Settings.FontFamilyName == chosen,
+                "The chosen font is persisted");
+
+            // A window opened only after the change is a fresh XAML load the live apply never
+            // reached, so it has to take the family the shell is using now rather than the
+            // embedded default the theme's Window style baked in when the theme was parsed.
+            var history = new HistoryWindow(shell);
+            Check(history.Window.FontFamily.Source == chosen &&
+                history.Window.FontFamily.Source != embedded.Source,
+                "A window opened after the font change starts on the current face, not the embedded default");
+            history.Window.Close();
+
+            shell.ShowSettingsPage();
+            panel = SettingsPanel(shell);
+            combo = Ui.Get<ComboBox>(panel, "FontCombo");
+            Check(Convert.ToString(combo.SelectedItem) == chosen,
+                "Reopening selects the saved installed font");
+            combo.SelectedIndex = 0;
+            Check(await shell.TryLeaveSettingsPageAsync() && !shell.IsSettingsPageOpen &&
+                shell.Store.Settings.FontFamilyName == "",
+                "Choosing the embedded default persists an empty value");
+            Check(ReferenceEquals(Application.Current.Resources["PaperFontFamily"], embedded) &&
+                shell.Popup.FontFamily.Source == embedded.Source &&
+                translation.Document.FontFamily.Source == embedded.Source,
+                "Restoring the default returns the page and its document to the embedded face");
+        }
+    }
+
+    // The typeface is a shell-wide preference, so a stored choice must be written as the shell
+    // starts - before any settings page exists - and reach both the popup and the documents it
+    // already carries. This is the real entry the picker's live preview later moves.
+    private static void StoredFontAppliesAtStartup(string folder)
+    {
+        string chosen = Ui.InstalledTextFonts()[0];
+        var store = ConfiguredStore(folder);
+        var settings = Json.Copy(store.Settings); settings.FontFamilyName = chosen; store.SaveSettings(settings);
+        using (var shell = new AppShell(store, false, new LlmClient(new FixtureHandler()))) {
+            var translation = Ui.Get<RichTextBox>(shell.Popup, "TranslationText");
+            Check(shell.Popup.FontFamily.Source == chosen &&
+                translation.Document.FontFamily.Source == chosen &&
+                ((FontFamily)Application.Current.Resources["PaperFontFamily"]).Source == chosen,
+                "A stored font is applied as the shell starts, before any settings page is opened");
+        }
+    }
+
+    // The light swap control is the page's one flip entry: pressing it raises the request once and
+    // the page's own subscriber is what really exchanges the pair. A page with nothing finished to
+    // exchange raises the request and does nothing else.
+    private static async Task SwapControlWiresRequest(string folder)
+    {
+        var handler = new FixtureHandler();
+        using (var shell = new AppShell(ConfiguredStore(folder), false, new LlmClient(handler))) {
+            var button = Ui.Get<Button>(shell.Popup, "SwapButton");
+            Check(button != null && !button.IsEnabled,
+                "The reading page carries its lightweight swap control, and an empty page offers no flip");
+            int requests = 0;
+            shell.SwapRequested += () => requests++;
+            button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Check(requests == 1, "The swap control raises the swap request once");
+            await Settle();
+            Check(shell.Current == null && handler.Calls == 0,
+                "The swap seam changes nothing where there is nothing to exchange");
+        }
+    }
+
+    // The settings content ends with the running version footnote, after the last group and
+    // before the fixed status line.
+    private static async Task SettingsVersionFooter(string folder)
+    {
+        using (var shell = new AppShell(ConfiguredStore(folder), false, new LlmClient(new FixtureHandler()))) {
+            shell.ShowSettingsPage();
+            var panel = SettingsPanel(shell);
+            var label = Ui.Get<TextBlock>(panel, "VersionLabel");
+            var version = typeof(AppShell).Assembly.GetName().Version;
+            string expected = "Leaf " + version.Major + "." + version.Minor + "." + version.Build;
+            Check(label.Text == expected, "The version footnote matches the running assembly version");
+            var parent = LogicalTreeHelper.GetParent(label) as StackPanel;
+            Check(parent != null && parent.Children.Count > 0 &&
+                ReferenceEquals(parent.Children[parent.Children.Count - 1], label),
+                "The version footnote is the last item of the settings content");
+            Check(await shell.TryLeaveSettingsPageAsync() && !shell.IsSettingsPageOpen,
+                "Leaving the settings page after reading the version succeeds");
+        }
+    }
+
+    // Hello → 你好: the flip shows 你好 → Hello without translating the sentence again, stores the
+    // language it identified as the new target only once the settings transaction really commits,
+    // and leaves the pair's one history entry holding its own two bodies.
+    private static async Task SwapExchangesThePair(string folder)
+    {
+        var handler = new SwapHandler { Language = "英语", Translation = "你好，世界 🌍" };
+        var store = ConfiguredStore(folder);
+        using (var shell = new AppShell(store, false, new LlmClient(handler))) {
+            await shell.TranslateAsync("Hello 🌍", "选中文字", false);
+            var record = shell.Current;
+            Check(record.Completed && record.Source == "Hello 🌍" && record.Translation == "你好，世界 🌍",
+                "The fixture pair is on screen before the flip");
+            Check(store.Settings.TargetLanguage == "中文" && Ui.Get<Button>(shell.Popup, "SwapButton").IsEnabled,
+                "A finished pair offers the flip while the configured target language is still in force");
+
+            await PressSwap(shell);
+            Check(handler.Identifications == 1 && handler.Translations == 1,
+                "The flip identified the original once and never translated the sentence again");
+            Check(!ReferenceEquals(shell.Current, record) && shell.Current.Source == "你好，世界 🌍" &&
+                shell.Current.Translation == "Hello 🌍",
+                "The reading session now shows the two bodies the other way round");
+            Check(Ui.Get<TextBox>(shell.Popup, "SourceText").Text == "你好，世界 🌍" &&
+                Reading(shell.Popup, "TranslationText") == "Hello 🌍",
+                "The exchanged bodies keep their exact Unicode text");
+            Check(store.Settings.TargetLanguage == "English",
+                "The identified language becomes the saved target language once the settings commit lands");
+            var history = store.History("");
+            Check(history.Count == 1 && history[0].Source == "Hello 🌍" && history[0].Translation == "你好，世界 🌍",
+                "The flip adds no history entry and leaves the pair's own one untouched");
+
+            shell.ShowSettingsPage();
+            var panel = SettingsPanel(shell);
+            Check(Convert.ToString(Ui.Get<ComboBox>(panel, "TargetLanguageCombo").SelectedItem) == "English" &&
+                Ui.Get<Grid>(panel, "TargetCustomPanel").Visibility == Visibility.Collapsed,
+                "Reopening settings shows the identified language as the picker's own English entry");
+            Check(await shell.TryLeaveSettingsPageAsync() && !shell.IsSettingsPageOpen &&
+                store.Settings.TargetLanguage == "English",
+                "Leaving the settings page keeps the identified target language");
+            Check(Ui.Get<Button>(shell.Popup, "SwapButton").IsEnabled, "The flipped page offers the way back");
+        }
+    }
+
+    // The way back is the pair's own metadata: the target the flip replaced comes back, nothing is
+    // identified or translated again, and the original view returns with its open word, its
+    // conversation and its draft while the reverse view never borrowed any of them.
+    private static async Task SwapBackRestoresTheOriginal(string folder)
+    {
+        var handler = new SwapHandler { Language = "英语", Translation = "你好" };
+        var store = ConfiguredStore(folder);
+        using (var shell = new AppShell(store, false, new LlmClient(handler))) {
+            await shell.TranslateAsync("Hello", "选中文字", false);
+            var record = shell.Current;
+            record.Chat.Add(new ChatTurn { Role = "user", Content = "older fixture", Topic = "原句" });
+            record.Chat.Add(new ChatTurn { Role = "assistant", Content = "older answer", Topic = "原句" });
+            Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text = "unsent question";
+            var word = TextTools.Pieces(record.Source).First(p => p.IsWord);
+            await shell.SelectWordAsync(word, false);
+            int translations = handler.Translations;
+            Check(Ui.Get<Border>(shell.Popup, "WordPanel").Visibility == Visibility.Visible &&
+                CardHeadword(shell.Popup) == word.Text,
+                "The original view holds an open word card before the flip");
+
+            await PressSwap(shell);
+            var reverse = shell.Current;
+            Check(!ReferenceEquals(reverse, record) && reverse.Cards.Count == 0 && reverse.Chat.Count == 0,
+                "The reverse view starts with no word card and no conversation of its own");
+            Check(Ui.Get<Border>(shell.Popup, "WordPanel").Visibility == Visibility.Collapsed &&
+                Ui.Get<Border>(shell.Popup, "ChatPanel").Visibility == Visibility.Collapsed &&
+                Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text == "",
+                "The reverse view shows neither the original's card nor its conversation nor its draft");
+
+            await PressSwap(shell);
+            Check(handler.Translations == translations && handler.Identifications == 1,
+                "Flipping back identifies and translates nothing again");
+            Check(ReferenceEquals(shell.Current, record) && store.Settings.TargetLanguage == "中文",
+                "Flipping back restores the record and the target language the flip replaced");
+            Check(CardHeadword(shell.Popup) == word.Text &&
+                Ui.Get<Border>(shell.Popup, "WordPanel").Visibility == Visibility.Visible &&
+                Ui.Get<Border>(shell.Popup, "ChatPanel").Visibility == Visibility.Visible &&
+                Ui.Get<TextBox>(shell.Popup, "QuestionInput").Text == "unsent question" && record.Chat.Count == 2,
+                "The original view comes back with its card, its conversation and its draft");
+            Check(store.History("").Count == 1, "Neither direction of the flip adds a history entry");
+
+            await PressSwap(shell);
+            Check(handler.Identifications == 1 && store.Settings.TargetLanguage == "English",
+                "Flipping forward again reuses the metadata the first flip learned");
+        }
+    }
+
+    // The flip is offered only where it can really happen: a page with nothing finished, a
+    // translation in flight, an uncommitted original edit and a demonstration session all keep it
+    // disabled, and pressing it anyway neither identifies nor stores anything.
+    private static async Task SwapStaysDisabledWhileBusy(string folder)
+    {
+        var handler = new SwapHandler { Language = "英语", Translation = "你好", Holding = true };
+        var store = ConfiguredStore(folder);
+        using (var shell = new AppShell(store, false, new LlmClient(handler))) {
+            var button = Ui.Get<Button>(shell.Popup, "SwapButton");
+            Check(!button.IsEnabled, "A page with no finished pair offers no flip");
+            Click(shell.Popup, "SwapButton");
+            await Settle();
+            Check(shell.Current == null && handler.Calls == 0,
+                "Pressing it with nothing to exchange starts no request");
+
+            var translation = shell.TranslateAsync("Hello", "选中文字", false);
+            await Task.Delay(30);
+            Check(!button.IsEnabled, "A translation in flight keeps the flip disabled");
+            Click(shell.Popup, "SwapButton");
+            await Settle();
+            Check(handler.Identifications == 0 && store.Settings.TargetLanguage == "中文" && handler.Translations == 1,
+                "Pressing it while the sentence is still translating identifies nothing");
+            handler.Release();
+            await translation;
+            Check(button.IsEnabled, "A finished pair offers the flip again");
+
+            shell.BeginSourceEdit(false);
+            Check(!button.IsEnabled, "An open original editor keeps the flip disabled");
+            Click(shell.Popup, "SwapButton");
+            await Settle();
+            Check(handler.Identifications == 0 && store.Settings.TargetLanguage == "中文",
+                "Pressing it under an uncommitted edit identifies nothing");
+        }
+
+        using (var shell = new AppShell(ConfiguredStore(Path.Combine(folder, "demo")), false, new LlmClient(new SwapHandler()))) {
+            shell.PopulateDemo();
+            Check(!Ui.Get<Button>(shell.Popup, "SwapButton").IsEnabled,
+                "A demonstration session, which never calls an API, offers no flip");
+        }
+    }
+
+    // An answer that does not name a language is a normal non-success: the page, the session and
+    // the stored target language stay as they were, and the retry repeats the identification only.
+    private static async Task SwapRefusesUndeterminedLanguage(string folder)
+    {
+        var handler = new SwapHandler { Certain = false, Translation = "你好" };
+        var store = ConfiguredStore(folder);
+        using (var shell = new AppShell(store, false, new LlmClient(handler))) {
+            await shell.TranslateAsync("Hello", "选中文字", false);
+            var record = shell.Current;
+            await PressSwap(shell);
+            Check(handler.Identifications == 1 && handler.Translations == 1,
+                "An undetermined answer is asked for once and translates nothing");
+            Check(ReferenceEquals(shell.Current, record) && store.Settings.TargetLanguage == "中文",
+                "An undetermined answer keeps the page and the target language");
+            Check(Ui.Get<Border>(shell.Popup, "ErrorPanel").Visibility == Visibility.Visible &&
+                Ui.Get<TextBlock>(shell.Popup, "ErrorText").Text.Contains("原文语言"),
+                "An undetermined answer says so in one short line");
+
+            Click(shell.Popup, "RetryButton");
+            await Until(() => handler.Identifications == 2);
+            await Settle();
+            Check(handler.Translations == 1 && ReferenceEquals(shell.Current, record) &&
+                store.Settings.TargetLanguage == "中文",
+                "Retrying repeats the identification only, never the sentence's translation");
+        }
+    }
+
+    // An original already written in the target language has nowhere to flip to.
+    private static async Task SwapRefusesSameLanguage(string folder)
+    {
+        var handler = new SwapHandler { Language = "中文", Translation = "Hello" };
+        var store = ConfiguredStore(folder);
+        using (var shell = new AppShell(store, false, new LlmClient(handler))) {
+            await shell.TranslateAsync("你好", "选中文字", false);
+            var record = shell.Current;
+            await PressSwap(shell);
+            Check(handler.Identifications == 1 && handler.Translations == 1,
+                "The same-language answer is asked for once and translates nothing");
+            Check(ReferenceEquals(shell.Current, record) && store.Settings.TargetLanguage == "中文" &&
+                Ui.Get<TextBox>(shell.Popup, "SourceText").Text == "你好",
+                "An original already in the target language is refused and the page stays as it was");
+            Check(Ui.Get<Border>(shell.Popup, "ErrorPanel").Visibility == Visibility.Visible &&
+                Ui.Get<TextBlock>(shell.Popup, "ErrorText").Text.Contains("目标语言"),
+                "The refusal says so in one short line");
+        }
+    }
+
+    // A service that cannot answer the identification is the same refusal: nothing moves, and the
+    // retry asks again instead of translating the sentence.
+    private static async Task SwapKeepsPageWhenIdentificationFails(string folder)
+    {
+        var handler = new SwapHandler { Translation = "你好", IdentificationFailure = HttpStatusCode.InternalServerError };
+        var store = ConfiguredStore(folder);
+        using (var shell = new AppShell(store, false, new LlmClient(handler))) {
+            await shell.TranslateAsync("Hello", "选中文字", false);
+            var record = shell.Current;
+            await PressSwap(shell);
+            Check(handler.Identifications == 1 && handler.Translations == 1,
+                "A failed identification asks once and translates nothing");
+            Check(ReferenceEquals(shell.Current, record) && store.Settings.TargetLanguage == "中文" &&
+                Ui.Get<TextBox>(shell.Popup, "SourceText").Text == "Hello",
+                "A failed identification keeps the page and the target language");
+            Check(Ui.Get<Border>(shell.Popup, "ErrorPanel").Visibility == Visibility.Visible &&
+                Ui.Get<TextBlock>(shell.Popup, "ErrorText").Text.Length > 0,
+                "A failed identification reports itself in one short line");
+
+            Click(shell.Popup, "RetryButton");
+            await Until(() => handler.Identifications == 2);
+            await Settle();
+            Check(handler.Translations == 1 && store.Settings.TargetLanguage == "中文",
+                "Retrying a failed identification repeats the identification only");
+        }
+    }
+
+    // The flip commits only after the new target language is really stored: a save that fails
+    // leaves both the page and the stored target exactly where they were.
+    private static async Task SwapKeepsPageWhenTargetCannotBeSaved(string folder)
+    {
+        var handler = new SwapHandler { Language = "英语", Translation = "你好" };
+        var files = new UnwritableSettings();
+        var store = ConfiguredStore(folder, files);
+        using (var shell = new AppShell(store, false, new LlmClient(handler))) {
+            await shell.TranslateAsync("Hello", "选中文字", false);
+            var record = shell.Current;
+            files.Armed = true;
+            await PressSwap(shell);
+            Check(ReferenceEquals(shell.Current, record) && store.Settings.TargetLanguage == "中文" &&
+                Ui.Get<TextBox>(shell.Popup, "SourceText").Text == "Hello",
+                "A target language that cannot be saved leaves the page and the stored target where they were");
+            Check(Ui.Get<Border>(shell.Popup, "ErrorPanel").Visibility == Visibility.Visible &&
+                Ui.Get<TextBlock>(shell.Popup, "ErrorText").Text.Length > 0,
+                "The failed save reports itself in one short line");
+
+            files.Armed = false;
+            Click(shell.Popup, "RetryButton");
+            await Until(() => !ReferenceEquals(shell.Current, record));
+            Check(handler.Identifications == 1 && handler.Translations == 1 &&
+                store.Settings.TargetLanguage == "English" && shell.Current.Source == "你好",
+                "Retrying only repeats the save: the language it already learned is reused, nothing new is asked");
+        }
+    }
+
+    // An identification that comes back after the page it was asked for is gone must neither flip
+    // that page nor store its own target language.
+    private static async Task LateIdentificationCannotTouchThePage(string folder)
+    {
+        var hidden = new SwapHandler { Language = "英语", Translation = "你好", HoldingIdentification = true };
+        var store = ConfiguredStore(folder);
+        using (var shell = new AppShell(store, false, new LlmClient(hidden))) {
+            await shell.TranslateAsync("Hello", "选中文字", false);
+            var record = shell.Current;
+            Click(shell.Popup, "SwapButton");
+            await Until(() => hidden.Identifications == 1);
+            Check(!Ui.Get<Button>(shell.Popup, "SwapButton").IsEnabled, "The flip is disabled while it identifies");
+            shell.HidePopup();
+            hidden.ReleaseIdentification();
+            await Settle();
+            Check(ReferenceEquals(shell.Current, record) && store.Settings.TargetLanguage == "中文",
+                "An identification arriving after the page was hidden neither flips it nor stores its target");
+            Check(hidden.Translations == 1 && Ui.Get<Border>(shell.Popup, "ErrorPanel").Visibility == Visibility.Collapsed,
+                "The late identification translates nothing and reports nothing");
+        }
+
+        var replaced = new SwapHandler { Language = "英语", Translation = "你好", HoldingIdentification = true };
+        var second = ConfiguredStore(Path.Combine(folder, "replaced"));
+        using (var shell = new AppShell(second, false, new LlmClient(replaced))) {
+            await shell.TranslateAsync("Hello", "选中文字", false);
+            Click(shell.Popup, "SwapButton");
+            await Until(() => replaced.Identifications == 1);
+            await shell.TranslateAsync("Another sentence", "选中文字", false);
+            replaced.ReleaseIdentification();
+            await Settle();
+            Check(shell.Current.Source == "Another sentence" && second.Settings.TargetLanguage == "中文",
+                "An identification arriving after a new session neither replaces it nor stores its target");
+            Check(replaced.Translations == 2 && replaced.Identifications == 1,
+                "The new session's own translation is the only other request that was made");
+        }
+    }
+
+    // The detector names a language in Leaf's own Chinese words, the picker offers it under the
+    // name its speakers use, and a language the picker does not offer stays the user's own custom
+    // value: stored exactly as identified and reopened on 自定义 with its text intact.
+    private static async Task SwapStoresACustomLanguage(string folder)
+    {
+        foreach (string name in new[] { "中文", "英语", "日语", "韩语", "法语", "德语", "西班牙语",
+            "葡萄牙语", "俄语", "意大利语", "阿拉伯语", "印地语" })
+            Check(Array.IndexOf(TargetLanguages.Common, TargetLanguages.ForPicker(name)) >= 0,
+                "An identified common language is one of the picker's own entries: " + name);
+        Check(TargetLanguages.ForPicker("泰语") == "泰语" && TargetLanguages.ForPicker("粤语") == "粤语",
+            "A language the picker does not offer stays exactly what was identified");
+
+        var handler = new SwapHandler { Language = "泰语", Translation = "你好" };
+        var store = ConfiguredStore(folder);
+        using (var shell = new AppShell(store, false, new LlmClient(handler))) {
+            await shell.TranslateAsync("Hello", "选中文字", false);
+            await PressSwap(shell);
+            Check(store.Settings.TargetLanguage == "泰语", "A custom language is stored exactly as it was identified");
+
+            shell.ShowSettingsPage();
+            var panel = SettingsPanel(shell);
+            Check(Convert.ToString(Ui.Get<ComboBox>(panel, "TargetLanguageCombo").SelectedItem) == TargetLanguages.Custom &&
+                Ui.Get<TextBox>(panel, "TargetInput").Text == "泰语" &&
+                Ui.Get<Grid>(panel, "TargetCustomPanel").Visibility == Visibility.Visible,
+                "Reopening settings shows the identified custom language on 自定义 with its exact text");
+            Check(await shell.TryLeaveSettingsPageAsync() && !shell.IsSettingsPageOpen,
+                "Leaving after inspecting the identified custom language succeeds");
+
+            shell.ShowSettingsPage();
+            panel = SettingsPanel(shell);
+            Check(Convert.ToString(Ui.Get<ComboBox>(panel, "TargetLanguageCombo").SelectedItem) == TargetLanguages.Custom &&
+                Ui.Get<TextBox>(panel, "TargetInput").Text == "泰语" && store.Settings.TargetLanguage == "泰语",
+                "The identified custom language survives reopening the settings page");
+            Check(await shell.TryLeaveSettingsPageAsync() && !shell.IsSettingsPageOpen &&
+                store.Settings.TargetLanguage == "泰语",
+                "The identified custom language survives the second round trip");
+        }
+    }
+
+    // The button's own entry is not awaited by the click, so a check presses it and then waits for
+    // the flip to settle, which is exactly when the entry becomes usable again.
+    private static async Task PressSwap(AppShell shell)
+    {
+        Click(shell.Popup, "SwapButton");
+        await Until(() => Ui.Get<Button>(shell.Popup, "SwapButton").IsEnabled);
     }
 
     // Stopping a word lookup and retrying must repeat that lookup, not the translation.
@@ -1911,7 +2411,12 @@ internal static class PopupRegressionTests
 
     private static LocalStore ConfiguredStore(string folder)
     {
-        var store = new LocalStore(folder); var settings = Json.Copy(store.Settings);
+        return ConfiguredStore(folder, null);
+    }
+    private static LocalStore ConfiguredStore(string folder, IStoreFiles files)
+    {
+        var store = files == null ? new LocalStore(folder) : new LocalStore(folder, files);
+        var settings = Json.Copy(store.Settings);
         settings.Provider.Model = "fixture-model"; store.SaveSettings(settings);
         return store;
     }
@@ -1991,6 +2496,82 @@ internal static class PopupRegressionTests
             Requests[index].Completion.TrySetResult(new HttpResponseMessage(status) {
                 Content = new StringContent("{\"error\":{\"message\":\"fixture failure\"}}", Encoding.UTF8, "application/json")
             });
+        }
+    }
+    // Fails exactly the settings payload's staging write, so a settings transaction that cannot be
+    // saved is observable while every other store operation still works.
+    private sealed class UnwritableSettings : IStoreFiles
+    {
+        private readonly IStoreFiles inner = new PhysicalStoreFiles();
+        public bool Armed;
+        public bool Exists(string path) { return inner.Exists(path); }
+        public long Length(string path) { return inner.Length(path); }
+        public string Read(string path) { return inner.Read(path); }
+        public void Write(string path, string payload)
+        {
+            if (Armed && Path.GetFileName(path).StartsWith("settings.json", StringComparison.Ordinal))
+                throw new IOException("swap fixture failure");
+            inner.Write(path, payload);
+        }
+        public void Copy(string source, string destination, bool overwrite) { inner.Copy(source, destination, overwrite); }
+        public void Move(string source, string destination) { inner.Move(source, destination); }
+        public void Replace(string source, string destination) { inner.Replace(source, destination); }
+        public void Delete(string path) { inner.Delete(path); }
+    }
+    // The swap fixtures. The language identification is the only request that carries the target
+    // language of the pair it is asked about, so the two kinds of call are counted apart: a check
+    // can then say that a flip identified the original once and never translated the sentence
+    // again. Every other request is answered like the ordinary fixture, and either kind can be
+    // held so a late answer can be produced on purpose.
+    private sealed class SwapHandler : HttpMessageHandler
+    {
+        public string Language = "英语";
+        public bool Certain = true;
+        public string Translation = "夹具译文";
+        public HttpStatusCode? IdentificationFailure;
+        public bool Holding;
+        public bool HoldingIdentification;
+        public int Translations;
+        public int Identifications;
+        public int Calls { get { return Translations + Identifications; } }
+        private readonly TaskCompletionSource<bool> gate = new TaskCompletionSource<bool>();
+        private readonly TaskCompletionSource<bool> identificationGate = new TaskCompletionSource<bool>();
+        public void Release() { gate.TrySetResult(true); }
+        public void ReleaseIdentification() { identificationGate.TrySetResult(true); }
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellation)
+        {
+            cancellation.ThrowIfCancellationRequested();
+            string payload = request.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+            var body = (Dictionary<string, object>)Json.Read(payload);
+            // The identification is the only prompt that names the pair's target language, so the
+            // two kinds of call are told apart by that field instead of by their order.
+            if (payload.IndexOf("target_language", StringComparison.Ordinal) >= 0) {
+                Identifications++;
+                if (IdentificationFailure.HasValue)
+                    return Task.FromResult(new HttpResponseMessage(IdentificationFailure.Value) {
+                        Content = new StringContent("{\"error\":{\"message\":\"fixture failure\"}}", Encoding.UTF8, "application/json")
+                    });
+                object answer = Certain
+                    ? (object)new { language = Language, certain = true }
+                    : new { language = "", certain = false };
+                return HoldingIdentification ? HeldIdentification(answer) : Task.FromResult(JsonReply(answer));
+            }
+            bool stream = body.ContainsKey("stream") && Convert.ToBoolean(body["stream"]);
+            if (!stream) return Task.FromResult(JsonReply(new {
+                lemma = "fixture", part_of_speech = "noun", meaning = "夹具词义", target_phrase = "夹具",
+                sections = new[] { new { title = "词形", content = "仅供隔离测试" } }
+            }));
+            Translations++;
+            if (!Holding) return Task.FromResult(StreamReply(Translation));
+            return Held();
+        }
+        private async Task<HttpResponseMessage> Held()
+        {
+            await gate.Task; return StreamReply(Translation);
+        }
+        private async Task<HttpResponseMessage> HeldIdentification(object answer)
+        {
+            await identificationGate.Task; return JsonReply(answer);
         }
     }
     private sealed class FixtureHandler : HttpMessageHandler

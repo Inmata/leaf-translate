@@ -109,7 +109,7 @@
           </StackPanel>
         </Grid>
         <Grid x:Name="TranslatePage" Grid.Row="1">
-          <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+          <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
           <!-- The label and the original sit four dips lower than the translation and the
                card rule below them without moving those: only this panel's own padding moves,
                so its total height - and everything under it - stays exactly where it was. That
@@ -170,7 +170,27 @@
               </Grid>
             </StackPanel>
           </Border>
-          <ScrollViewer x:Name="BodyScroll" Style="{StaticResource SlimScrollViewer}" Grid.Row="1" VerticalScrollBarVisibility="Auto" Margin="0,14,0,0">
+          <!-- The light transition between the original and the translation: a quiet centered
+               swap affordance with two short pale lines. It is only a seam; swapping the two
+               bodies is wired elsewhere. Deliberately tiny and pale so it reads as paper, not
+               as a button (see docs/images revision-5). -->
+          <Grid x:Name="SwapRow" Grid.Row="1" Margin="0,4,0,0">
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
+              <Border Width="11" Height="1" Background="#D1D6DC" VerticalAlignment="Center"/>
+              <Button x:Name="SwapButton" Style="{StaticResource PopupActionButton}" Width="18" Height="18" Margin="5,0,5,0"
+                      ToolTip="交换原文与译文" AutomationProperties.Name="交换原文与译文">
+                <Viewbox Width="10" Height="10">
+                  <Canvas Width="24" Height="24">
+                    <Path Data="M4,8 H17 M14,5 L17,8 L14,11 M20,16 H7 M10,13 L7,16 L10,19"
+                          Stroke="#B6BDC5" StrokeThickness="1.4" StrokeStartLineCap="Round"
+                          StrokeEndLineCap="Round" StrokeLineJoin="Round"/>
+                  </Canvas>
+                </Viewbox>
+              </Button>
+              <Border Width="11" Height="1" Background="#D1D6DC" VerticalAlignment="Center"/>
+            </StackPanel>
+          </Grid>
+          <ScrollViewer x:Name="BodyScroll" Style="{StaticResource SlimScrollViewer}" Grid.Row="2" VerticalScrollBarVisibility="Auto" Margin="0,14,0,0">
             <StackPanel>
               <TextBlock x:Name="TranslationCaption" Text="译文" Style="{StaticResource Caption}" FontSize="14" Margin="0,0,0,15" TextAlignment="Left"/>
               <RichTextBox x:Name="TranslationText" Style="{StaticResource ReadingText}" FontSize="19" Margin="0,0,8,16">
@@ -226,7 +246,7 @@
                not fixed furniture, so a shrinking window trims them like its other insets
                (see UpdatePopupTypography): the body above is the page's only scrolling region
                and it is what gets that paper back. -->
-          <Grid x:Name="AskRow" Grid.Row="2" Margin="0,36,0,16">
+          <Grid x:Name="AskRow" Grid.Row="3" Margin="0,36,0,16">
             <!-- The button's content starts at its own left padding, so it is inset by exactly
                  that padding to put its icon's visible left edge - and nothing else - on the
                  shared reading column; the reading column measurement corrects that figure if
@@ -253,7 +273,7 @@
             </Button>
             <TextBlock x:Name="CopyStatus" HorizontalAlignment="Right" FontSize="13" Foreground="{StaticResource Muted}" VerticalAlignment="Center"/>
           </Grid>
-          <Border x:Name="InputPanel" Grid.Row="3" Visibility="Collapsed" BorderBrush="{StaticResource Line}" BorderThickness="0,1,0,0" Margin="0,9,0,0" Padding="0,12,0,0">
+          <Border x:Name="InputPanel" Grid.Row="4" Visibility="Collapsed" BorderBrush="{StaticResource Line}" BorderThickness="0,1,0,0" Margin="0,9,0,0" Padding="0,12,0,0">
             <StackPanel>
               <Grid Margin="0,0,0,8">
                 <TextBlock x:Name="TopicLabel" Text="关于这段原文" FontSize="13" Foreground="{StaticResource Muted}" VerticalAlignment="Center"/>
