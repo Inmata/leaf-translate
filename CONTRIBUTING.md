@@ -28,19 +28,19 @@ Packaging creates a portable ZIP and SHA256 file in `dist`, verifies its four en
 
 For local Windows integration checks, run `.\bin\Leaf.Tests.exe --native` after building tests. This uses isolated fake credentials and a simulated transport, briefly displays a test popup, and verifies credential persistence, Alt+Space handling, focus, retry, and remembered geometry. It deletes its test credentials and never injects physical desktop input. These checks do not establish compatibility with every desktop or a real provider account.
 
+For an isolated resource benchmark, run `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/performance.ps1`. It creates a native tray/WPF process with fresh data and a delayed local SSE fixture, briefly opens its own windows, and writes results under `work/performance/run-...`. It uses a separate Ctrl+Alt+Shift+F12 shortcut and never sends real API requests or reads user settings, history, or saved keys. Metrics include working set, private commit, CPU, threads, handles, GDI/USER objects, and process I/O. See [the measured report](docs/PERFORMANCE-v0.4.0.md) for methodology and limits.
+
 If a running app locks `bin\Leaf.exe`, use `-OutputDirectory bin/verification` with the build or test script. Packaging always builds into its own directory, and checks that the requested ZIP version matches the executable.
 
 ## Versions and publication
 
-`src/Leaf/Version.cs` holds the only version constant (`LeafVersion.SemVer`); the assembly and file version derive from it. `scripts/build.ps1` generates `Leaf.generated.manifest` from the tracked template `src/Leaf/app.manifest` in the output directory and embeds it, so the template carries no version. `scripts/package.ps1` and `scripts/publish.ps1` read the same constant, and an explicit `-Version` that differs fails before any build, packaging, or checkout. The current line stays at 0.4.1 until a release is separately authorized.
+`src/Leaf/Version.cs` holds the only version constant (`LeafVersion.SemVer`); the assembly and file version derive from it. `scripts/build.ps1` generates `Leaf.generated.manifest` from the tracked template `src/Leaf/app.manifest` in the output directory and embeds it, so the template carries no version. `scripts/package.ps1` and `scripts/publish.ps1` read the same constant, and an explicit `-Version` that differs fails before any build, packaging, or checkout. The current version is whatever `Version.cs` holds; change it only when a release is separately authorized.
 
 Publication mirrors the allowlisted public files into an isolated `work` checkout, including deletions and renames, and never force-pushes. `scripts/publish.ps1 -CheckOnly` validates the manifest offline without cloning. `scripts/test-publish.ps1` exercises mirroring, boundary rejections, and version consistency with offline Git and folder fixtures. `scripts/check-docs.ps1` checks local links, duplicate list entries, demo screenshot markers, bilingual image sets, and the workflow's artifact paths.
 
 `scripts/test.ps1` records exit codes, test output, and UI smoke results under `work/verification-results`. CI keeps `contents: read` and uploads `work/ui-smoke/*.png`, `work/ui-smoke/result.json`, and `work/verification-results/*` even when a check fails. The `native_checks` workflow_dispatch input is off by default; desktop capture, focus, and multi-monitor behavior still require separate review.
 
 ## Repository layout
-
-For an isolated resource benchmark, run `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/performance.ps1`. It creates a native tray/WPF process with fresh data and a delayed local SSE fixture, briefly opens its own windows, and writes results under `work/performance/run-...`. It uses a separate Ctrl+Alt+Shift+F12 shortcut and never sends real API requests or reads user settings, history, or saved keys. Metrics include working set, private commit, CPU, threads, handles, GDI/USER objects, and process I/O. See [the measured report](docs/PERFORMANCE-v0.4.0.md) for methodology and limits.
 
 | Path | Purpose |
 | --- | --- |
@@ -51,6 +51,10 @@ For an isolated resource benchmark, run `powershell -NoProfile -ExecutionPolicy 
 | `docs/USAGE.md`, `docs/USAGE.en.md` | User guides |
 | `docs/images` | App previews using demonstration data |
 | `docs/PRODUCT.md`, `AGENTS.md` | Product behavior and repository conventions |
+| `docs/RELEASE-v*.md` | Release notes and validation records for each version |
+| `docs/plans` | Work plans by version; plans, not implemented behavior |
+| `docs/superpowers` | Archived 2026-10-06 plans and design, superseded by later releases |
+| `docs/WORKFLOW-ALIGNMENT.md` | Agent workflow alignment and recorded decisions |
 
 ## Changes and documentation
 

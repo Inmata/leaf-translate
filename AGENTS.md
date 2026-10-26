@@ -16,3 +16,9 @@ Windows desktop selection-and-clipboard translation with user-provided LLM APIs.
 - Before joint validation, update affected control casts, interface references and expectations to match the confirmed behavior. After a failure, rerun the affected existing test entry; distinguish a failed full run from a later targeted pass.
 - Leaf targets .NET Framework 4.8. In-process WPF test helpers must use a compatible STA runtime; PowerShell 7 assembly loading is not equivalent to Windows PowerShell 5.1. Prefer the existing test executable over creating new helper scripts. If Leaf.exe is in use, use build.ps1 -OutputDirectory instead of terminating the user's process.
 - Exclude binaries, local data, credentials and work/ from public source.
+<!-- workflow:begin -->
+workflow 已在本机明确接入；以当前会话 hook 提供的入口读取公共方法和对应角色指引。
+无 hook 入口时遵循项目已有约定，不由复制来的管理区推定接入。
+首次会话先做项目对齐：结论写入 docs/WORKFLOW-ALIGNMENT.md，差异逐条询问用户，不擅自按任何一方执行。
+已有资料：[README.md](README.md)。
+<!-- workflow:end -->
