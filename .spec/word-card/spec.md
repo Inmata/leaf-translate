@@ -1,10 +1,15 @@
 ---
 code:
   - src/Leaf/Popup.cs
-  - src/Leaf/Domain.cs
-  - src/Leaf/Llm.cs
+  - src/Leaf/Models/WordCard.cs
+  - src/Leaf/Models/TextRange.cs
+  - src/Leaf/Models/TranslationRecord.cs
+  - src/Leaf/Learning/WordCardParser.cs
+  - src/Leaf/Learning/LearningPromptBuilder.cs
+  - src/Leaf/Learning/LearningService.cs
+  - src/Leaf/Translation/TranslationPromptBuilder.cs
   - src/Leaf/Infrastructure/Api/LlmClient.cs
-  - src/Leaf/TranslationPresentation.cs
+  - src/Leaf/Translation/TranslationPresentation.cs
 related:
   - docs/PRODUCT.md
   - docs/plans/v0.6.0/PLAN.md

@@ -17,6 +17,8 @@ namespace Leaf
     {
         public LocalStore Store { get; private set; }
         public LlmClient Client { get; private set; }
+        private readonly TranslationService translationService;
+        private readonly LearningService learningService;
         public DiagnosticLog Log { get; private set; }
         public Window Popup { get; private set; }
         public bool NativeEnabled { get; private set; }
@@ -67,6 +69,7 @@ namespace Leaf
         public AppShell(LocalStore store, bool native, LlmClient client, ICredentialProfiles credentials)
         {
             Store = store; NativeEnabled = native; Client = client;
+            translationService = new TranslationService(client); learningService = new LearningService(client);
             if (credentials != null) credentialProfiles = credentials;
             else if (native) { credentialProfiles = new WindowsCredentialProfiles(); migrateLegacyCredentials = true; }
             Log = client.Log ?? new DiagnosticLog(System.IO.Path.Combine(store.Folder, "logs")); Client.Log = Log;

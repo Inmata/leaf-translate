@@ -1,7 +1,8 @@
 ---
 code:
   - src/Leaf/PopupSettingsPage.cs
-  - src/Leaf/SettingsUpdates.cs
+  - src/Leaf/Models/SettingsUpdate.cs
+  - src/Leaf/Models/AppSettings.cs
   - src/Leaf/Views/SettingsPanel.xaml
   - src/Leaf/Infrastructure/Storage/LocalStore.cs
   - src/Leaf/Infrastructure/Security/CredentialProfiles.cs

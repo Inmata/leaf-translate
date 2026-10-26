@@ -113,7 +113,7 @@ public static class CoreTests
         }), wordRecord.Context);
         Check(wordKey != legacyKey,
             "The versioned word key invalidates cards written by the older key formula");
-        var wordMessages = Prompts.Word(wordRecord, wordPiece);
+        var wordMessages = LearningPromptBuilder.Word(wordRecord, wordPiece);
         string wordUserTurn = wordMessages[1].Content;
         Check(wordUserTurn.Contains("selected_text") && wordUserTurn.Contains("source_sentence") && wordUserTurn.Contains("existing_translation"),
             "The word prompt carries the sentence, its translation and the selected piece");
@@ -131,14 +131,14 @@ public static class CoreTests
         foreach (var option in allSettings.Learning) option.Enabled = true;
         var allRecord = TranslationRecord.Create(wordRecord.Source, "剪贴板", allSettings);
         allRecord.Translation = wordRecord.Translation;
-        var allSent = forwarded(Prompts.Word(allRecord, wordPiece)[1].Content);
+        var allSent = forwarded(LearningPromptBuilder.Word(allRecord, wordPiece)[1].Content);
         Check(allSent.Select(o => (string)o["id"]).SequenceEqual(new[] { "lemma", "synonyms", "roots", "collocations", "examples" }),
             "All five enabled categories are forwarded together");
         var custom = new LearningOption { Id = "custom-oral", Name = "口语说法", Instruction = "告诉我地道的口语说法", Enabled = true, Custom = true };
         var customSettings = Json.Copy(wordSettings); customSettings.Learning.Add(custom);
         var customRecord = TranslationRecord.Create(wordRecord.Source, "剪贴板", customSettings);
         customRecord.Translation = wordRecord.Translation;
-        var customSent = forwarded(Prompts.Word(customRecord, wordPiece)[1].Content).Single(o => (string)o["id"] == "custom-oral");
+        var customSent = forwarded(LearningPromptBuilder.Word(customRecord, wordPiece)[1].Content).Single(o => (string)o["id"] == "custom-oral");
         Check((string)customSent["title"] == "口语说法" && (string)customSent["instruction"] == "告诉我地道的口语说法",
             "A custom learning option is forwarded with the user's own name and instruction");
         Check(wordMessages[0].Content.Contains("sections") && wordMessages[0].Content.Contains("自定义类别沿用用户起的名称"),
@@ -161,7 +161,7 @@ public static class CoreTests
         SoftCheck(TextTools.IsWordInput("l'homme") && TextTools.IsWordInput("re-enter") &&
             TextTools.IsWordInput("e\u0301te\u0301"),
             "Apostrophes, hyphens and combining marks retain word support");
-        var surrogateCard = WordCard.Parse(Json.Write(new { meaning = "本领", lemma = new string('a', 249) + "😀" }), "word", "本领");
+        var surrogateCard = WordCardParser.Parse(Json.Write(new { meaning = "本领", lemma = new string('a', 249) + "😀" }), "word", "本领");
         SoftCheck(surrogateCard.lemma == new string('a', 249),
             "Word card truncation does not split a surrogate pair");
         SoftCheck(TextTools.TruncateElements(new string('a', 249) + "😀", 250) ==
@@ -171,16 +171,16 @@ public static class CoreTests
         FlushSoftChecks();
         Throws(() => TextTools.ValidateInput(" "), "empty", "Empty input fails explicitly");
         Throws(() => TextTools.ValidateInput(new string('x', 6001)), "length", "Long input is bounded");
-        var card = WordCard.Parse(Json.Write(new {
+        var card = WordCardParser.Parse(Json.Write(new {
             meaning = "本领", lemma = "prowess", part_of_speech = "名词",
             target_phrase = "不存在的译文", sections = new[] { new { title = "比较", content = "power 用法更广。" } }
         }), "prowess", "他有本领。");
         Check(card.target_phrase == "", "Unverified target phrase is discarded");
         Check(card.sections.Count == 1 && card.word == "prowess", "Word card preserves validated explanations");
         string fence = new string((char)96, 3);
-        Check(WordCard.Parse(fence + "json\n{\"meaning\":\"本领\",\"target_phrase\":\"本领\"}\n" + fence, "prowess", "本领").target_phrase == "本领", "Fenced JSON remains supported");
-        Throws(() => WordCard.Parse("{\"lemma\":\"x\"}", "x", "x"), "format", "Missing meaning is rejected");
-        Throws(() => WordCard.Parse("not JSON", "x", "x"), "format", "Malformed word card is rejected");
+        Check(WordCardParser.Parse(fence + "json\n{\"meaning\":\"本领\",\"target_phrase\":\"本领\"}\n" + fence, "prowess", "本领").target_phrase == "本领", "Fenced JSON remains supported");
+        Throws(() => WordCardParser.Parse("{\"lemma\":\"x\"}", "x", "x"), "format", "Missing meaning is rejected");
+        Throws(() => WordCardParser.Parse("not JSON", "x", "x"), "format", "Malformed word card is rejected");
         Check((HotkeySpec.Parse("Ctrl+Alt+T").Modifiers & 3) == 3, "Global hotkey modifiers parse correctly");
         Check(HotkeySpec.Parse(" alt + space ").VirtualKey == 32 && (HotkeySpec.Parse("alt+space").Modifiers & 15) == 1, "Alt+Space accepts spaces and case differences");
         Check(HotkeySpec.Parse("Alt+空格").VirtualKey == 32, "The Chinese space-key name is accepted");
@@ -220,7 +220,7 @@ public static class CoreTests
         for (int i = 0; i < 20; i++) {
             record.Chat.Add(new ChatTurn { Role = i % 2 == 0 ? "user" : "assistant", Content = "turn-" + i, Topic = "original" });
         }
-        var messages = Prompts.Followup(record, "prowess", null, "Compare power");
+        var messages = LearningPromptBuilder.Followup(record, "prowess", null, "Compare power");
         Check(messages.Count == 14 && messages[1].Role == "user", "Follow-up sends a bounded suffix of complete pairs");
         Check(messages[0].Content.Contains("Original sentence") && messages.Last().Content == "Compare power", "Follow-up keeps original text and current question");
     }

@@ -1077,7 +1077,7 @@ namespace Leaf
             translating = true; DisplayRecord(); ShowPopup(); Busy();
             long lastProgress = 0;
             try {
-                string result = await Client.CompleteAsync(record.Context.Provider, KeyFor(record.Context.Provider), Prompts.Translation(record), true, false,
+                string result = await translationService.TranslateAsync(record, KeyFor(record.Context.Provider),
                     partial => {
                         long now = DateTime.UtcNow.Ticks;
                         if (now - lastProgress < TimeSpan.TicksPerMillisecond * 40) return;
@@ -1144,9 +1144,9 @@ namespace Leaf
             activeWord = operation;
             wordBusy = true; Busy();
             try {
-                string payload = await Client.CompleteAsync(provider, KeyFor(provider), Prompts.Word(record, word), false, true, null, cancellation.Token);
+                string payload = await learningService.RequestCardAsync(record, word, provider, KeyFor(provider), cancellation.Token);
                 if (Current != record || !wordGeneration.IsCurrent(version)) return;
-                selectedCard = WordCard.Parse(payload, word.Text, record.Translation);
+                selectedCard = WordCardParser.Parse(payload, word.Text, record.Translation);
                 if (record.Cards.Count >= 16) record.Cards.Remove(record.Cards.Keys.First());
                 record.Cards[cardKey] = selectedCard;
                 wordBusy = false; DrawCard(selectedCard); await SaveCurrentAsync(); Busy();
@@ -1226,7 +1226,7 @@ namespace Leaf
             AddChat(panel, "你 · " + topic, question, true);
             var response = AddChat(panel, "Leaf", "正在回答…", false);
             try {
-                string result = await Client.CompleteAsync(provider, KeyFor(provider), Prompts.Followup(record, topic, card, question), true, false,
+                string result = await learningService.FollowupAsync(record, topic, card, question, provider, KeyFor(provider),
                     partial => Popup.Dispatcher.BeginInvoke(new Action(() => {
                         if (Current == record && generation.IsCurrent(version)) { response.Text = partial; Ui.Get<ScrollViewer>(Popup, "BodyScroll").ScrollToBottom(); }
                     })), cancellation.Token);

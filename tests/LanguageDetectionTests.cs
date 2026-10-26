@@ -94,27 +94,27 @@ internal static class LanguageDetectionTests
         var variantTargets = new[] { "中文", "中文", "中文", "英语", "英语" };
         var variantExpect = new[] { "中文", "中文", "中文", "英语", "英语" };
         for (int i = 0; i < variantNames.Length; i++) {
-            var result = LanguageDetector.Parse("{\"language\":\"" + variantNames[i] + "\",\"certain\":true}", variantTargets[i]);
+            var result = LanguageResponseParser.Parse("{\"language\":\"" + variantNames[i] + "\",\"certain\":true}", variantTargets[i]);
             Check(result.Determined && result.Language == variantExpect[i] && result.SameAsTarget,
                 "A qualified language name is the same language as the target: " + variantNames[i]);
         }
-        Check(LanguageDetector.Canonical("simplifiedchinese") == "中文" && LanguageDetector.Canonical("americanenglish") == "英语",
+        Check(LanguageNames.Canonical("simplifiedchinese") == "中文" && LanguageNames.Canonical("americanenglish") == "英语",
             "A qualified name written as one word still folds into its language");
-        Check(LanguageDetector.Canonical("Germany") != "德语" && LanguageDetector.Canonical("Navajo") != "中文",
+        Check(LanguageNames.Canonical("Germany") != "德语" && LanguageNames.Canonical("Navajo") != "中文",
             "A country or unrelated word is not folded into a language by substring");
         foreach (string answer in new[] {
             "{\"language\":42,\"certain\":true}", "{\"language\":true,\"certain\":true}",
             "{\"language\":[\"英语\"],\"certain\":true}", "{\"language\":{\"name\":\"英语\"},\"certain\":true}"
         }) {
-            var result = LanguageDetector.Parse(answer, "中文");
+            var result = LanguageResponseParser.Parse(answer, "中文");
             Check(!result.Determined && result.Language == "",
                 "A non-string language field is not a language: " + answer);
         }
         foreach (string answer in new[] { "{\"language\":\"n/a\"}", "{\"language\":\"N/A\"}", "{\"language\":\"unknown\"}", "{\"language\":\"none\"}" }) {
-            Check(!LanguageDetector.Parse(answer, "中文").Determined, "An unknown marker is undetermined: " + answer);
+            Check(!LanguageResponseParser.Parse(answer, "中文").Determined, "An unknown marker is undetermined: " + answer);
         }
         foreach (string name in new[] { "Navajo", "Nahuatl" }) {
-            var result = LanguageDetector.Parse("{\"language\":\"" + name + "\",\"certain\":true}", "中文");
+            var result = LanguageResponseParser.Parse("{\"language\":\"" + name + "\",\"certain\":true}", "中文");
             Check(result.Determined && result.Language == name,
                 "A name that starts with the unknown marker is still a language: " + name);
         }
@@ -131,7 +131,7 @@ internal static class LanguageDetectionTests
             "{\"language\":\"not a language\",\"certain\":true}",
             "{\"language\":\"I cannot determine\",\"certain\":true}"
         }) {
-            var result = LanguageDetector.Parse(answer, "中文");
+            var result = LanguageResponseParser.Parse(answer, "中文");
             Check(!result.Determined && result.Language == "",
                 "An answer that is not a language is undetermined: " + answer);
         }
@@ -140,7 +140,7 @@ internal static class LanguageDetectionTests
             "{\"language\":\"English, Spanish\",\"certain\":true}",
             "{\"language\":\"英语、日语\",\"certain\":true}"
         }) {
-            var result = LanguageDetector.Parse(answer, "中文");
+            var result = LanguageResponseParser.Parse(answer, "中文");
             Check(!result.Determined && result.Language == "",
                 "Several named languages are not collapsed into one: " + answer);
         }
@@ -151,14 +151,14 @@ internal static class LanguageDetectionTests
         var synonymNames = new[] { "Englisch", "Anglais", "英語", "中國語", "zh-hans", "en-GB", "en-CA", "French (Canada)" };
         var synonymExpect = new[] { "英语", "英语", "英语", "中文", "中文", "英语", "英语", "法语" };
         for (int i = 0; i < synonymNames.Length; i++) {
-            var result = LanguageDetector.Parse("{\"language\":\"" + synonymNames[i] + "\",\"certain\":true}", "中文");
+            var result = LanguageResponseParser.Parse("{\"language\":\"" + synonymNames[i] + "\",\"certain\":true}", "中文");
             Check(result.Determined && result.Language == synonymExpect[i],
                 "A common synonym or qualified form is classified: " + synonymNames[i]);
         }
-        Check(!LanguageDetector.Parse("{\"language\":\"English dictionary\",\"certain\":true}", "中文").Determined,
+        Check(!LanguageResponseParser.Parse("{\"language\":\"English dictionary\",\"certain\":true}", "中文").Determined,
             "A stray word beside a language name is not a language answer");
         foreach (string name in new[] { "Cantonese", "廣東話" }) {
-            var result = LanguageDetector.Parse("{\"language\":\"" + name + "\",\"certain\":true}", "中文");
+            var result = LanguageResponseParser.Parse("{\"language\":\"" + name + "\",\"certain\":true}", "中文");
             Check(result.Determined && result.Language == name && !result.SameAsTarget,
                 "A language kept as its own name is not folded into Chinese: " + name);
         }
@@ -166,7 +166,7 @@ internal static class LanguageDetectionTests
         var dropdownNames = new[] { "中文", "繁體中文", "English", "日本語", "한국어", "Français", "Deutsch", "Español", "Português", "Русский", "Italiano", "العربية", "हिन्दी" };
         var dropdownCanonical = new[] { "中文", "中文", "英语", "日语", "韩语", "法语", "德语", "西班牙语", "葡萄牙语", "俄语", "意大利语", "阿拉伯语", "印地语" };
         for (int i = 0; i < dropdownNames.Length; i++) {
-            var result = LanguageDetector.Parse("{\"language\":\"" + dropdownNames[i] + "\",\"certain\":true}", "中文");
+            var result = LanguageResponseParser.Parse("{\"language\":\"" + dropdownNames[i] + "\",\"certain\":true}", "中文");
             Check(result.Determined && result.Language == dropdownCanonical[i],
                 "A common dropdown language is classified: " + dropdownNames[i]);
         }
@@ -188,7 +188,7 @@ internal static class LanguageDetectionTests
             "{\"language\":\"Auto\",\"certain\":true}",
             "{\"language\":\"自动检测\",\"certain\":true}"
         }) {
-            var result = LanguageDetector.Parse(answer, "中文");
+            var result = LanguageResponseParser.Parse(answer, "中文");
             Check(!result.Determined && result.Language == "",
                 "A refusal or non-language answer is undetermined: " + answer);
         }
@@ -197,28 +197,28 @@ internal static class LanguageDetectionTests
             "{\"language\":\"汉语和英语\",\"certain\":true}",
             "{\"language\":\"中文或日语\",\"certain\":true}"
         }) {
-            var result = LanguageDetector.Parse(answer, "中文");
+            var result = LanguageResponseParser.Parse(answer, "中文");
             Check(!result.Determined && result.Language == "",
                 "A written-together multi-language answer is not one language: " + answer);
         }
         foreach (string name in new[] { "Navajo", "Nahuatl", "Cantonese", "廣東話" }) {
-            var result = LanguageDetector.Parse("{\"language\":\"" + name + "\",\"certain\":true}", "中文");
+            var result = LanguageResponseParser.Parse("{\"language\":\"" + name + "\",\"certain\":true}", "中文");
             Check(result.Determined && result.Language == name && !result.SameAsTarget,
                 "A custom language name is still kept beside the new refusals: " + name);
         }
         foreach (string name in new[] { "中文（简体）", "中文（繁體）", "繁體中文（台灣）", "繁體中文（香港）", "简体中文（中国）" }) {
-            var result = LanguageDetector.Parse("{\"language\":\"" + name + "\",\"certain\":true}", "中文");
+            var result = LanguageResponseParser.Parse("{\"language\":\"" + name + "\",\"certain\":true}", "中文");
             Check(result.Determined && result.Language == "中文" && result.SameAsTarget,
                 "A Chinese qualifier folds into the target language: " + name);
         }
         foreach (string name in new[] { "华语", "華語", "台灣中文" }) {
-            var result = LanguageDetector.Parse("{\"language\":\"" + name + "\",\"certain\":true}", "中文");
+            var result = LanguageResponseParser.Parse("{\"language\":\"" + name + "\",\"certain\":true}", "中文");
             Check(result.Determined && result.Language == "中文" && result.SameAsTarget,
                 "A Chinese synonym does not bypass the same-language answer: " + name);
         }
-        Check(LanguageDetector.Canonical("粤语") == "粤语" && LanguageDetector.Canonical("Cantonese") != "中文",
+        Check(LanguageNames.Canonical("粤语") == "粤语" && LanguageNames.Canonical("Cantonese") != "中文",
             "Cantonese is not forcibly merged into Chinese");
-        Check(!LanguageDetector.Parse("{\"language\":\"英语（某种说明）\",\"certain\":true}", "中文").Determined,
+        Check(!LanguageResponseParser.Parse("{\"language\":\"英语（某种说明）\",\"certain\":true}", "中文").Determined,
             "An unrelated parenthetical is not blindly stripped from a language name");
 
         // certain keeps its boolean meaning (only 1 is a yes) and confidence is read on an
@@ -227,14 +227,14 @@ internal static class LanguageDetectionTests
             "{\"language\":\"英语\",\"certain\":0.2}", "{\"language\":\"英语\",\"certain\":2}",
             "{\"language\":\"英语\",\"certain\":0}", "{\"language\":\"英语\",\"certain\":\"0.2\"}"
         }) {
-            Check(!LanguageDetector.Parse(answer, "中文").Determined,
+            Check(!LanguageResponseParser.Parse(answer, "中文").Determined,
                 "A non-boolean number is not a certain answer: " + answer);
         }
-        Check(LanguageDetector.Parse("{\"language\":\"英语\",\"certain\":1}", "中文").Determined,
+        Check(LanguageResponseParser.Parse("{\"language\":\"英语\",\"certain\":1}", "中文").Determined,
             "certain=1 is a boolean confirmation");
-        Check(LanguageDetector.Parse("{\"language\":\"英语\",\"certain\":\"true\"}", "中文").Determined,
+        Check(LanguageResponseParser.Parse("{\"language\":\"英语\",\"certain\":\"true\"}", "中文").Determined,
             "certain=\"true\" keeps its existing confirmation");
-        Check(LanguageDetector.Parse("{\"language\":\"英语\"}", "中文").Determined,
+        Check(LanguageResponseParser.Parse("{\"language\":\"英语\"}", "中文").Determined,
             "A missing certain keeps its existing confident default");
         foreach (string answer in new[] {
             "{\"language\":\"英语\",\"certain\":true,\"confidence\":0.2}",
@@ -244,7 +244,7 @@ internal static class LanguageDetectionTests
             "{\"language\":\"英语\",\"certain\":true,\"confidence\":[\"low\"]}",
             "{\"language\":\"英语\",\"certain\":true,\"confidence\":{\"level\":\"low\"}}"
         }) {
-            Check(!LanguageDetector.Parse(answer, "中文").Determined,
+            Check(!LanguageResponseParser.Parse(answer, "中文").Determined,
                 "A low or invalid confidence is a denial: " + answer);
         }
         foreach (string answer in new[] {
@@ -252,7 +252,7 @@ internal static class LanguageDetectionTests
             "{\"language\":\"英语\",\"certain\":true,\"confidence\":90}",
             "{\"language\":\"英语\",\"certain\":true,\"confidence\":\"high\"}"
         }) {
-            Check(LanguageDetector.Parse(answer, "中文").Determined,
+            Check(LanguageResponseParser.Parse(answer, "中文").Determined,
                 "A high confidence keeps the answer: " + answer);
         }
 
