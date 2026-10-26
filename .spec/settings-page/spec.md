@@ -3,8 +3,9 @@ code:
   - src/Leaf/PopupSettingsPage.cs
   - src/Leaf/SettingsUpdates.cs
   - src/Leaf/Views/SettingsPanel.xaml
-  - src/Leaf/Storage.cs
-  - src/Leaf/CredentialProfiles.cs
+  - src/Leaf/Infrastructure/Storage/LocalStore.cs
+  - src/Leaf/Infrastructure/Security/CredentialProfiles.cs
+  - src/Leaf/Infrastructure/Security/CredentialStore.cs
 related:
   - docs/PRODUCT.md
   - docs/plans/v0.6.0/PLAN.md

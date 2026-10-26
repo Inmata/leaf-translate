@@ -334,7 +334,7 @@ namespace Leaf
         private async Task CopySelectionAsync(string text)
         {
             try {
-                if (NativeEnabled) await Native.CopyTextAsync(text);
+                if (NativeEnabled) await ClipboardAccess.CopyTextAsync(text);
                 Ui.Get<TextBlock>(Popup, "CopyStatus").Text = "已复制";
                 if (copyFeedback == null) {
                     copyFeedback = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };

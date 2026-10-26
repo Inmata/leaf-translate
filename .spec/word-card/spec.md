@@ -3,6 +3,7 @@ code:
   - src/Leaf/Popup.cs
   - src/Leaf/Domain.cs
   - src/Leaf/Llm.cs
+  - src/Leaf/Infrastructure/Api/LlmClient.cs
   - src/Leaf/TranslationPresentation.cs
 related:
   - docs/PRODUCT.md

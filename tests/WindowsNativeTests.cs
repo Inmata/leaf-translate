@@ -223,7 +223,7 @@ public static class WindowsNativeTests
                 foreign.Close(); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
                 if (!OpenClipboard(new WindowInteropHelper(shell.Popup).Handle)) throw new Exception("Could not reserve clipboard for the isolated contention check.");
                 try {
-                    var copy = Native.CopyTextAsync("Clipboard contention fixture");
+                    var copy = ClipboardAccess.CopyTextAsync("Clipboard contention fixture");
                     bool responsive = false;
                     shell.Popup.Dispatcher.BeginInvoke(new Action(() => responsive = true));
                     bool failed = false; try { await copy; } catch (UserError error) { failed = error.Code == "clipboard"; }

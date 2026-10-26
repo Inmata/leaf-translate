@@ -62,7 +62,8 @@ $arguments += '/resource:' + $fontContainer + ',Leaf.g.resources'
 # the terms travel with them and no copy of them is left loose on disk.
 $fontLicense = Join-Path $fontRoot 'LICENSE.txt'
 $arguments += '/resource:' + $fontLicense + ',Leaf.Assets.Fonts.LICENSE.txt'
-foreach ($source in Get-ChildItem -LiteralPath (Join-Path $projectRoot 'src\Leaf') -Filter '*.cs') { $arguments += $source.FullName }
+foreach ($source in Get-ChildItem -LiteralPath (Join-Path $projectRoot 'src\Leaf') -Filter '*.cs' -File -Recurse |
+    Where-Object { $_.FullName -notmatch '[\\/](bin|obj)[\\/]' } | Sort-Object FullName) { $arguments += $source.FullName }
 & $compiler @arguments
 if ($LASTEXITCODE -ne 0) { throw 'Build failed.' }
 Remove-Item -LiteralPath $fontContainer -Force
