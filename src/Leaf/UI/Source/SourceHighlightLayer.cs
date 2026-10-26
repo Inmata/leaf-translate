@@ -55,7 +55,7 @@ namespace Leaf
             // The inner scroll host only exists once the template is applied; scrolling is
             // what shifts the bands, so it is re-subscribed whenever the box comes alive.
             box.Loaded += (s, e) => {
-                var scroll = AppShell.InnerScroll(box);
+                var scroll = PopupPresenter.InnerScroll(box);
                 if (scroll == null || ReferenceEquals(scroll, inner)) return;
                 if (inner != null) inner.ScrollChanged -= OnScrollChanged;
                 inner = scroll;

@@ -130,17 +130,18 @@ public static class WindowsNativeTests
                 }
                 window.Window.UpdateLayout(); recorder.BringIntoView();
                 recorder.Focus(); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
-                var registrationField = typeof(AppShell).GetField("shortcutRegistration", BindingFlags.Instance | BindingFlags.NonPublic);
-                Check(recorder.IsKeyboardFocused && recorder.IsReadOnly && recorder.Text.Contains("请按下") && registrationField.GetValue(shell) == null,
+                var hotkeys = typeof(AppShell).GetField("hotkeys", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(shell);
+                var registrationField = typeof(HotkeyController).GetField("shortcutRegistration", BindingFlags.Instance | BindingFlags.NonPublic);
+                Check(recorder.IsKeyboardFocused && recorder.IsReadOnly && recorder.Text.Contains("请按下") && registrationField.GetValue(hotkeys) == null,
                     "Focusing the recorder releases the live shortcut so it cannot consume recorded keys");
                 var escape = new KeyEventArgs(Keyboard.PrimaryDevice, PresentationSource.FromVisual(window.Window), 0, Key.Escape) { RoutedEvent = Keyboard.PreviewKeyDownEvent };
                 recorder.RaiseEvent(escape); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
-                Check(escape.Handled && recorder.Text == "alt + space" && registrationField.GetValue(shell) != null,
+                Check(escape.Handled && recorder.Text == "alt + space" && registrationField.GetValue(hotkeys) != null,
                     "Escape cancels WPF key recording and restores the existing shortcut");
                 recorder.Focus(); await Dispatcher.Yield(DispatcherPriority.ApplicationIdle); window.Window.Close();
-                Check(registrationField.GetValue(shell) != null, "Closing settings during recording restores the global shortcut");
+                Check(registrationField.GetValue(hotkeys) != null, "Closing settings during recording restores the global shortcut");
 
-                var registration = typeof(AppShell).GetField("shortcutRegistration", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(shell);
+                var registration = registrationField.GetValue(hotkeys);
                 var hook = typeof(GlobalShortcut).GetField("hook", BindingFlags.Instance | BindingFlags.NonPublic);
                 Check((IntPtr)hook.GetValue(registration) != IntPtr.Zero, "Alt+Space installs a Windows keyboard hook");
                 var source = HwndSource.FromHwnd(new WindowInteropHelper(shell.Popup).Handle);

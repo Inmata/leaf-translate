@@ -9,16 +9,23 @@ namespace Leaf
     // never rebuilt, so the current session survives the round trip. A fresh panel and
     // controller are created per visit: leaving discards unapplied service drafts exactly
     // like the old tray window's close did, after waiting for a clicked apply to commit.
-    public sealed partial class AppShell
+    internal sealed class PopupSettingsPresenter
     {
-        private FrameworkElement settingsPanel;
-        private SettingsController settingsController;
+        private readonly AppShell shell;
+        private readonly PopupPresenter view;
+        private Window Popup { get { return shell.Popup; } }
+        private double bodyScrollBackup;
+        internal PopupSettingsPresenter(AppShell shell, PopupPresenter view) { this.shell = shell; this.view = view; }
+        internal void OnHostDeactivated() { if (settingsController != null) settingsController.OnHostDeactivated(); }
+
+        internal FrameworkElement settingsPanel;
+        internal SettingsController settingsController;
         // One page is left once. The back button, the window close and an exit entry can all
         // ask while the first attempt is still flushing, so the running attempt is shared for
         // the exact page instance it was started for.
-        private LeaveAttempt leaveAttempt;
+        internal LeaveAttempt leaveAttempt;
 
-        private sealed class LeaveAttempt
+        internal sealed class LeaveAttempt
         {
             public SettingsController Controller;
             public Task<bool> Completion;
@@ -29,7 +36,7 @@ namespace Leaf
             get { return settingsController != null && Ui.Get<Grid>(Popup, "SettingsPage").Visibility == Visibility.Visible; }
         }
 
-        private void InitializeSettingsPage()
+        internal void InitializeSettingsPage()
         {
             Ui.Click(Popup, "SettingsBackButton", () => { var ignored = TryLeaveSettingsPageAsync(); });
             // The popup is the settings host, so its own Deactivated event keeps the entry the
@@ -43,7 +50,7 @@ namespace Leaf
         // through the exact flush the back entry runs, so a pending edit is applied and a
         // failed flush keeps the page open with its reason. Every other entry - the tray, the
         // error panel's 打开设置, the recovery barrier - still only opens the page.
-        private void ToggleSettingsPage()
+        internal void ToggleSettingsPage()
         {
             if (IsSettingsPageOpen) { var ignored = TryLeaveSettingsPageAsync(); return; }
             ShowSettingsPage();
@@ -51,10 +58,10 @@ namespace Leaf
 
         public void ShowSettingsPage()
         {
-            if (exiting || IsSettingsPageOpen) return;
+            if (shell.IsExiting || IsSettingsPageOpen) return;
             // Entering settings never cancels the current translation or touches the session.
             settingsPanel = Ui.LoadPanel("SettingsPanel");
-            settingsController = new SettingsController(this, settingsPanel, () => Popup.IsVisible);
+            settingsController = new SettingsController(shell, settingsPanel, () => Popup.IsVisible);
             Ui.Get<ContentControl>(Popup, "SettingsPageHost").Content = settingsPanel;
             var body = Ui.Get<ScrollViewer>(Popup, "BodyScroll");
             bodyScrollBackup = body.VerticalOffset;
@@ -63,8 +70,8 @@ namespace Leaf
             // The source badge stays as it is on the reading page: the origin survives
             // entering settings and is recomputed on the way back out.
             settingsController.Activate();
-            UpdateTopBarState();
-            ShowPopup();
+            view.UpdateTopBarState();
+            shell.ShowPopup();
         }
 
         // Flushes debounced preference edits, waits for a clicked service apply and for the
@@ -84,19 +91,19 @@ namespace Leaf
             return attempt.Completion;
         }
 
-        private async Task<bool> LeaveSettingsPageAsync(LeaveAttempt attempt)
+        internal async Task<bool> LeaveSettingsPageAsync(LeaveAttempt attempt)
         {
             try { return await LeavePageAsync(attempt.Controller); }
             finally { if (ReferenceEquals(leaveAttempt, attempt)) leaveAttempt = null; }
         }
 
-        private async Task<bool> LeavePageAsync(SettingsController controller)
+        internal async Task<bool> LeavePageAsync(SettingsController controller)
         {
             controller.OnHostDeactivated();
             if (!await controller.FlushPendingAsync()) return false;
-            try { await WaitForSettingsAsync(); }
+            try { await shell.WaitForSettingsAsync(); }
             catch (Exception error) {
-                Log.Event("settings_page_leave_flush_failed", error);
+                shell.Log.Event("settings_page_leave_flush_failed", error);
                 controller.ReportStatus(error is UserError ? error.Message : "保存未完成，请处理后重试。", true);
                 return false;
             }
@@ -110,20 +117,20 @@ namespace Leaf
         // Unapplied service drafts are discarded with the page instance: the password is
         // cleared and in-flight model/test requests are cancelled, matching the old
         // window-close semantics.
-        private void LeaveSettingsPage()
+        internal void LeaveSettingsPage()
         {
             Ui.Visible(Ui.Get<Grid>(Popup, "SettingsPage"), false);
             Ui.Visible(Ui.Get<Grid>(Popup, "TranslatePage"), true);
             var badge = Ui.Get<TextBlock>(Popup, "SourceBadge");
-            badge.Text = Current == null ? "" : (demo ? "演示内容 · 未调用 API" : SourceKindLabel(Current.SourceKind));
+            badge.Text = shell.Current == null ? "" : (shell.Workspace.IsDemo ? "演示内容 · 未调用 API" : PopupPresenter.SourceKindLabel(shell.Current.SourceKind));
             settingsController.Detach();
             Ui.Get<ContentControl>(Popup, "SettingsPageHost").Content = null;
             settingsPanel = null; settingsController = null;
-            UpdateTopBarState();
-            RestoreReadingScroll(bodyScrollBackup, 0);
+            view.UpdateTopBarState();
+            view.RestoreReadingScroll(bodyScrollBackup, 0);
             bodyScrollBackup = 0;
         }
-        private async Task LeaveSettingsThenAsync(Action after)
+        internal async Task LeaveSettingsThenAsync(Action after)
         {
             if (IsSettingsPageOpen && !await TryLeaveSettingsPageAsync()) return;
             if (after != null) after();

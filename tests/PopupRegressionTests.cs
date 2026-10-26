@@ -1276,8 +1276,10 @@ internal static class PopupRegressionTests
     }
     private static SourceHighlightLayer HighlightLayerOf(AppShell shell)
     {
-        return (SourceHighlightLayer)typeof(AppShell)
-            .GetField("highlightLayer", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(shell);
+        var presenter = typeof(AppShell).GetProperty("Presenter", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(shell, null);
+        var source = typeof(PopupPresenter).GetProperty("Source", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(presenter, null);
+        return (SourceHighlightLayer)typeof(SourceInteraction)
+            .GetField("highlightLayer", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(source);
     }
 
     // A hand-dragged window edge, followed through the popup's own message entry: the reading

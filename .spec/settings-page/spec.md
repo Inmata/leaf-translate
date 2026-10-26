@@ -1,6 +1,9 @@
 ---
 code:
-  - src/Leaf/PopupSettingsPage.cs
+  - src/Leaf/UI/Settings/PopupSettingsPresenter.cs
+  - src/Leaf/UI/Settings/SettingsPresenter.cs
+  - src/Leaf/UI/Settings/LearningPreferencesPresenter.cs
+  - src/Leaf/Application/SettingsCoordinator.cs
   - src/Leaf/Models/SettingsUpdate.cs
   - src/Leaf/Models/AppSettings.cs
   - src/Leaf/Views/SettingsPanel.xaml

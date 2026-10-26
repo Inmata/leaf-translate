@@ -16,186 +16,6 @@ using System.Windows.Threading;
 
 namespace Leaf
 {
-    public static class Ui
-    {
-        public static void InitializeTheme()
-        {
-            using (var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream("Leaf.Views.Theme.xaml"))
-                Application.Current.Resources.MergedDictionaries.Add((ResourceDictionary)XamlReader.Load(stream));
-        }
-        public static Window Load(string name)
-        {
-            using (var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream("Leaf.Views." + name + ".xaml")) {
-                var window = (Window)XamlReader.Load(stream);
-                // The theme's Window style names the paper face with a StaticResource, which is
-                // resolved once while the theme is parsed and never follows a later change. A
-                // window opened after the user picked another face would keep the embedded
-                // default, so every freshly loaded window takes the family the shell is using
-                // now. ApplyPaperFont covers windows already open; this covers the history and
-                // settings windows opened afterwards from the tray.
-                window.FontFamily = (FontFamily)Application.Current.Resources["PaperFontFamily"];
-                using (var icon = Assembly.GetExecutingAssembly().GetManifestResourceStream("Leaf.Assets.Leaf.ico"))
-                    window.Icon = BitmapFrame.Create(icon, BitmapCreateOptions.PreservePixelFormat, BitmapCacheOption.OnLoad);
-                double limit = SystemParameters.WorkArea.Height - 70;
-                window.Height = Math.Max(window.MinHeight, Math.Min(window.Height, limit));
-                return window;
-            }
-        }
-        // Panel fragments load separately: each XamlReader root owns its own NameScope,
-        // so lookups inside a panel must use the panel, not the hosting Window.
-        public static FrameworkElement LoadPanel(string name)
-        {
-            using (var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream("Leaf.Views." + name + ".xaml"))
-                return (FrameworkElement)XamlReader.Load(stream);
-        }
-        public static T Get<T>(Window window, string name) where T : class { return (T)window.FindName(name); }
-        public static T Get<T>(FrameworkElement scope, string name) where T : class { return (T)scope.FindName(name); }
-        public static void Visible(UIElement control, bool visible) { control.Visibility = visible ? Visibility.Visible : Visibility.Collapsed; }
-        public static Brush Brush(string resource) { return (Brush)Application.Current.Resources[resource]; }
-        public static void Click(Window window, string name, Action action) { Get<Button>(window, name).Click += (s, e) => action(); }
-        public static void Click(FrameworkElement scope, string name, Action action) { Get<Button>(scope, name).Click += (s, e) => action(); }
-        public static void Render(Window window, string path) { Render(window, path, 96); }
-        // Layout stays in device-independent units; only the output pixels follow the DPI.
-        public static void Render(Window window, string path, double dpi)
-        {
-            if (dpi <= 0 || double.IsNaN(dpi) || double.IsInfinity(dpi)) throw new ArgumentOutOfRangeException("dpi");
-            var element = (FrameworkElement)window.Content;
-            element.Measure(new Size(window.Width, window.Height)); element.Arrange(new Rect(0, 0, window.Width, window.Height)); element.UpdateLayout();
-            var image = new RenderTargetBitmap((int)Math.Ceiling(window.Width * dpi / 96), (int)Math.Ceiling(window.Height * dpi / 96), dpi, dpi, PixelFormats.Pbgra32);
-            var background = new DrawingVisual();
-            using (var drawing = background.RenderOpen()) drawing.DrawRectangle(window.Background, null, new Rect(0, 0, window.Width, window.Height));
-            image.Render(background);
-            image.Render(element); var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(image));
-            using (var output = File.Create(path)) encoder.Save(output);
-        }
-
-        // ---- The paper's typeface ----------------------------------------------------
-        // The embedded Source Han Sans SC pack family is the default and the fallback. A
-        // settings value names an installed text font; when that name resolves to a real
-        // face the reading page switches to it, otherwise the embedded default is kept and
-        // the caller is told so it can offer a light, non-blocking notice.
-        private static FontFamily embeddedPaperFont;
-        public static FontFamily EmbeddedPaperFont
-        {
-            get {
-                if (embeddedPaperFont == null) embeddedPaperFont = (FontFamily)Application.Current.Resources["PaperFontFamily"];
-                return embeddedPaperFont;
-            }
-        }
-        // The installed families a user may pick as a text font, sorted, with the icon and
-        // symbol-only faces left out so a choice never turns the reading page into glyph boxes.
-        private static readonly HashSet<string> SymbolFamilies = new HashSet<string>(StringComparer.OrdinalIgnoreCase) {
-            "Segoe MDL2 Assets", "Segoe Fluent Icons", "Segoe UI Symbol", "Symbol", "Marlett",
-            "Webdings", "Wingdings", "Wingdings 2", "Wingdings 3", "Bookshelf Symbol 7"
-        };
-        public static List<string> InstalledTextFonts()
-        {
-            var names = new List<string>();
-            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var family in Fonts.SystemFontFamilies) {
-                string name = family.Source;
-                if (string.IsNullOrWhiteSpace(name)) continue;
-                if (name.StartsWith("Global ", StringComparison.OrdinalIgnoreCase)) continue;
-                if (SymbolFamilies.Contains(name)) continue;
-                if (seen.Add(name)) names.Add(name);
-            }
-            names.Sort(StringComparer.CurrentCultureIgnoreCase);
-            return names;
-        }
-        // Applies a stored font choice everywhere at once. A window's FontFamily cascades to
-        // its chrome and text, but a FlowDocument carries its own face, so every open document
-        // is written too: switching the resource alone would leave documents built earlier on
-        // the old face.
-        public static void ApplyPaperFont(string name, out bool missing)
-        {
-            missing = false;
-            FontFamily family = EmbeddedPaperFont;
-            if (!string.IsNullOrWhiteSpace(name)) {
-                var candidate = new FontFamily(name);
-                if (HasTextFace(candidate)) family = candidate; else missing = true;
-            }
-            Application.Current.Resources["PaperFontFamily"] = family;
-            foreach (Window window in Application.Current.Windows) {
-                window.FontFamily = family;
-                ApplyPaperFontToTree(window, family, new HashSet<DependencyObject>());
-            }
-        }
-        private static bool HasTextFace(FontFamily family)
-        {
-            try {
-                foreach (var typeface in family.GetTypefaces()) {
-                    GlyphTypeface glyph;
-                    if (typeface.TryGetGlyphTypeface(out glyph) && glyph.CharacterToGlyphMap.ContainsKey('A')) return true;
-                }
-            } catch { }
-            return false;
-        }
-        // Documents carry their own face, so every open RichTextBox's flow is written directly.
-        // Both trees are walked because a document hosted inside a not-yet-template-applied
-        // panel is reachable through the logical tree but not yet through the visual one.
-        private static void ApplyPaperFontToTree(DependencyObject node, FontFamily family, HashSet<DependencyObject> seen)
-        {
-            if (node == null || !seen.Add(node)) return;
-            var rich = node as RichTextBox;
-            if (rich != null && rich.Document != null) rich.Document.FontFamily = family;
-            if (node is Visual) {
-                int count = VisualTreeHelper.GetChildrenCount(node);
-                for (int i = 0; i < count; i++) ApplyPaperFontToTree(VisualTreeHelper.GetChild(node, i), family, seen);
-            }
-            foreach (object child in LogicalTreeHelper.GetChildren(node)) {
-                var dependency = child as DependencyObject;
-                if (dependency != null) ApplyPaperFontToTree(dependency, family, seen);
-            }
-        }
-    }
-
-    // Tray-window chrome. All settings logic lives in SettingsController so the same
-    // panel can be hosted inside the popup shell without duplicating behavior.
-    public sealed class SettingsWindow
-    {
-        private readonly AppShell shell;
-        private readonly SettingsController controller;
-        private bool allowClose;
-        public Window Window { get; private set; }
-        public FrameworkElement Panel { get; private set; }
-
-        public SettingsWindow(AppShell owner)
-        {
-            shell = owner;
-            Window = Ui.Load("Settings");
-            Panel = Ui.LoadPanel("SettingsPanel");
-            Ui.Get<ContentControl>(Window, "PanelHost").Content = Panel;
-            controller = new SettingsController(owner, Panel, () => Window.IsVisible);
-            owner.TrackSettingsWindow(this);
-            Ui.Click(Window, "CloseSettingsButton", () => Window.Close());
-            Window.Deactivated += (s, e) => controller.OnHostDeactivated();
-            Window.Closing += async (s, e) => {
-                if (allowClose) return;
-                e.Cancel = true;
-                controller.OnHostDeactivated();
-                if (!await controller.FlushPendingAsync()) return;
-                try { await shell.WaitForSettingsAsync(); }
-                catch (Exception error) {
-                    shell.Log.Event("settings_close_flush_failed", error);
-                    controller.ReportStatus(error is UserError ? error.Message : "保存未完成，设置窗口保持打开。", true);
-                    return;
-                }
-                allowClose = true;
-                Window.Close();
-            };
-            Window.Closed += (s, e) => { controller.Detach(); owner.UntrackSettingsWindow(this); };
-        }
-        // Used by a flushed exit: the timers are already stopped, so closing must not run
-        // the normal flush again or start a task that needs the dispatcher.
-        public void CloseForExit()
-        {
-            controller.Detach();
-            allowClose = true;
-            Window.Close();
-        }
-        public Task<bool> FlushPendingAsync() { return controller.FlushPendingAsync(); }
-    }
-
     public sealed class SettingsController
     {
         private readonly AppShell shell;
@@ -203,6 +23,7 @@ namespace Leaf
         private readonly FrameworkElement scope;
         private Settings original;
         private readonly Settings draft;
+        private readonly LearningPreferencesPresenter preferences;
         private ProviderProfile active;
         private bool loading;
         private readonly Dictionary<string, string> pendingKeys = new Dictionary<string, string>();
@@ -223,12 +44,6 @@ namespace Leaf
         private EventHandler modelTextChanged;
         private string unassignedKey;
         private Dictionary<string, string> modelOwners = new Dictionary<string, string>();
-        private string detailScene;
-        // Selecting a preset writes the picker's value into the custom field; typing into the
-        // custom field switches the picker to 自定义. This flag keeps the two writes from
-        // chasing each other while the controller is populating or normalizing the pair.
-        private bool fillingTarget;
-        private readonly List<FontEntry> fontEntries = new List<FontEntry>();
         private readonly DispatcherTimer preferenceDebounce = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(400) };
         private readonly DispatcherTimer modelApplyDebounce = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
         // A clicked "apply service configuration" is one attempt with two commits (preferences,
@@ -241,15 +56,6 @@ namespace Leaf
             public Task<bool> Completion;
         }
 
-        // One choice in the font picker: the embedded default carries an empty value, an
-        // installed text font carries its family name. ToString is what the combo paints.
-        private sealed class FontEntry
-        {
-            public string Value;
-            public string Label;
-            public override string ToString() { return Label; }
-        }
-
         public SettingsController(AppShell owner, FrameworkElement panel, Func<bool> isHostVisible)
         {
             shell = owner; scope = panel; hostVisible = isHostVisible;
@@ -257,24 +63,7 @@ namespace Leaf
             loading = true;
             Ui.Get<ComboBox>(scope, "ProviderCombo").ItemsSource = draft.Providers;
             Ui.Get<ComboBox>(scope, "ProviderCombo").SelectionChanged += ProviderChanged;
-            Ui.Get<ComboBox>(scope, "SceneCombo").ItemsSource = new[] { "通用", "书籍", "影视", "技术文档", "游戏", "自定义" };
-            Ui.Get<ComboBox>(scope, "SceneCombo").SelectionChanged += (s, e) => {
-                if (!loading) {
-                    if (!string.IsNullOrEmpty(detailScene) && detailScene != "通用") draft.SceneDetails[detailScene] = Ui.Get<TextBox>(scope, "SceneDetailInput").Text;
-                    detailScene = Convert.ToString(Ui.Get<ComboBox>(scope, "SceneCombo").SelectedItem);
-                    string remembered; draft.SceneDetails.TryGetValue(detailScene, out remembered);
-                    loading = true; Ui.Get<TextBox>(scope, "SceneDetailInput").Text = remembered ?? ""; loading = false;
-                    SchedulePreferences();
-                }
-                SceneFields();
-            };
-            Ui.Get<ComboBox>(scope, "TargetLanguageCombo").ItemsSource = TargetLanguageChoices();
-            Ui.Get<ComboBox>(scope, "TargetLanguageCombo").SelectionChanged += (s, e) => { if (!loading) TargetLanguageChanged(); };
-            Ui.Get<ComboBox>(scope, "GameTypeCombo").ItemsSource = new[] { "自动判断", "角色对话", "物品与技能", "任务与剧情" };
-            Ui.Get<ComboBox>(scope, "StyleCombo").ItemsSource = new[] { "自然准确", "尽量直译", "简洁口语" };
-            BuildFontEntries();
-            Ui.Get<ComboBox>(scope, "FontCombo").ItemsSource = fontEntries;
-            Ui.Get<ComboBox>(scope, "FontCombo").SelectionChanged += (s, e) => { if (!loading) FontChanged(); };
+            preferences = new LearningPreferencesPresenter(scope, draft, () => loading, SchedulePreferences, Status);
             modelDebounce.Tick += async (s, e) => { modelDebounce.Stop(); if (shell.IsExiting) return; await FetchModels(false); };
             Ui.Get<TextBox>(scope, "EndpointInput").TextChanged += (s, e) => {
                 if (loading || fillingProvider || closed) return;
@@ -320,7 +109,7 @@ namespace Leaf
             if (configured) Ui.Get<ComboBox>(scope, "ProviderCombo").SelectedItem = draft.Provider;
             Ui.Visible(Ui.Get<TextBlock>(scope, "ProviderPlaceholder"), !configured);
             Ui.Get<ComboBox>(scope, "ModelInput").IsEnabled = configured;
-            PopulatePreferences();
+            preferences.PopulatePreferences();
             Ui.Get<CheckBox>(scope, "ClipboardModeCheck").IsChecked = draft.ClipboardMode;
             Ui.Get<CheckBox>(scope, "FocusInputCheck").IsChecked = draft.FocusInputOnShortcut;
             Ui.Get<TextBox>(scope, "ShortcutInput").Text = draft.Shortcut;
@@ -345,16 +134,8 @@ namespace Leaf
             Ui.Get<CheckBox>(scope, "AutoStartCheck").IsChecked = draft.AutoStart;
             Ui.Get<CheckBox>(scope, "HistoryCheck").IsChecked = draft.HistoryEnabled;
             Ui.Get<TextBox>(scope, "HistoryLimitInput").Text = draft.HistoryLimit.ToString();
-            DrawPresets(); loading = false; SceneFields(); KeyHint();
+            preferences.DrawPresets(); loading = false; preferences.SceneFields(); KeyHint();
             Ui.Get<TextBlock>(scope, "VersionLabel").Text = "Leaf " + LeafVersion.SemVer;
-            Ui.Get<ComboBox>(scope, "PresetCombo").SelectionChanged += (s, e) => PresetStateChanged();
-            Ui.Click(scope, "AddCustom", AddCustom);
-            Ui.Click(scope, "SavePreset", SavePreset);
-            Ui.Click(scope, "LoadPreset", LoadPreset);
-            Ui.Click(scope, "RemovePreset", () => {
-                var preset = Ui.Get<ComboBox>(scope, "PresetCombo").SelectedItem as LearningPreset;
-                if (preset != null) { draft.Presets.Remove(preset); DrawPresets(); SchedulePreferences(); }
-            });
             Ui.Click(scope, "DeleteKey", () => {
                 if (active == null) return;
                 serviceRevision++;
@@ -369,16 +150,6 @@ namespace Leaf
             modelApplyDebounce.Tick += async (s, e) => { modelApplyDebounce.Stop(); await AutoApplyModelAsync(); };
             foreach (string name in new[] { "TargetInput", "SceneDetailInput", "HistoryLimitInput" })
                 Ui.Get<TextBox>(scope, name).TextChanged += (s, e) => SchedulePreferences();
-            // Typing a value is choosing the custom target language; the picker follows so the
-            // pair never disagrees about what is really selected.
-            Ui.Get<TextBox>(scope, "TargetInput").TextChanged += (s, e) => {
-                if (loading || fillingTarget) return;
-                var combo = Ui.Get<ComboBox>(scope, "TargetLanguageCombo");
-                if (Convert.ToString(combo.SelectedItem) != TargetLanguages.Custom) {
-                    fillingTarget = true; combo.SelectedItem = TargetLanguages.Custom; fillingTarget = false;
-                }
-                Ui.Visible(Ui.Get<Grid>(scope, "TargetCustomPanel"), true);
-            };
             foreach (string name in new[] { "GameTypeCombo", "StyleCombo" })
                 Ui.Get<ComboBox>(scope, name).SelectionChanged += (s, e) => SchedulePreferences();
             foreach (string name in new[] { "ClipboardModeCheck", "FocusInputCheck", "AutoStartCheck", "HistoryCheck" }) {
@@ -512,164 +283,7 @@ namespace Leaf
             Ui.Get<TextBlock>(scope, "KeyHint").Text = hint;
             System.Windows.Automation.AutomationProperties.SetHelpText(input, hint);
         }
-        private void PopulatePreferences()
-        {
-            loading = true;
-            PopulateTarget(draft.TargetLanguage);
-            PopulateFont(draft.FontFamilyName);
-            Ui.Get<ComboBox>(scope, "SceneCombo").SelectedItem = draft.Scene;
-            detailScene = draft.Scene;
-            Ui.Get<TextBox>(scope, "SceneDetailInput").Text = draft.SceneDetail ?? "";
-            if (draft.Scene != "通用") draft.SceneDetails[draft.Scene] = draft.SceneDetail ?? "";
-            Ui.Get<ComboBox>(scope, "GameTypeCombo").SelectedItem = draft.GameTextType ?? "自动判断";
-            Ui.Get<ComboBox>(scope, "StyleCombo").SelectedItem = draft.Style;
-            DrawLearning(); loading = false; SceneFields();
-        }
-        private static string[] TargetLanguageChoices()
-        {
-            var choices = new string[TargetLanguages.Common.Length + 1];
-            Array.Copy(TargetLanguages.Common, choices, TargetLanguages.Common.Length);
-            choices[TargetLanguages.Common.Length] = TargetLanguages.Custom;
-            return choices;
-        }
-        // A stored value that is not one of the common languages is the user's own custom one:
-        // the picker selects 自定义 and the conditional field carries the exact text, so an old
-        // free-form target survives untouched.
-        private void PopulateTarget(string value)
-        {
-            bool preset = Array.IndexOf(TargetLanguages.Common, value) >= 0;
-            fillingTarget = true;
-            Ui.Get<ComboBox>(scope, "TargetLanguageCombo").SelectedItem = preset ? value : TargetLanguages.Custom;
-            Ui.Get<TextBox>(scope, "TargetInput").Text = value ?? "";
-            fillingTarget = false;
-            Ui.Visible(Ui.Get<Grid>(scope, "TargetCustomPanel"), !preset);
-        }
-        private void TargetLanguageChanged()
-        {
-            string selected = Convert.ToString(Ui.Get<ComboBox>(scope, "TargetLanguageCombo").SelectedItem);
-            bool custom = selected == TargetLanguages.Custom;
-            Ui.Visible(Ui.Get<Grid>(scope, "TargetCustomPanel"), custom);
-            if (!custom) {
-                fillingTarget = true; Ui.Get<TextBox>(scope, "TargetInput").Text = selected; fillingTarget = false;
-            }
-            SchedulePreferences();
-        }
-        private void BuildFontEntries()
-        {
-            fontEntries.Clear();
-            fontEntries.Add(new FontEntry { Value = "", Label = "思源黑体 SC（内置）" });
-            foreach (string name in Ui.InstalledTextFonts()) fontEntries.Add(new FontEntry { Value = name, Label = name });
-        }
-        // A stored name that is no longer installed falls back to the embedded default and says
-        // so without blocking; the next real pick overwrites the stale value.
-        private void PopulateFont(string value)
-        {
-            FontEntry match = null;
-            foreach (var entry in fontEntries) if (entry.Value == (value ?? "")) { match = entry; break; }
-            Ui.Get<ComboBox>(scope, "FontCombo").SelectedItem = match ?? (fontEntries.Count > 0 ? fontEntries[0] : null);
-            if (match == null && !string.IsNullOrWhiteSpace(value))
-                Status("未找到字体「" + value + "」，已使用内置思源黑体 SC。", false);
-        }
-        private void FontChanged()
-        {
-            var entry = Ui.Get<ComboBox>(scope, "FontCombo").SelectedItem as FontEntry;
-            if (entry == null) return;
-            bool missing;
-            Ui.ApplyPaperFont(entry.Value, out missing);
-            if (missing) Status("未找到字体「" + entry.Value + "」，已使用内置思源黑体 SC。", false);
-            SchedulePreferences();
-        }
-        private void SceneFields()
-        {
-            string scene = Convert.ToString(Ui.Get<ComboBox>(scope, "SceneCombo").SelectedItem);
-            Ui.Visible(Ui.Get<StackPanel>(scope, "SceneDetailPanel"), scene != "通用" && scene.Length > 0);
-            Ui.Visible(Ui.Get<StackPanel>(scope, "GameTypePanel"), scene == "游戏");
-            Ui.Get<TextBlock>(scope, "SceneDetailLabel").Text =
-                scene == "游戏" ? "游戏名称（选填）" : scene == "书籍" ? "书名（选填）" :
-                scene == "影视" ? "影视名称（选填）" : scene == "技术文档" ? "技术领域（选填）" : "当前语境（选填）";
-        }
-        private void DrawLearning()
-        {
-            var panel = Ui.Get<WrapPanel>(scope, "LearningChoices"); panel.Children.Clear();
-            foreach (var option in draft.Learning) {
-                var captured = option;
-                var check = new CheckBox { Content = option.Name, IsChecked = option.Enabled, ToolTip = option.Instruction };
-                check.Checked += (s, e) => { captured.Enabled = true; SchedulePreferences(); };
-                check.Unchecked += (s, e) => { captured.Enabled = false; SchedulePreferences(); };
-                if (option.Custom) {
-                    var group = new StackPanel { Orientation = Orientation.Horizontal };
-                    check.Margin = new Thickness(0, 0, 2, 12); group.Children.Add(check);
-                    var remove = new Button { Content = "×", Style = (Style)Application.Current.Resources["GhostButton"], Margin = new Thickness(0, -4, 15, 8), ToolTip = "删除此学习项" };
-                    remove.Click += (s, e) => { draft.Learning.Remove(captured); DrawLearning(); SchedulePreferences(); };
-                    group.Children.Add(remove); panel.Children.Add(group);
-                } else panel.Children.Add(check);
-            }
-        }
-        private void AddCustom()
-        {
-            string name = Ui.Get<TextBox>(scope, "CustomNameInput").Text.Trim();
-            string instruction = Ui.Get<TextBox>(scope, "CustomInstructionInput").Text.Trim();
-            if (name.Length == 0 || instruction.Length == 0) { Status("请填写名称和讲解方式。", true); return; }
-            if (draft.Learning.Count >= 15) { Status("最多保留 15 个学习选项。", true); return; }
-            if (draft.Learning.Any(x => x.Name.Equals(name, StringComparison.OrdinalIgnoreCase))) { Status("这个选项名称已经存在。", true); return; }
-            draft.Learning.Add(new LearningOption { Id = Guid.NewGuid().ToString("N"), Name = name, Instruction = instruction, Enabled = true, Custom = true });
-            DrawLearning(); Ui.Get<TextBox>(scope, "CustomNameInput").Clear(); Ui.Get<TextBox>(scope, "CustomInstructionInput").Clear();
-            SchedulePreferences();
-        }
-        private void CapturePreferences()
-        {
-            string target = Convert.ToString(Ui.Get<ComboBox>(scope, "TargetLanguageCombo").SelectedItem);
-            draft.TargetLanguage = target == TargetLanguages.Custom ? Ui.Get<TextBox>(scope, "TargetInput").Text.Trim() : target;
-            var font = Ui.Get<ComboBox>(scope, "FontCombo").SelectedItem as FontEntry;
-            draft.FontFamilyName = font == null ? "" : font.Value;
-            draft.Scene = Convert.ToString(Ui.Get<ComboBox>(scope, "SceneCombo").SelectedItem);
-            draft.SceneDetail = draft.Scene == "通用" ? "" : Ui.Get<TextBox>(scope, "SceneDetailInput").Text.Trim();
-            if (draft.Scene != "通用") draft.SceneDetails[draft.Scene] = draft.SceneDetail;
-            draft.GameTextType = Convert.ToString(Ui.Get<ComboBox>(scope, "GameTypeCombo").SelectedItem);
-            draft.Style = Convert.ToString(Ui.Get<ComboBox>(scope, "StyleCombo").SelectedItem);
-        }
-        private void DrawPresets()
-        {
-            var combo = Ui.Get<ComboBox>(scope, "PresetCombo");
-            combo.ItemsSource = null;
-            combo.ItemsSource = draft.Presets;
-            if (draft.Presets.Count > 0) combo.SelectedIndex = 0;
-            PresetStateChanged();
-        }
-        // Empty list: disable the dropdown and its actions and let the placeholder carry
-        // the message; with presets present the placeholder only covers a missing selection.
-        private void PresetStateChanged()
-        {
-            var combo = Ui.Get<ComboBox>(scope, "PresetCombo");
-            bool selected = combo.SelectedItem as LearningPreset != null;
-            var placeholder = Ui.Get<TextBlock>(scope, "PresetPlaceholder");
-            placeholder.Text = draft.Presets.Count == 0 ? "暂无偏好预设" : "未选择预设";
-            Ui.Visible(placeholder, !selected);
-            combo.IsEnabled = draft.Presets.Count > 0;
-            Ui.Get<Button>(scope, "LoadPreset").IsEnabled = selected;
-            Ui.Get<Button>(scope, "RemovePreset").IsEnabled = selected;
-        }
-        private void SavePreset()
-        {
-            string name = Ui.Get<TextBox>(scope, "PresetNameInput").Text.Trim();
-            if (name.Length == 0) { Status("给这组偏好起个名称。", true); return; }
-            CapturePreferences();
-            draft.Presets.RemoveAll(p => p.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
-            if (draft.Presets.Count >= 10) { Status("最多保存 10 组偏好预设。", true); return; }
-            draft.Presets.Add(new LearningPreset {
-                Name = name, TargetLanguage = draft.TargetLanguage, Scene = draft.Scene, SceneDetail = draft.SceneDetail,
-                GameTextType = draft.GameTextType, Style = draft.Style, Learning = Json.Copy(draft.Learning)
-            });
-            DrawPresets(); SchedulePreferences();
-        }
-        private void LoadPreset()
-        {
-            var preset = Ui.Get<ComboBox>(scope, "PresetCombo").SelectedItem as LearningPreset;
-            if (preset == null) return;
-            draft.TargetLanguage = preset.TargetLanguage; draft.Scene = preset.Scene; draft.SceneDetail = preset.SceneDetail;
-            draft.GameTextType = preset.GameTextType; draft.Style = preset.Style; draft.Learning = Json.Copy(preset.Learning);
-            PopulatePreferences(); SchedulePreferences();
-        }
+
         public void ReportStatus(string text, bool error) { Status(text, error); }
         private void Status(string text, bool error)
         {
@@ -678,7 +292,7 @@ namespace Leaf
         }
         private void SchedulePreferences()
         {
-            if (loading || closed || recordingShortcut || shell.IsExiting) return;
+            if (loading || preferences.IsLoading || closed || recordingShortcut || shell.IsExiting) return;
             Status("正在应用…", false); preferenceDebounce.Stop(); preferenceDebounce.Start();
         }
         // Stops debounced patches and applies the latest draft; used by Closing and ExitAsync.
@@ -702,7 +316,7 @@ namespace Leaf
         {
             long version = ++preferenceApplySequence;
             try {
-                CapturePreferences();
+                preferences.CapturePreferences();
                 if (string.IsNullOrWhiteSpace(draft.TargetLanguage)) throw new UserError("target", "目标语言不能为空，尚未应用。" );
                 int limit;
                 if (!int.TryParse(Ui.Get<TextBox>(scope, "HistoryLimitInput").Text, out limit) || limit < 20 || limit > 1000)
@@ -904,58 +518,6 @@ namespace Leaf
                 return true;
             } catch (Exception error) { shell.Log.Event("settings_save_failed", error); Status(error is UserError ? error.Message : "保存失败，请检查配置后重试。", true); return false; }
             finally { button.IsEnabled = true; }
-        }
-    }
-
-    public sealed class HistoryWindow
-    {
-        private readonly AppShell shell;
-        public Window Window { get; private set; }
-        public HistoryWindow(AppShell owner)
-        {
-            shell = owner; Window = Ui.Load("History");
-            Ui.Get<TextBox>(Window, "HistorySearch").TextChanged += (s, e) => Refresh();
-            Ui.Get<ListBox>(Window, "HistoryList").MouseDoubleClick += (s, e) => Open();
-            Ui.Click(Window, "OpenHistory", Open);
-            Ui.Click(Window, "DeleteHistory", DeleteSelectedAsync);
-            Ui.Click(Window, "ClearHistory", ClearAllAsync);
-            Refresh();
-        }
-        private async void DeleteSelectedAsync()
-        {
-            var record = Ui.Get<ListBox>(Window, "HistoryList").SelectedItem as TranslationRecord;
-            if (record == null) return;
-            try {
-                await shell.Store.DeleteAsync(record.Id);
-                shell.Forget(record.Id); Refresh();
-            } catch (Exception error) {
-                MessageBox.Show(Window, error is UserError ? error.Message : "无法更新本地历史。", "Leaf");
-            }
-        }
-        private async void ClearAllAsync()
-        {
-            if (MessageBox.Show(Window, "清空全部本地历史？", "Leaf", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
-            try {
-                await shell.Store.ClearAsync();
-                shell.Forget(null); Refresh();
-            } catch (Exception error) {
-                MessageBox.Show(Window, error is UserError ? error.Message : "无法更新本地历史。", "Leaf");
-            }
-        }
-        public void Refresh()
-        {
-            var items = shell.Store.History(Ui.Get<TextBox>(Window, "HistorySearch").Text);
-            Ui.Get<ListBox>(Window, "HistoryList").ItemsSource = items;
-            if (items.Count > 0) Ui.Get<ListBox>(Window, "HistoryList").SelectedIndex = 0;
-            Ui.Get<TextBlock>(Window, "HistoryCount").Text = "最近 " + items.Count + " 条";
-            Ui.Visible(Ui.Get<TextBlock>(Window, "HistoryEmpty"), items.Count == 0);
-            Ui.Get<Button>(Window, "OpenHistory").IsEnabled = items.Count > 0;
-            Ui.Get<Button>(Window, "DeleteHistory").IsEnabled = items.Count > 0;
-        }
-        private void Open()
-        {
-            var record = Ui.Get<ListBox>(Window, "HistoryList").SelectedItem as TranslationRecord;
-            if (record != null) { shell.OpenRecord(record); Window.Close(); }
         }
     }
 }

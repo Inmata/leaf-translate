@@ -1,6 +1,9 @@
 ---
 code:
-  - src/Leaf/Popup.cs
+  - src/Leaf/UI/Popup/PopupPresenter.cs
+  - src/Leaf/UI/Learning/LearningRenderer.cs
+  - src/Leaf/UI/Source/SourceInteraction.cs
+  - src/Leaf/Application/LearningCoordinator.cs
   - src/Leaf/Models/WordCard.cs
   - src/Leaf/Models/TextRange.cs
   - src/Leaf/Models/TranslationRecord.cs
