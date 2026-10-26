@@ -16,7 +16,7 @@ using System.Windows.Threading;
 
 namespace Leaf
 {
-    public sealed class SettingsController
+    public sealed class SettingsPresenter
     {
         private readonly AppShell shell;
         private readonly Func<bool> hostVisible;
@@ -56,7 +56,7 @@ namespace Leaf
             public Task<bool> Completion;
         }
 
-        public SettingsController(AppShell owner, FrameworkElement panel, Func<bool> isHostVisible)
+        public SettingsPresenter(AppShell owner, FrameworkElement panel, Func<bool> isHostVisible)
         {
             shell = owner; scope = panel; hostVisible = isHostVisible;
             original = Json.Copy(shell.Store.Settings); draft = Json.Copy(original);

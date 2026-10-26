@@ -19,7 +19,7 @@ namespace Leaf
         internal void OnHostDeactivated() { if (settingsController != null) settingsController.OnHostDeactivated(); }
 
         internal FrameworkElement settingsPanel;
-        internal SettingsController settingsController;
+        internal SettingsPresenter settingsController;
         // One page is left once. The back button, the window close and an exit entry can all
         // ask while the first attempt is still flushing, so the running attempt is shared for
         // the exact page instance it was started for.
@@ -27,7 +27,7 @@ namespace Leaf
 
         internal sealed class LeaveAttempt
         {
-            public SettingsController Controller;
+            public SettingsPresenter Controller;
             public Task<bool> Completion;
         }
 
@@ -61,7 +61,7 @@ namespace Leaf
             if (shell.IsExiting || IsSettingsPageOpen) return;
             // Entering settings never cancels the current translation or touches the session.
             settingsPanel = Ui.LoadPanel("SettingsPanel");
-            settingsController = new SettingsController(shell, settingsPanel, () => Popup.IsVisible);
+            settingsController = new SettingsPresenter(shell, settingsPanel, () => Popup.IsVisible);
             Ui.Get<ContentControl>(Popup, "SettingsPageHost").Content = settingsPanel;
             var body = Ui.Get<ScrollViewer>(Popup, "BodyScroll");
             bodyScrollBackup = body.VerticalOffset;
@@ -97,7 +97,7 @@ namespace Leaf
             finally { if (ReferenceEquals(leaveAttempt, attempt)) leaveAttempt = null; }
         }
 
-        internal async Task<bool> LeavePageAsync(SettingsController controller)
+        internal async Task<bool> LeavePageAsync(SettingsPresenter controller)
         {
             controller.OnHostDeactivated();
             if (!await controller.FlushPendingAsync()) return false;

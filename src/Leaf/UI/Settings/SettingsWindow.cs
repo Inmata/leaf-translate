@@ -16,12 +16,12 @@ using System.Windows.Threading;
 
 namespace Leaf
 {
-    // Tray-window chrome. All settings logic lives in SettingsController so the same
+    // Tray-window chrome. All settings logic lives in SettingsPresenter so the same
     // panel can be hosted inside the popup shell without duplicating behavior.
     public sealed class SettingsWindow
     {
         private readonly AppShell shell;
-        private readonly SettingsController controller;
+        private readonly SettingsPresenter controller;
         private bool allowClose;
         public Window Window { get; private set; }
         public FrameworkElement Panel { get; private set; }
@@ -32,7 +32,7 @@ namespace Leaf
             Window = Ui.Load("Settings");
             Panel = Ui.LoadPanel("SettingsPanel");
             Ui.Get<ContentControl>(Window, "PanelHost").Content = Panel;
-            controller = new SettingsController(owner, Panel, () => Window.IsVisible);
+            controller = new SettingsPresenter(owner, Panel, () => Window.IsVisible);
             owner.TrackSettingsWindow(this);
             Ui.Click(Window, "CloseSettingsButton", () => Window.Close());
             Window.Deactivated += (s, e) => controller.OnHostDeactivated();
